@@ -484,9 +484,22 @@ export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
 // The enable/disable decision
 // ---------------------------------------------------------------------------
 
+/**
+ * The TinyHumans console (`opencompany-frontend`) project's DSN, used by a
+ * production bundle built without `VITE_SENTRY_DSN`. A browser DSN is public by
+ * construction; it authorizes writes to this one project only. Build with
+ * `VITE_SENTRY_DSN=off` for a bundle that reports nothing.
+ */
+export const DEFAULT_CONSOLE_SENTRY_DSN =
+  "https://ee905504c09005339f499082282ce189@sentry.tinyhumans.ai/13";
+
 /** The build-time variables this surface reads. */
 export interface CrashReportingEnv {
-  /** The DSN. Unset, blank or unusable means silence. */
+  /**
+   * The DSN. Unset or blank means {@link DEFAULT_CONSOLE_SENTRY_DSN} in a
+   * production build and silence under the Vite dev server; `off` means
+   * silence; an unusable value means silence.
+   */
   VITE_SENTRY_DSN?: string;
   /** Overrides the `environment` tag. */
   VITE_SENTRY_ENVIRONMENT?: string;
@@ -613,7 +626,11 @@ export function resolveCrashReporting(
   env: CrashReportingEnv,
   release: string,
 ): CrashReportingConfig | null {
-  const dsn = (env.VITE_SENTRY_DSN ?? "").trim();
+  const configured = (env.VITE_SENTRY_DSN ?? "").trim();
+  if (configured.toLowerCase() === "off") return null;
+  // A dev server never falls back: a contributor's `npm run dev` must not
+  // write to the production project on a default nobody chose.
+  const dsn = configured || (env.DEV ? "" : DEFAULT_CONSOLE_SENTRY_DSN);
   if (!dsn || !isUsableDsn(dsn)) return null;
   const environment = (env.VITE_SENTRY_ENVIRONMENT ?? "").trim().toLowerCase();
   const traces = resolveTracesSampleRate(env.VITE_SENTRY_TRACES_SAMPLE_RATE);

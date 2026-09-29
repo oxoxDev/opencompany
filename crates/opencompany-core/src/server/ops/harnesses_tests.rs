@@ -24,6 +24,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> App
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),

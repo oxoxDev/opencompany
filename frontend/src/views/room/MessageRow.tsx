@@ -2,15 +2,14 @@ import { useState } from "react";
 import { FileText, MessageSquareReply, Paperclip, TriangleAlert } from "lucide-react";
 
 import type { TaskStatus } from "@/api/tasks";
-import type { CognitionState, TurnStep } from "@/api/types";
+import type { CognitionState } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
-import { MoveChip } from "@/components/hive/MoveChip";
-import type { EpisodeTurn } from "@/lib/hive/episode";
+import { UtteranceChip } from "@/components/episode/UtteranceChip";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { consoleHref } from "@/lib/console-paths";
-import { artifactHref } from "@/lib/task-output";
+import { artifactPageHref } from "@/lib/task-output";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { turnFailureAction, type TurnFailure } from "@/lib/turn-failure";
@@ -29,32 +28,11 @@ import {
   type TimelineEntry,
 } from "./model";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import {
-  CardChip,
-  ReferralChip,
-  AsideConversation,
-  ReferralConversation,
-  StepTimeline,
-} from "./StepTimeline";
+import { AgentConversation, CardChip, ReferralChip, ReferralConversation } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
-  /**
-   * The live tool rows of a turn answering **this** message, while it runs.
-   *
-   * A settled turn's steps render under its reply, from `message.steps`. Until
-   * the reply exists there is nothing to hang them on, so a running turn's rows
-   * used to go to one per-thread strip at the foot of the channel — which meant
-   * two questions asked at once shared a single timeline, and arming the second
-   * turn cleared the first one's rows.
-   *
-   * Rendered through the same collapsed {@link StepTimeline} the settled steps
-   * use, so a turn looks the same while it runs as it does once it is done.
-   * Absent for a turn whose frames carry no `messageSeq`, which still uses the
-   * thread strip.
-   */
-  liveSteps?: readonly TurnStep[];
   /** True when the thread panel is showing this row's replies. */
   threadOpen: boolean;
   onOpenThread: (messageId: string) => void;
@@ -149,50 +127,11 @@ interface Props {
    */
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
   /**
-   * This row's channel is the read-only Operator feed (issue #1986) — the same
-   * `Boolean(channel.system)` predicate `RoomView` derives `readOnly` from, and
-   * that `MessageTimeline`'s channel intro already reads off the channel
-   * directly.
-   *
-   * The operator's ruling on the question #1986 was opened to settle:
-   * **reactions are not allowed on a read-only feed.** Reacting writes into the
-   * company's transcript exactly as sending does — the host authorizes it
-   * through the very same gate (`chat_actor`, `src/server/operator.rs`, whose
-   * own doc says reacting "can be neither easier nor harder than saying
-   * something") — so a surface that states "there is nothing to reply to here"
-   * must not offer it either. The members pane has been gated on this flag
-   * since #1757 and the composer is removed outright by #1984; the hover
-   * toolbar's quick reactions were the last interactive affordance left.
-   *
-   * What this does **not** do is hide reactions that are already there. A
-   * reaction someone left is content, and this feed is the only record of it —
-   * dropping it would lose information rather than withdraw an offer. Existing
-   * chips still render, with the tooltip saying why they no longer toggle; only
-   * the ability to *add* one goes.
-   *
-   * Absent/false everywhere else, which is every ordinary channel and DM.
+   * Display names by agent id, for the utterance chip's `dm → @name`. Optional:
+   * without it the chip names the id, which is still the truth.
    */
-  readOnly?: boolean;
-  /**
-   * What this line did inside a desk's deliberation, when it was a turn in one.
-   *
-   * Absent for every ordinary reply, which is the whole of the rule: a room's
-   * affordances follow the data, never the channel kind, so a DM and a
-   * single-responder desk are untouched by this.
-   */
-  turn?: EpisodeTurn;
+  agentNames?: Readonly<Record<string, string>>;
 }
-
-/**
- * Why a reaction cannot be added on a read-only channel (issue #1986).
- *
- * A sentence rather than a boolean, for the same reason
- * {@link actionsUnavailableFor} is one: it is the tooltip left on the chips
- * that stay on screen but no longer toggle, and a control that silently stops
- * working reads as a bug.
- */
-const READ_ONLY_REACTION_REASON =
-  "This channel is a read-only feed — reactions cannot be added here.";
 
 /**
  * Whether a card-linked reply still represents background work (#1758).
@@ -262,7 +201,6 @@ function actionsUnavailableFor(message: ChatMessage): string | undefined {
  */
 export function MessageRow({
   entry,
-  liveSteps,
   threadOpen,
   onOpenThread,
   onReact,
@@ -278,24 +216,11 @@ export function MessageRow({
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
-  readOnly,
-  turn,
+  agentNames,
 }: Props) {
   const { message, sender, continuation, replies, isLatestSettlePill } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
-  // Issue #1986. Separate from `actionsUnavailable` on purpose: that one speaks
-  // for the *row* — a line the host has not journaled can be neither replied to
-  // nor reacted to — while read-only speaks for the *channel* and takes only
-  // reacting away. Opening a thread on an Operator report to read the replies
-  // under it stays available; it is `ThreadPanel` that answers what may be
-  // written there (#1757, #1984), and this must not quietly withdraw the way in.
-  //
-  // The row's own reason wins where both apply: "not saved yet" is the more
-  // specific fact, and it is the one that would still be true in a writable
-  // channel.
-  const reactionsUnavailable =
-    actionsUnavailable ?? (readOnly ? READ_ONLY_REACTION_REASON : undefined);
   const taskStatus = message.taskId ? taskStatusByTaskId?.[message.taskId] : undefined;
   const taskWorking = isTaskWorking(taskStatus);
   const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
@@ -366,93 +291,38 @@ export function MessageRow({
             placeholder={echoMarkerFor(message, sender, cognition)}
           />
         )}
-        {turn?.move ? (
-          /*
-           * A deliberation turn renders as its move plus what the member
-           * actually said, rather than as the raw marker line.
-           *
-           * The host journals ONLY the marker line, so `!support #stage ^4
-           * agreed, staging first` is the entire message — and rendered
-           * verbatim it is punctuation an operator has to decode on every row.
-           * The chip carries the grammar and the prose carries the argument.
-           * The citations stay visible as chips because which message grounds a
-           * claim is the substance of the claim.
-           */
-          <div className="flex flex-wrap items-baseline gap-1.5 text-sm leading-6">
-            <MoveChip kind={turn.move.kind} />
-            {turn.move.topic ? (
-              <span className="font-mono text-2xs text-muted-foreground">
-                #{turn.move.topic}
-              </span>
-            ) : null}
-            {turn.move.target !== undefined ? (
-              /*
-               * Who the objection is aimed at. The substance of an objection is
-               * which line it answers — an objection with its target dropped
-               * reads as generic disagreement, and the room's cross-inhibition
-               * becomes invisible.
-               */
-              <span className="font-mono text-2xs text-muted-foreground">
-                &gt;{turn.move.target}
-              </span>
-            ) : null}
-            {turn.move.cites.map((cite) => (
-              <span key={cite} className="font-mono text-2xs text-muted-foreground">
-                ^{cite}
-              </span>
-            ))}
-            <span className="break-words">{turn.move.body}</span>
-          </div>
+        {message.turnFailure ? (
+          // KR-L2-03: the host computed its own exact, actionable X9
+          // sentence for this fail-closed turn — a switched-off or
+          // deleted pin, a broken company default, no model chosen at
+          // all. Rendered verbatim in place of the generic retry text
+          // `message.text` would otherwise carry, with the one action
+          // that actually fixes it.
+          <TurnFailureNotice failure={message.turnFailure} />
         ) : (
-          <>
-            {turn?.demoted ? (
-              /*
-               * A move this seat does not hold. The host records the line with
-               * its marker stripped so it deposits no trace, and showing that is
-               * the difference between a desk whose grammar is wrong and a desk
-               * whose members are unhelpful.
-               */
-              <div className="pb-1">
-                <MoveChip kind={turn.demoted} demoted />
-              </div>
-            ) : null}
-            {message.turnFailure ? (
-              // KR-L2-03: the host computed its own exact, actionable X9
-              // sentence for this fail-closed turn — a switched-off or
-              // deleted pin, a broken company default, no model chosen at
-              // all. Rendered verbatim in place of the generic retry text
-              // `message.text` would otherwise carry, with the one action
-              // that actually fixes it.
-              <TurnFailureNotice failure={message.turnFailure} />
-            ) : (
-              <Markdown
-                mentions={message.mentions}
-                className={cn(
-                  "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
-                  // A line that never left the browser is dimmed, so the
-                  // difference between sent and not-sent is visible in the text
-                  // itself and not only in a note under it (B-099). Muted rather
-                  // than struck through: the words are still the operator's own
-                  // draft, and Retry means they may yet be delivered.
-                  //
-                  // `!== undefined` rather than truthy: an `ApiError` can carry
-                  // an empty `message` when the host's envelope sends
-                  // `error: ""` (`httpError`'s `envelope?.error ?? statusMessage(res)`
-                  // keeps an empty string as-is, since `??` only falls back on
-                  // nullish). A truthy check would silently hide the failed
-                  // styling, the notice, and the Retry control for exactly that
-                  // response (CodeRabbit review).
-                  //
-                  // Only this branch needs it: a deliberation move is a line the
-                  // host journalled, so it reached the server by definition and
-                  // can never carry `sendFailed`.
-                  message.sendFailed !== undefined && "text-muted-foreground",
-                )}
-              >
-                {message.text}
-              </Markdown>
+          <Markdown
+            mentions={message.mentions}
+            className={cn(
+              "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
+              // A line that never left the browser is dimmed, so the
+              // difference between sent and not-sent is visible in the text
+              // itself and not only in a note under it (B-099). Muted rather
+              // than struck through: the words are still the operator's own
+              // draft, and Retry means they may yet be delivered.
+              //
+              // `!== undefined` rather than truthy: an `ApiError` can carry
+              // an empty `message` when the host's envelope sends
+              // `error: ""` (`httpError`'s `envelope?.error ?? statusMessage(res)`
+              // keeps an empty string as-is, since `??` only falls back on
+              // nullish). A truthy check would silently hide the failed
+              // styling, the notice, and the Retry control for exactly that
+              // response (CodeRabbit review).
+              //
+              message.sendFailed !== undefined && "text-muted-foreground",
             )}
-          </>
+          >
+            {message.text}
+          </Markdown>
         )}
         {message.sendFailed !== undefined && (
           <FailedSendNotice
@@ -468,15 +338,9 @@ export function MessageRow({
           />
         )}
 
-        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {/* The running turn this message asked for. Opens by default: unlike a
-            settled turn's steps — which sit behind a count because the answer
-            above them is what the reader came for — there is no answer yet, and
-            these rows are the only account of what is happening. */}
-        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {/* Provenance for a crossing referral: this turn exists because another
             desk asked, and the reader of THIS desk cannot tell otherwise. */}
         {message.referredFrom && (
@@ -490,18 +354,35 @@ export function MessageRow({
             // referral are `company` lines, so that test called every answer
             // an ask. Falling back to "asked" matches a host too old to say.
             direction={message.referredFrom.direction ?? "asked"}
+            agentNames={agentNames}
           />
         )}
         {/* And what actually crossed. The chip says a referral happened; this
             says what was asked and what came back, collapsed so the desk still
             reads as its own conversation. */}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
+          <ReferralConversation
+            crossing={message.referralConversation}
+            rowId={message.id}
+            agentNames={agentNames}
+          />
         )}
-        {message.asideConversation && (
-          <AsideConversation aside={message.asideConversation} />
+        {message.agentConversations?.map((exchange) => (
+          <AgentConversation key={exchange.root} exchange={exchange} agentNames={agentNames} />
+        ))}
+        {/* What this line was inside its episode — its speech act and, for a
+            dm, who it went to. Absent for every ordinary reply, which is what
+            keeps a DM, `#general` and a single-responder desk rendering exactly
+            as they always have: the affordance follows the data, never the
+            channel kind. */}
+        {message.episode && (
+          <UtteranceChip
+            episode={message.episode}
+            audience={message.audience}
+            agentNames={agentNames}
+          />
         )}
-        {message.taskId && (
+        {message.taskId && !cardOnlyCarriesAnArtifact(message) && (
           <div className="flex flex-wrap items-center gap-2">
             <CardChip
               taskId={message.taskId}
@@ -528,7 +409,7 @@ export function MessageRow({
         {chips.length > 0 && (
           <Reactions
             chips={chips}
-            disabledReason={reactionsUnavailable}
+            disabledReason={actionsUnavailable}
             onReact={(e) => onReact(message.id, e)}
           />
         )}
@@ -559,7 +440,6 @@ export function MessageRow({
         onReact={(emoji) => onReact(message.id, emoji)}
         reacted={(emoji) => hasReacted(message.reactions, emoji)}
         disabledReason={actionsUnavailable}
-        offersReactions={!readOnly}
       />
     </article>
   );
@@ -747,6 +627,27 @@ function SystemPill({
 }
 
 /** The reply-level buttons for objects this turn produced. */
+/**
+ * Whether this row's card exists only to carry something it already shows.
+ *
+ * `publish_artifact` inside an episode mints a card, because an
+ * `ArtifactRecord`'s identity is `(task_id, source)` and the store will not
+ * take an artifact without a task (`ports/artifacts.rs`). That card is a
+ * storage requirement, not a piece of work: the deliverable is already on this
+ * row as an `outputs` entry, linking straight to the artifact, so rendering a
+ * second chip sends the reader to a board item whose only content is the thing
+ * they were already looking at.
+ *
+ * A card from `spawn_task` carries no artifact of its own and still renders —
+ * there the card IS the work, and the board is where it belongs.
+ */
+function cardOnlyCarriesAnArtifact(message: ChatMessage): boolean {
+  if (!message.taskId) return false;
+  return (message.outputs ?? []).some(
+    (output) => output.kind === "artifact" && output.taskId === message.taskId,
+  );
+}
+
 export function OutputLinkRow({ outputs }: { outputs: NonNullable<ChatMessage["outputs"]> }) {
   const [expanded, setExpanded] = useState(false);
   const links: {
@@ -768,7 +669,7 @@ export function OutputLinkRow({ outputs }: { outputs: NonNullable<ChatMessage["o
     if (output.taskId !== undefined && output.version !== undefined) {
       links.push({
         key: `${output.kind}:${output.targetId}:${output.version}`,
-        href: artifactHref(output.taskId, output.targetId, output.version),
+        href: artifactPageHref(output.targetId, output.version),
         label: output.title,
         kind: output.kind,
       });
@@ -900,7 +801,6 @@ function ActionBar({
   onReact,
   reacted,
   disabledReason,
-  offersReactions,
 }: {
   onReply: () => void;
   onReact: (emoji: string) => void;
@@ -908,50 +808,29 @@ function ActionBar({
   reacted: (emoji: string) => boolean;
   /** Why both actions are unavailable, shown as the tooltip when they are. */
   disabledReason?: string;
-  /**
-   * Whether this channel accepts a new reaction at all (issue #1986).
-   *
-   * `false` on the read-only Operator feed, and the quick-reaction buttons and
-   * the divider beside them are then **absent**, not disabled — the same answer
-   * #1984 gave the composer, for the same reason. A greyed-out emoji row that
-   * appears on hover is still a claim that reacting is a thing you do here,
-   * offered under a notice saying there is nothing to reply to. This strip is
-   * revealed by CSS alone (`group-hover/message:flex`), so leaving the buttons
-   * in the DOM would leave them reachable by pointer, by keyboard focus and by
-   * a screen reader; removing them is what actually withdraws the offer.
-   *
-   * The reply button stays either way. A thread on an Operator report is still
-   * worth *reading*, and what may be written in one is `ThreadPanel`'s question
-   * (#1757, #1984), already answered there.
-   */
-  offersReactions: boolean;
 }) {
   const disabled = !!disabledReason;
   return (
     <div className="absolute -top-3 right-4 z-10 hidden items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-sm group-hover/message:flex group-focus-within/message:flex">
-      {offersReactions && (
-        <>
-          {QUICK_REACTIONS.map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              disabled={disabled}
-              onClick={() => onReact(emoji)}
-              title={disabledReason}
-              aria-pressed={reacted(emoji)}
-              className={cn(
-                "flex size-7 items-center justify-center rounded-md text-sm transition-colors hover:bg-accent",
-                reacted(emoji) && "bg-primary/10",
-                disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
-              )}
-              aria-label={`React with ${emoji}`}
-            >
-              <span aria-hidden>{emoji}</span>
-            </button>
-          ))}
-          <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
-        </>
-      )}
+      {QUICK_REACTIONS.map((emoji) => (
+        <button
+          key={emoji}
+          type="button"
+          disabled={disabled}
+          onClick={() => onReact(emoji)}
+          title={disabledReason}
+          aria-pressed={reacted(emoji)}
+          className={cn(
+            "flex size-7 items-center justify-center rounded-md text-sm transition-colors hover:bg-accent",
+            reacted(emoji) && "bg-primary/10",
+            disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
+          )}
+          aria-label={`React with ${emoji}`}
+        >
+          <span aria-hidden>{emoji}</span>
+        </button>
+      ))}
+      <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
       <Button
         variant="ghost"
         size="icon"

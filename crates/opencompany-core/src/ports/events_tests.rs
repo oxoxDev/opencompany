@@ -231,6 +231,7 @@ fn chat_kinds_addressed_by_sequence_are_permanent() {
             task_id: None,
             outputs: Vec::new(),
             parent: None,
+            episode: None,
         },
     ] {
         assert_eq!(

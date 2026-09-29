@@ -220,16 +220,20 @@ jobs:
     permissions:
       contents: write
     uses: ./.github/workflows/build-desktop.yml
+    # Each signing name must be passed for the called workflow to see it; the
+    # value here is empty and the called job's `Production` environment
+    # supplies the real one. See build-desktop.yml's `secrets:` note.
     secrets:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
       build_ref: ${{ needs.prepare-build.outputs.build_ref }}
       tag: ${{ needs.prepare-build.outputs.tag }}
@@ -285,7 +289,7 @@ jobs:
           file: deploy/Dockerfile
           push: false
           platforms: linux/amd64
-          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          tags: opencompany:${{ needs.prepare-build.outputs.tag }}
           build-args: |
             FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}

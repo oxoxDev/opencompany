@@ -321,10 +321,26 @@ fn resolve_prompt_files(
 
     for entry in entries {
         let rel = Path::new(entry);
+        // `is_absolute` is not enough on Windows, where it is **false** for a
+        // rootless path like `/etc/passwd`: absoluteness there needs a prefix
+        // (`C:\`, `\\server\share`). So that entry passed this guard and was
+        // joined as `agents//etc/passwd`, which Windows then resolves against
+        // the current drive root — the containment this check exists to enforce,
+        // gone, on the one platform nothing here is exercised on.
+        //
+        // `RootDir` catches the rootless form and `Prefix` the drive/UNC one,
+        // which is the same pair `publish::resolve_in_workspace` already tests
+        // for and in its words "as absolute as it gets". This half was missed
+        // when that one was written.
         let escapes = rel.is_absolute()
-            || rel
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir));
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                )
+            });
         if escapes {
             problems.push(format!(
                 "{label} names `prompt_files` entry `{entry}`, which points outside `{AGENTS_DIR}/` — a prompt document must live beside the agent that uses it."

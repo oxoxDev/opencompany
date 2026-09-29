@@ -38,7 +38,7 @@ import { AnalyticsLens } from "./AnalyticsLens";
 import { AttemptCard } from "./AttemptCard";
 import { WaterfallLens } from "./WaterfallLens";
 import { observatoryHref, readObservatoryHash, writeObservatoryQuery } from "./hash";
-import { byWorkflowRun, runState, spansFromRuns, totals } from "./model";
+import { byWorkflowRun, roundsFromRuns, runState, spansFromRuns, totals } from "./model";
 import { peakConcurrency } from "./waterfall";
 
 /** Refetch cadence while something is still running. */
@@ -194,6 +194,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   }, [reload, anyLive]);
 
   const spans = useMemo(() => spansFromRuns(runs), [runs]);
+  const rounds = useMemo(() => roundsFromRuns(runs), [runs]);
   const summary = useMemo(() => totals(runs, nowMs), [runs, nowMs]);
   const peak = useMemo(() => peakConcurrency(spans, nowMs), [spans, nowMs]);
   const agents = useMemo(
@@ -323,9 +324,17 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
               </dd>
             </span>
             <span>
-              <dt className="inline">peak concurrency</dt>{" "}
-              <dd className="text-foreground inline tabular-nums">{peak}</dd>
+              <dt className="inline">peak</dt>{" "}
+              <dd className="text-foreground inline tabular-nums" data-testid="observatory-peak-stat">
+                {peak} concurrent
+              </dd>
             </span>
+            {rounds.length > 0 && (
+              <span>
+                <dt className="inline">rounds</dt>{" "}
+                <dd className="text-foreground inline tabular-nums">{rounds.length}</dd>
+              </span>
+            )}
             <span>
               <dt className="inline">tokens</dt>{" "}
               <dd className="text-foreground inline tabular-nums">
@@ -341,7 +350,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
           </dl>
 
           <section className="bg-card rounded border p-3">
-            <WaterfallLens spans={spans} nowMs={nowMs} />
+            <WaterfallLens spans={spans} rounds={rounds} nowMs={nowMs} />
           </section>
 
           {agents.length > 1 && (

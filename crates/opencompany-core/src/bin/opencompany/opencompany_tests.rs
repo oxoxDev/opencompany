@@ -25,34 +25,6 @@ fn activation_gate_bypass_disabled_on_zero() {
     assert!(!activation_gate_bypass_enabled(Some("0")));
 }
 
-#[tokio::test]
-async fn openhuman_desktop_dry_run_rejects_passthrough_args() {
-    // The handler validates before the dry-run branch, so `--dry-run`
-    // with passthrough args in Desktop mode reports the same 400 as a
-    // real launch instead of printing a command that could never run.
-    let tmp = std::env::temp_dir().join(format!(
-        "oc-bin-oh-desktop-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let err = run_openhuman(
-        tmp.clone(),
-        ModeArg::Desktop,
-        false,
-        true,
-        vec!["--flag".into()],
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        &err,
-        opencompany::OpenCompanyError::OpenHuman { code: 400, .. }
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
 #[test]
 fn the_home_flag_is_taken_verbatim() {
     // The binary owns no home policy of its own: it delegates to

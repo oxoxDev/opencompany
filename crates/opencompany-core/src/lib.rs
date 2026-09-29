@@ -40,11 +40,13 @@ pub mod globals;
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
-/// Hive-mind desks: a `[[group_chat]]` with two or more members answers an
-/// operator message as a bounded deliberation episode rather than as one
-/// teammate's turn. Ungated — the episode machine is pure and the routing
-/// decision is one the default build makes as readily as the harness one does.
-pub mod hivemind;
+/// Hive desks (plan `hive-desks`): tinyhivemind's completion-driven episodes
+/// hosted over the embedded OpenHuman runtime, and the MCP server through
+/// which the agents speak and reach OpenCompany's own tools. Ungated at the
+/// root because the routing block, the episode wire shapes and the journal
+/// folds are read by the default build (manifest, `ports::types`,
+/// `chat_history`); the modules that drive a runtime are gated inside it.
+pub mod hive;
 /// Turning dropped files and links into memory: extraction, then chunking.
 /// The console's Brain drop zone is the caller; the ports are unchanged.
 pub mod ingest;
@@ -63,7 +65,6 @@ pub mod metering;
 /// Only the bodies that name a `sentry::` type sit behind the
 /// `crash-reporting` feature.
 pub mod observability;
-pub mod openhuman;
 /// PayPal wallet + transaction visibility (issue #789).
 #[cfg(feature = "paypal")]
 pub mod paypal;

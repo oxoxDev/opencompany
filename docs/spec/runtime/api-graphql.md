@@ -114,12 +114,15 @@ conversational surface) and the `/events` work feed
 
   Two more consequences worth knowing before reusing the seam. A chat turn
   runs the **whole** company cycle, so every message is first classified by
-  `company::task_intent::triage_message` (#267) into `Track` (an instruction —
-  the route opens a `todo` card), `Answer` (a question or read — no card), or
-  `Chatter` (greetings, and anything ambiguous — no card). `Answer` is also the
-  only class that *gates*: the harness narrows the issue-#453 delegation claim
-  to answering for that turn, so the model's own `spawn_task` / `assign_task` /
-  `review_task` fail at the tool boundary with the do-not-retry refusal.
+  `company::task_intent::triage_message` (#267) into `Track` (an instruction),
+  `Answer` (a question or read), or `Chatter` (greetings, and anything
+  ambiguous). None of the three opens a card — a message becomes a board card
+  only when an agent calls `spawn_task` (or hands the work off), or when the
+  operator presses the composer's "Build me the workflow" control. `Answer` is
+  the one class that *gates*: the harness narrows the issue-#453 delegation
+  claim to answering for that turn, so the model's own `spawn_task` /
+  `assign_task` / `review_task` fail at the tool boundary with the
+  do-not-retry refusal.
   `delegate_to_desk` is deliberately **not** refused — it is how a question the
   orchestrator cannot answer alone reaches a desk that can — so it runs the
   desk lead and relays their reply, and only its board card stands down.

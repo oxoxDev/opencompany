@@ -324,9 +324,34 @@ impl CompanyManifest {
                 source,
             })?;
 
+        if let Some(problem) = legacy_hive_block(&text).or_else(|| legacy_speech_block(&text)) {
+            return Err(OpenCompanyError::ManifestParse(path.to_path_buf(), problem));
+        }
         toml::from_str(&text).map_err(|err| {
             OpenCompanyError::ManifestParse(path.to_path_buf(), err.message().to_string())
         })
+    }
+
+    /// Whether a manifest still carries the retired `[group_chat.hive]`
+    /// block, and the migration hint if it does.
+    ///
+    /// The block is refused rather than ignored: `GroupChat` no longer has a
+    /// field for it, so a plain `toml::from_str` would drop it silently and a
+    /// desk an operator tuned by hand would run on the defaults with nothing
+    /// saying so. Read off the raw document because the typed manifest cannot
+    /// see a key it does not declare.
+    pub fn legacy_hive_block(text: &str) -> Option<String> {
+        legacy_hive_block(text)
+    }
+
+    /// Whether a manifest still carries the retired `[speech]` block, and the
+    /// migration hint if it does (plan hive-desks, Phase 6).
+    ///
+    /// Speaking is no longer a belt tool a company opts into: every agent is
+    /// served `post`, `broadcast`, `dm` and `complete_episode` by the
+    /// `opencompany` MCP server, so the block has nothing left to switch.
+    pub fn legacy_speech_block(text: &str) -> Option<String> {
+        legacy_speech_block(text)
     }
 
     /// Parses a manifest that came back out of the store, applying the global
@@ -563,6 +588,12 @@ impl CompanyManifest {
             }
         }
 
+        if enforce_reserved_agent_ids && self.company.general_desk.is_some() {
+            problems.push(
+                "`[company].general_desk` is no longer supported — #general is built in and every teammate is in it. Remove the key; the desk it named stays an ordinary desk.".into(),
+            );
+        }
+
         // Group chats: ids snake_case + unique; every member is a real agent.
         let mut chat_ids = std::collections::HashSet::new();
         for (index, chat) in self.group_chats.iter().enumerate() {
@@ -620,22 +651,11 @@ impl CompanyManifest {
                     "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
                 ));
             } else if enforce_reserved_agent_ids
-                && chat.name.eq_ignore_ascii_case(
-                    crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
-                )
+                && (crate::ports::general_channel::is_general_spelling(&chat.id)
+                    || crate::ports::general_channel::is_general_spelling(&chat.name))
             {
-                // Issue #1781 review (Codex/CodeRabbit P2 follow-up): the
-                // name reservation above only blocks "Operator", but a
-                // grandfathered collision diverts the durable feed to
-                // `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed")
-                // instead, and `server::operator::resolve_desk` folds a
-                // `?desk=` selector against a desk's name exactly the same
-                // way it folds it against "operator" — so a desk named
-                // "operator-feed" would shadow the fallback feed precisely
-                // as a desk named "Operator" would shadow the primary one.
-                // Reserved for the same reason, gated the same way.
                 problems.push(format!(
-                    "{label} is named \"operator-feed\", which is reserved for the built-in Operator channel's fallback feed — choose a different name."
+                    "{label} uses the id or name of #general, the built-in company-wide channel — choose a different id and name."
                 ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
@@ -656,7 +676,7 @@ impl CompanyManifest {
                 }
             }
 
-            problems.extend(hive_problems(&label, &chat.members, &chat.hive));
+            problems.extend(chat.hive.problems(&label));
         }
 
         // Delegation allowlists (issue #176): every `delegates_to` entry must
@@ -1259,18 +1279,16 @@ impl CompanyManifest {
         // An admin entry is bootstrapped by comparing its normalized form
         // against the identity a login route resolves — the same normalization
         // `LoginIdentity::parse` has to disambiguate from the `wallet:` and
-        // `local:` schemes sharing this column. An entry that does not survive
-        // normalization as a real mailbox (missing `@`) is not merely useless,
-        // it can normalize to `local:owner` — `normalize_email` only lowercases
-        // and trims — and a bootstrapped user stored under that exact key would
-        // misparse as the `none`-mode local owner identity rather than the
-        // email admin it was meant to be. Caught here so it never reaches a
-        // running company.
+        // `local:` schemes sharing this column. An entry that normalizes to
+        // `local:owner` — `normalize_email` only lowercases and trims — would
+        // be stored under the `none`-mode local owner's own key and misparse
+        // as that identity rather than the email admin it was meant to be.
+        // Caught here so it never reaches a running company. An `@` is not
+        // demanded: a login on a host with no mail is a username.
         for admin in &self.users.admins {
             if !crate::ports::users::is_usable_admin_email(admin) {
                 problems.push(format!(
-                    "`[users].admins` has an invalid entry: `{admin}` does not look like an \
-                     email address"
+                    "`[users].admins` has an invalid entry: `{admin}` is not a usable login"
                 ));
             }
         }
@@ -1459,6 +1477,9 @@ fn join_backticked(values: &[&str]) -> String {
 }
 
 #[cfg(test)]
+#[path = "manifest_tests_general.rs"]
+mod tests_general;
+#[cfg(test)]
 #[path = "manifest_tests_grants.rs"]
 mod tests_grants;
 #[cfg(test)]
@@ -1472,211 +1493,39 @@ mod tests_surfaces;
 #[path = "manifest_harness_tests.rs"]
 mod harness_tests;
 
-/// Every problem with a desk's `hive` block, in the words the manifest reports
-/// them.
-///
-/// A free function rather than a method, because the runtime install route
-/// (`PUT {scope}/desks/{id}/hive`) must apply the **identical** checks to a
-/// block that never came from a manifest. One implementation, so the runtime
-/// cannot accept a grammar the manifest would refuse — or refuse one it would
-/// accept.
-///
-/// `members` is the roster the config is judged against, and the caller chooses
-/// which one that is. The manifest passes the desk's **declared** members; the
-/// route passes its **effective** ones, which overlay additions and Team-API
-/// retirements have moved since boot. The two can legitimately disagree — a
-/// table that was valid when `company.toml` was written can stop being valid
-/// once a seat retires — which is why the error text names the desk rather than
-/// implying a single fixed roster.
-///
-/// Kept in this file rather than moved to `src/hivemind/` deliberately: `one_of`
-/// and the surrounding validation vocabulary live here, and moving it would be a
-/// larger diff whose only gain is a tidier module boundary.
-pub(crate) fn hive_problems(
-    label: &str,
-    members: &[String],
-    hive: &crate::hivemind::HiveConfig,
-) -> Vec<String> {
-    let mut problems: Vec<String> = Vec::new();
-    // The two hive bounds a fold refuses outright, caught here where
-    // the author can still read the reason. A `quorum` of zero would
-    // settle every topic the moment it was proposed; a `turn_budget` of
-    // zero opens a room that is exhausted before anybody speaks. Both
-    // are rejected rather than clamped: an operator who wrote a number
-    // meant it, and silently substituting a different one is how a desk
-    // ends up behaving in a way its manifest does not describe.
-    if hive.quorum == Some(0) {
-        problems.push(format!(
-                "{label} sets `hive.quorum = 0` — a topic needs at least one grounded supporter to carry."
-            ));
-    }
-    if hive.turn_budget == Some(0) {
-        problems.push(format!(
-                "{label} sets `hive.turn_budget = 0` — an episode with no turns can never reach a decision; use `hive = {{ enabled = false }}` to keep the desk on a single responder."
-            ));
-    }
-    for (key, value) in [
-        ("dominance_cap", hive.dominance_cap),
-        ("repetition_cap", hive.repetition_cap),
-        ("refutation_cap", hive.refutation_cap),
-    ] {
-        if value == Some(0) {
-            problems.push(format!(
-                    "{label} sets `hive.{key} = 0` — a cap of zero fires before anybody has                          done anything; omit the key to leave it at its default."
-                ));
-        }
-    }
+/// The migration hint for a manifest that still declares `[speech]` (plan
+/// hive-desks, Phase 6).
+fn legacy_speech_block(text: &str) -> Option<String> {
+    let document: toml::Value = toml::from_str(text).ok()?;
+    document.get("speech")?;
+    Some(
+        "`[speech]` no longer exists — speaking is not a belt tool a company switches on: every \
+         agent is served `post`, `broadcast`, `dm`, `complete_episode` and `read` by the \
+         `opencompany` MCP server (`docs/spec/runtime/hive.md`). Delete the block."
+            .to_string(),
+    )
+}
 
-    // The per-member move grammar. Both halves fail **open** when they
-    // are wrong — an unknown kind is simply never matched, and an
-    // unknown member id names nobody — so the desk keeps every move and
-    // goes on voting exactly as it did before the table was written.
-    // A typo therefore has to be a validation error, because its
-    // runtime symptom is silence.
-    for (member, kinds) in &hive.moves {
-        if !members.iter().any(|seated| seated == member) {
-            problems.push(format!(
-                    "{label} assigns `hive.moves` to `{member}`, who is not a member of this                          desk — list the desk's own member ids."
-                ));
-        }
-        for kind in kinds {
-            if !crate::hivemind::MOVE_KINDS.contains(&kind.as_str()) {
-                problems.push(one_of(
-                    &format!("{label} `hive.moves.{member}` entry"),
-                    crate::hivemind::MOVE_KINDS,
-                    kind,
-                ));
-            }
-        }
+/// The migration hint for a manifest that still declares `[group_chat.hive]`
+/// (plan hive-desks, Phase 4).
+fn legacy_hive_block(text: &str) -> Option<String> {
+    let document: toml::Value = toml::from_str(text).ok()?;
+    let desks = document.get("group_chat")?.as_array()?;
+    let stale: Vec<String> = desks
+        .iter()
+        .filter(|desk| desk.get("hive").is_some())
+        .map(|desk| {
+            desk.get("id")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        })
+        .collect();
+    if stale.is_empty() {
+        return None;
     }
-    // No rule here about who may `!commit`. `commit` is not a move the
-    // table gates at all (`hivemind::moves::UNGATED_KINDS`): the fold
-    // hands the Commit phase to whoever the attention market picks, so
-    // a desk that could bar a seat from recording a decision would
-    // regularly reach quorum and then hand the floor to somebody with
-    // nothing legal to say — which is exactly what a live six-member
-    // desk did for eight turns before reporting itself exhausted on an
-    // answer it had already carried. A `commit` entry in a member's
-    // list is therefore accepted and ignored rather than refused: it
-    // describes what the seat could already do.
-
-    // A desk whose `moves` table permits a distinct supporter to
-    // FEWER seats than `hive.quorum` needs is refused:
-    // `TopicStanding::carried` reads a count of distinct supporters,
-    // and no amount of cooperation among the barred seats can conjure
-    // one they are not allowed to deposit. A topic there can never
-    // carry, full stop.
-    //
-    // Exactly quorum-many eligible seats is ACCEPTED, and the
-    // temptation to refuse it is worth writing down because it was
-    // tried and was wrong. Such a desk carries a topic only by
-    // unanimity among its eligible seats, which is fragile — one
-    // grounded `!object` silencing any of them leaves nobody to
-    // replace what was silenced. But fragile is not impossible, and
-    // more to the point it is a configuration this crate deliberately
-    // lets an operator ask for: `HivePolicy::from_config` clamps an
-    // explicit `quorum` to `1..=count`, so `quorum = 3` on a desk of
-    // three is honoured as written. The neighbouring
-    // `(count / 2 + 1).min(count - 1)` governs only the *default*
-    // threshold — it says what a desk that named no number should
-    // get, not that unanimity is forbidden to one that did. Refusing
-    // it here would have outlawed a desk the e2e suite deliberately
-    // exercises, and would have been this check inventing a policy
-    // rather than enforcing one.
-    //
-    // It is a validation error rather than a runtime symptom for
-    // the same reason the move-grammar typo checks above are: the
-    // failure is *silent* — a desk stuck one short of quorum looks
-    // exactly like a desk whose members never agreed, and the room
-    // spends its whole turn budget finding that out live.
-    //
-    // How this check was found, stated accurately because the
-    // obvious version of the story is wrong: a six-seat
-    // `hive_math_lab` run spent its last six turns with four seats in
-    // a row deferring to the one member they believed could still
-    // legally close a topic the desk had already verified four times
-    // over, and then exhausted its budget. That desk had three
-    // eligible seats and `quorum = 3` — which this check ACCEPTS —
-    // and its real defect was elsewhere: the proposal and its
-    // supports had been deposited in different episodes, so they
-    // never met inside one fold (see the watermark divider in
-    // `hivemind::prompt`). Reading that transcript is what prompted
-    // asking whether a desk could be built unable to reach its own
-    // quorum at all. It can, and nothing caught it, so this exists —
-    // but the run above is not an instance of it.
-    // See `docs/spec/runtime/hivemind-deliberation.md`.
-    //
-    // `moves_for` (not the raw map) decides eligibility, so a member
-    // the table omits, or names with an empty list, counts the same as
-    // one explicitly given `support` — both already keep every move.
-    //
-    // Eligibility also includes every seat holding `propose`, not only
-    // `support`: `tinyhivemind_hive::quorum::standings` counts a
-    // `!propose` as its own author's support unconditionally — the
-    // `require_grounded` and `require_evidential` gates in that fold
-    // both match on `TraceKind::Support` only, so neither one ever
-    // touches a `Propose` trace. A member need not have originated a
-    // topic to benefit from this either: nothing stops a second
-    // `propose`-holding seat from re-`!propose`-ing the exact id
-    // already on the floor, which the fold folds in as one more
-    // distinct, ungated supporter of it. Counting `support`-holders
-    // alone would undercount a desk whose extra slack comes from a
-    // second proposer rather than a fourth supporter.
-    //
-    // Gated on `deliberates`: a desk under two members, or opted out
-    // with `enabled = false`, never opens a hive episode at all, so
-    // `hive.quorum` and `hive.moves` on it describe a room that will
-    // never run rather than one that could get stuck.
-    if hive.deliberates(members.len()) {
-        let quorum = crate::hivemind::HivePolicy::from_config(hive, members.len())
-            .episode
-            .quorum
-            .threshold;
-        let eligible = members
-            .iter()
-            .filter(|member| hive.may(member, "support") || hive.may(member, "propose"))
-            .count();
-        if u32::try_from(eligible).is_ok_and(|eligible| eligible < quorum) {
-            problems.push(format!(
-                    "{label} `hive.moves` permits `!support` or `!propose` to only {eligible} of {} seats, but `hive.quorum` needs {quorum} distinct supporters — a topic here can never carry, because the barred seats cannot deposit a supporter however much they agree. Widen `hive.moves` so at least {quorum} seats may `!support` or `!propose`, or lower `hive.quorum` to {eligible}.",
-                    members.len()
-                ));
-        }
-    }
-
-    // The referral block. Every check here catches a policy that would
-    // be *silently* inert rather than loudly wrong, which is the
-    // failure mode worth a validation error: a desk that asks nothing
-    // looks exactly like a desk whose members had nothing to ask.
-    let referral = &hive.referral;
-    if let Some(reach) = referral.reach.as_deref()
-        && !crate::hivemind::REACH_WORDS.contains(&reach)
-    {
-        problems.push(one_of(
-            &format!("{label} `hive.referral.reach`"),
-            crate::hivemind::REACH_WORDS,
-            reach,
-        ));
-    }
-    for (key, value) in [
-        ("max_hops", referral.max_hops),
-        ("peer_cap", referral.peer_cap),
-    ] {
-        if value == Some(0) {
-            problems.push(format!(
-                    "{label} sets `hive.referral.{key} = 0` — a referral budget of nothing never asks anybody anything; omit `hive.referral` entirely to keep the desk inside its own room."
-                ));
-        }
-    }
-    // A round trip is two hops: one out, one home. Refused rather than
-    // clamped, because an operator who wrote `max_hops = 1` alongside
-    // `returns = true` has described a question whose answer is thrown
-    // away, and spending the far desk's turn anyway is worse than
-    // saying so.
-    if referral.max_hops == Some(1) && referral.returns != Some(false) {
-        problems.push(format!(
-                "{label} sets `hive.referral.max_hops = 1` while answers still come back — a round trip is two hops, so every answer would be stranded on the desk that gave it. Use `max_hops = 2`, or set `returns = false` if the question is meant to be one-way."
-            ));
-    }
-    problems
+    Some(format!(
+        "group chat `{}` declares `[group_chat.hive]`, which no longer exists — the trace-grammar          hive (quorum, moves, aside, turn_budget) was replaced by completion-driven episodes.          Delete the block, and say how the desk routes and paces its rounds under          `[group_chat.routing]` (`round_width`, `max_rounds`, `turn_timeout_secs`) and          `[group_chat.routing.referral]` (`enabled`, `max_hops`, `reach`, `returns`); see          `docs/spec/runtime/hive.md`.",
+        stale.join("`, `")
+    ))
 }

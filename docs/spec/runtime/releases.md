@@ -61,11 +61,17 @@ Re-dispatching the promotion afterwards merges — it never resets — so fixes 
 3. **`build-desktop`** (`build-desktop.yml`) — both architectures, Developer-ID
    signed and notarized, plus the updater's `.app.tar.gz` + `.sig` built from
    the stapled bundle. Everything attaches to the draft.
-4. **`build-docker`** — the tenant image built with the same feature set
-   `deploy-staging.yml` ships and then discarded. `ci.yml` never runs the
-   Dockerfile; this is the only proof the tag containerises.
+4. **`publish-docker`** — the tenant image, built from the tag (so `/spec`
+   reports the bumped version) with the feature set in `deploy-staging.yml`,
+   run through the `sentry-test` gate, then pushed to
+   `ghcr.io/tinyhumansai/opencompany:vX.Y.Z`. boat.dev sandboxes
+   (`tinyhumansai/opencompany-sandbox-manager`) follow the newest GitHub
+   Release, so the image has to exist before the Release does. The GHCR package
+   must be public for their anonymous pull.
 5. **`updater-manifest`** — `latest.json` assembled from both architectures'
    assets, uploaded to the draft. See [desktop-updates.md](desktop-updates.md).
+   **`promote-image`** then retags `:latest` onto `:vX.Y.Z` (same digest), only
+   once everything else has passed.
 6. **`publish-release`** — every required asset is checked to be on the draft,
    then it is flipped public and marked latest. This repository has immutable
    releases: the asset list freezes at that moment, which is why nothing is
@@ -74,10 +80,15 @@ Re-dispatching the promotion afterwards merges — it never resets — so fixes 
    and the tag are deleted, so the next dispatch bumps cleanly and no
    half-built version is reachable. The bump commit stays; that is harmless.
 
-`create_release: false` is a rehearsal: bump and build — no tag, no
+`create_release: false` is a rehearsal: bump and build — no tag, no image push, no
 Release, DMGs as Actions artifacts. The version still moves.
 
-A staging cut is steps 1, 3 (without the updater archive) and 4, tagged
+Separately, every push to `main` that touches the image's inputs publishes
+`:staging` and `:sha-<short>` from `deploy-staging.yml` — main's head for
+staging sandboxes, never `:latest`.
+
+A staging cut is steps 1, 3 (without the updater archive) and a throw-away
+image build (no push), tagged
 `vX.Y.Z-staging`, with no Release at all — see
 [desktop-updates.md](desktop-updates.md#a-staging-cut-ships-no-update-anybody-can-reach)
 for why that is the right shape for the auto-updater.
@@ -128,8 +139,17 @@ numbers only and is verified by the cut itself.
 
 ## What is needed once
 
-Repository secrets: the six `APPLE_*` values for signing and notarization,
+Secrets in the `Production` GitHub environment (branch-policied to `main` and
+`release`, no admin bypass): `APPLE_CERTIFICATE_BASE64`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` and `APPLE_TEAM_ID` for
+Developer-ID signing; `APP_STORE_CONNECT_API_KEY_ID`,
+`APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64` (the `.p8`, base64) and
+`APP_STORE_CONNECT_ISSUER_ID` for notarization, which authenticates with an
+App Store Connect API key rather than an Apple ID and password;
 `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
-([desktop-updates.md](desktop-updates.md#operator-setup)),
-and optionally `OPENAI_API_KEY` for polished notes. `build-desktop.yml`'s
-`guard` job fails in seconds, naming the missing one, before any build starts.
+([desktop-updates.md](desktop-updates.md#operator-setup)); and optionally
+`OPENAI_API_KEY` for polished notes. Every job that reads one declares
+`environment: Production` itself — `build-desktop.yml`'s `guard` and `build`,
+and `create-release` — so the callers pass only the repository-level
+`SENTRY_AUTH_TOKEN`. `guard` fails in seconds, naming the missing secret, before
+any build starts.

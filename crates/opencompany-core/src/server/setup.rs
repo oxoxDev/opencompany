@@ -91,6 +91,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/setup", get(read).post(apply))
         .route("/api/v1/setup/roster", post(propose_roster))
         .route("/api/v1/setup/inference/test", post(test_inference))
+        .route("/api/v1/setup/inference/probe", post(probe_inference_draft))
+        .route(
+            "/api/v1/setup/composio/api-key/test",
+            post(test_composio_key),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +179,23 @@ pub struct SetupDto {
     /// bind, where it would mean an unauthenticated admin console.
     ///
     /// Which modes are *legal*, not which are convenient: `email` is listed on
-    /// a host with no mail transport too, because hub OAuth and passwords sign
-    /// people in there perfectly well. Read [`mail`](Self::mail) for what the
-    /// magic-link path specifically can do today.
+    /// a host with no mail transport too, because a password signs people in
+    /// there perfectly well. Read [`mail`](Self::mail) for what the magic-link
+    /// path specifically can do today.
     pub auth_modes: Vec<&'static str>,
+    /// The mode the wizard should preselect when `config.toml` names none.
+    ///
+    /// `none` on the packaged desktop app, which boots with that mode already
+    /// in force as a host-wide override on a loopback bind
+    /// (`crates/opencompany-app/src/embedded.rs`): one machine, one person, no
+    /// mailbox, so the sign-in question is already answered and asking it
+    /// again — and then asking for an address to go with the wrong answer — is
+    /// the first-run confusion this field removes. Reported by the host rather
+    /// than sniffed from the webview so the same console opened in a browser
+    /// tab against a desktop host gets the same default. Absent everywhere
+    /// else, where `email` stays the default it always was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_auth_mode: Option<&'static str>,
     /// Which optional surfaces this build has.
     pub build: BuildDto,
     /// Company ids already registered on this host. A non-empty list means the
@@ -228,6 +246,16 @@ pub struct InferenceReadyDto {
     /// automatically safe to show, because it can carry userinfo. See
     /// [`redact_endpoint`](crate::company::inference::catalogue::redact_endpoint).
     pub base_url: Option<String>,
+    /// Where an operator mints a TinyHumans key by hand — the API-keys tab of
+    /// the dashboard belonging to the platform **this host is on**. The wizard
+    /// runs before any company exists, so the one-click grant (which the host
+    /// scopes to a company) cannot; a link is what is left, and it has to be a
+    /// link to the right hub. The console used to hard-code production here,
+    /// so a host on staging sent its operator to mint a key staging would
+    /// never accept. `None` when `api_url` follows no convention the site
+    /// derivation knows (`hub_account::site_for_api`), and the wizard then
+    /// shows no link rather than a guess.
+    pub keys_url: Option<String>,
 }
 
 /// Whether the host already holds a usable credential, and where it points.
@@ -240,8 +268,8 @@ pub struct InferenceReadyDto {
 ///
 /// The credential itself never leaves this function.
 #[cfg(feature = "openhuman")]
-fn house_credential(env: &dyn EnvSource) -> Option<String> {
-    crate::harness::provider::harness_inference_from_env(env)
+fn house_credential(env: &dyn EnvSource, api_url: &str) -> Option<String> {
+    crate::harness::provider::harness_inference_from_env_at(env, Some(api_url))
         // Redacted, because "it is a URL" is not the same as "it is not a
         // secret": `OPENCOMPANY_INFERENCE_URL` can carry userinfo, and this
         // one is the deployer's own endpoint rather than a tenant's, so no
@@ -252,7 +280,7 @@ fn house_credential(env: &dyn EnvSource) -> Option<String> {
 /// Without the harness there is no inference path at all, so the host holds
 /// nothing and the step asks for everything.
 #[cfg(not(feature = "openhuman"))]
-fn house_credential(_env: &dyn EnvSource) -> Option<String> {
+fn house_credential(_env: &dyn EnvSource, _api_url: &str) -> Option<String> {
     None
 }
 
@@ -296,6 +324,21 @@ pub struct SetupRequest {
     /// Ignored when the seeded manifest asks nobody to sign in — see
     /// [`SeedOverrides::admin_email`](crate::desktop::SeedOverrides::admin_email).
     pub admin_email: Option<String>,
+    /// The first admin's password, set on the account the moment the company
+    /// exists.
+    ///
+    /// Without it the wizard finished into a company whose only admin was
+    /// *eligible* and could not get in: the magic link needs a mail transport
+    /// the laptop it was just run on rarely has, and the fallback — the host
+    /// echoing the code back into the wizard — was a link the operator did not
+    /// know to expect. A password chosen (or generated) on the "You" step is a
+    /// credential the wizard can sign them in with the instant setup applies,
+    /// and the same one they use tomorrow.
+    ///
+    /// Applies to whichever admin address the apply seeds — the template
+    /// path's [`Self::admin_email`] or the designed company's own. Ignored when
+    /// the host has no sign-in. Write-only, like every other secret here.
+    pub admin_password: Option<String>,
     /// A company the wizard **designed**, from the operator's answers and the
     /// roster they reviewed.
     ///
@@ -329,6 +372,55 @@ pub struct SetupRequest {
     /// leaves the row unmade and says so through
     /// [`AppliedDto::credential_note`] rather than silently reporting success.
     pub tinyhumans_model: Option<String>,
+    /// The provider the wizard's self-managed branch connected, to be added to
+    /// the company this call seeds.
+    ///
+    /// The **same body** `POST …/inference/providers` accepts, deserialized by
+    /// the same type and applied by the same function
+    /// ([`add_provider_inner`](crate::server::ops::inference::providers::add_provider_inner)).
+    /// Deliberately not a shape of its own: the add carries a slot guard, a
+    /// first-provider default, a credential-then-record rollback pair and a
+    /// probe-class rollback, and a wizard-only flush would have reproduced the
+    /// row without any of them.
+    ///
+    /// Sent here rather than written by the console because that route is
+    /// admin-scoped to an existing company, and first run has neither — the
+    /// same reason [`Self::tinyhumans_key`] travels this way.
+    ///
+    /// Top level for the same reason too: it belongs to whichever company comes
+    /// out of the seed, designed or templated.
+    pub(crate) provider_draft: Option<crate::server::ops::inference::providers::AddProvider>,
+    /// The Composio credential the wizard's self-managed branch collected.
+    ///
+    /// Two shapes, one field, because the Connections dialog is one form with
+    /// two routes: a company's own Composio API key (which also selects the
+    /// BYOK mode), or a token for the TinyHumans-managed route.
+    ///
+    /// Travels on the apply for the same reason the others do — both writes are
+    /// per company, and the company is what this call creates.
+    pub composio_draft: Option<ComposioDraft>,
+}
+
+/// The Composio credential the wizard collected, and which of the two it is.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposioDraft {
+    /// Which write this performs — the same two values the console's
+    /// `ComposioForm.credential` carries.
+    pub credential: ComposioCredential,
+    /// The secret. Write-only: no route returns it.
+    pub value: String,
+}
+
+/// Which Composio credential a draft is.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub enum ComposioCredential {
+    /// This company's own Composio account key, which also selects BYOK.
+    #[serde(rename = "composio-api-key")]
+    ApiKey,
+    /// A token for the TinyHumans-managed route.
+    #[serde(rename = "composio-token")]
+    Token,
 }
 
 /// The company the wizard designed, as it arrives from the review step.
@@ -400,6 +492,19 @@ pub struct AppliedDto {
     /// touch, and a model it was never given leaves the `tinyhumans` row
     /// unmade: "you're set up" alone would paper over both.
     pub credential_note: Option<String>,
+    /// What connecting the self-managed branch's provider did, in the host's
+    /// own words — the same sentence the LLM page's add toast carries.
+    ///
+    /// `None` when no provider was drafted or no company was seeded. It also
+    /// carries the **refusal** when the add was refused: the company is built
+    /// by the time this runs, and an endpoint that stopped answering between
+    /// the wizard's probe and the apply is a reason to say so, not a reason to
+    /// fail a setup that otherwise succeeded.
+    pub provider_note: Option<String>,
+    /// What the Composio credential the wizard collected did.
+    ///
+    /// `None` when none was sent or no company was seeded.
+    pub composio_note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +757,7 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
         fields,
         templates: templates(),
         auth_modes: auth_modes(state),
+        default_auth_mode: default_auth_mode(state),
         // Asked through the login route's own predicates rather than re-read
         // from the environment here: a second spelling of "can this host mail"
         // is exactly how the wizard's copy and the route's behaviour drift into
@@ -668,11 +774,15 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
             .map(|id| id.as_ref().to_string())
             .collect(),
         inference: {
-            let base_url = house_credential(env);
+            let base_url = house_credential(env, &state.config().api_url);
             InferenceReadyDto {
                 ready: base_url.is_some(),
                 provider: base_url.is_some().then_some("managed"),
                 base_url,
+                keys_url: state
+                    .config()
+                    .hub_site()
+                    .map(|site| crate::server::hub_account::manage_keys_url(&site)),
             }
         },
     })
@@ -691,6 +801,18 @@ fn auth_modes(state: &AppState) -> Vec<&'static str> {
         modes.push(AuthMode::None.as_str());
     }
     modes
+}
+
+/// The mode a fresh wizard preselects — see [`SetupDto::default_auth_mode`].
+///
+/// `none` only where it is both in force and legal: the live override says
+/// this host already runs without a sign-in, and the bind is loopback so
+/// `auth_modes` offers it. A routable host with the override set could not
+/// have booted (`is_local_only` gates it), so the second check is belt and
+/// braces against a config nobody should be able to reach.
+fn default_auth_mode(state: &AppState) -> Option<&'static str> {
+    (state.auth_mode_override() == Some(AuthMode::None) && state.config().is_local_only())
+        .then_some(AuthMode::None.as_str())
 }
 
 /// Which optional surfaces this build carries.
@@ -863,6 +985,26 @@ async fn apply_inner(
         _ => None,
     };
 
+    // The admin address the apply is about to make eligible, on either seed
+    // path, and the password that makes it usable. Validated here, before
+    // anything is written, for the same reason everything above is: a company
+    // seeded and a password refused afterwards is a half-applied setup.
+    let admin_email: Option<String> = req
+        .company
+        .as_ref()
+        .and_then(|company| company.admin_email.as_deref())
+        .or(req.admin_email.as_deref())
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(crate::ports::normalize_email);
+    let admin_password = req
+        .admin_password
+        .as_deref()
+        .filter(|password| !password.is_empty());
+    if let (Some(email), Some(password)) = (admin_email.as_deref(), admin_password) {
+        crate::server::users::password::validate(password, email)?;
+    }
+
     // Validate the model choice before writing setup state. The endpoint that
     // passed the probe is normalized once more at this trust boundary, then
     // stored on the company rather than forgotten after the green tick.
@@ -1034,7 +1176,46 @@ async fn apply_inner(
         _ => None,
     };
 
+    // Make the admin real, not merely eligible. Seeding wrote the address into
+    // `[users].admins`, which is a standing invite; this turns it into an
+    // account with a password, so the console can sign the operator in with
+    // what they just typed rather than handing them a form they cannot pass.
+    // Skipped on a host with no sign-in — there is nobody to distinguish — and
+    // where no password was given, which keeps the older link hand-off working.
+    if let (Some(id), Some(email), Some(password)) =
+        (seeded.as_deref(), admin_email.as_deref(), admin_password)
+        && let Some(runtime) = state
+            .registry()
+            .get(&crate::ports::types::CompanyId::new(id))
+        && runtime.auth_mode().uses_email()
+    {
+        let standing =
+            crate::server::users::routes::bootstrap_admins(state.config(), &runtime).await?;
+        match crate::server::users::bootstrap::claim_first_admin(
+            runtime.users(),
+            runtime.id(),
+            &standing,
+            email,
+            password,
+        )
+        .await?
+        {
+            Ok(_) => tracing::info!(company = %runtime.id(), "first admin created by setup"),
+            // A company the wizard just seeded has no users, and the address
+            // was written into its manifest a moment ago, so neither refusal
+            // can happen on this path; if it somehow does, the standing invite
+            // is still there and the sign-in screen's own claim takes over.
+            Err(refusal) => tracing::warn!(
+                company = %runtime.id(),
+                ?refusal,
+                "setup could not create the first admin; the address stays eligible",
+            ),
+        }
+    }
+
     let credential_note = store_account_key(state, seeded.as_deref(), &req).await?;
+    let provider_note = connect_drafted_provider(state, seeded.as_deref(), &req).await?;
+    let composio_note = store_composio_credential(state, seeded.as_deref(), &req).await?;
 
     // Companies that already existed still hold the old mode on their cached
     // runtime, so rebuild them in place. `seeded` is excluded — it was just
@@ -1076,7 +1257,143 @@ async fn apply_inner(
         restart_required,
         seeded_company: seeded,
         credential_note,
+        provider_note,
+        composio_note,
     })
+}
+
+/// Stores the Composio credential the self-managed branch collected against the
+/// seeded company.
+///
+/// [`store_api_key`](crate::company::composio::store_api_key) and
+/// [`store_token`](crate::company::composio::store_token) are the same two
+/// functions `PUT …/composio/api-key` and `PUT …/composio/token` call, and they
+/// take a company id and a secret store rather than a request, so they are
+/// reached directly rather than through a seam.
+///
+/// The routes' extra machinery is all about a **transition**: the account-key
+/// slot guard, the `load_mode` re-read and its `Conflict`, the `switching` /
+/// `used_by` / `confirm_in_use` warning about providers stranded in the account
+/// this company is leaving. A company created milliseconds ago has no previous
+/// mode, no connected providers and no concurrent admin — and `apply_inner`
+/// holds `APPLY_LOCK` — so there is no transition for any of it to describe.
+///
+/// [`evict_catalog_cache`](crate::server::ops::composio::evict_catalog_cache)
+/// runs anyway. There is nothing cached for a company this new, and a cache
+/// drop that costs nothing is not worth reasoning about being right.
+///
+/// Deliberately **not** journalled, the same call 4a made for the account key:
+/// the journal attributes a credential change to the admin who made it, and a
+/// first run has no signed-in admin to name. The apply is what records it.
+///
+/// A blank value is dropped rather than written.
+/// [`store_api_key`](crate::company::composio::store_api_key) reads an empty
+/// key as "clear this company back to managed", which on a company that was
+/// never on BYOK is a mode write nobody asked for.
+async fn store_composio_credential(
+    state: &AppState,
+    seeded: Option<&str>,
+    req: &SetupRequest,
+) -> Result<Option<String>, OpenCompanyError> {
+    let Some(draft) = req.composio_draft.as_ref() else {
+        return Ok(None);
+    };
+    let value = draft.value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    // Only ever onto a company this call created — same rule as the account key
+    // and the provider draft, for the same reason.
+    let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
+        return Ok(None);
+    };
+    let Some(runtime) = state.registry().get(&id) else {
+        return Ok(None);
+    };
+    let secrets = runtime.secrets();
+
+    let note = match draft.credential {
+        ComposioCredential::ApiKey => {
+            match crate::company::composio::store_api_key(&id, secrets.as_ref(), value).await {
+                Ok(_) => {
+                    "This company reaches its tools through its own Composio account.".to_string()
+                }
+                Err(err) => format!("The Composio credential could not be stored: {err}"),
+            }
+        }
+        ComposioCredential::Token => {
+            match crate::company::composio::store_token(&id, secrets.as_ref(), value).await {
+                Ok(()) => {
+                    "A Composio token is stored for the TinyHumans-managed route.".to_string()
+                }
+                Err(err) => format!("The Composio credential could not be stored: {err}"),
+            }
+        }
+    };
+    crate::server::ops::composio::evict_catalog_cache(runtime.as_ref());
+    Ok(Some(note))
+}
+
+/// Adds the provider the self-managed branch connected to the seeded company,
+/// through the same function `POST …/inference/providers` runs.
+///
+/// Reuse, not a parallel path. Writing the row here with `store::put_provider`
+/// and a secret set would look like the same outcome and would not be: the add
+/// carries the `tinyhumans` slot guard, decision X1's first-provider default
+/// (with its re-validation under the index lock), the model check, the
+/// credential-then-record rollback pair, the probe-class rollback, and the
+/// sole-provider auto-route. Every one of those is the difference between a
+/// company whose provider answers and a row that merely exists.
+///
+/// The company has already been seeded by the time this runs, so every
+/// failure — a refusal or a store that cannot be written — is reported
+/// through the returned note rather than raised.
+async fn connect_drafted_provider(
+    state: &AppState,
+    seeded: Option<&str>,
+    req: &SetupRequest,
+) -> Result<Option<String>, OpenCompanyError> {
+    let Some(draft) = req.provider_draft.clone() else {
+        return Ok(None);
+    };
+    let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
+        return Ok(None);
+    };
+    let Some(runtime) = state.registry().get(&id) else {
+        return Ok(None);
+    };
+
+    match crate::server::ops::inference::providers::add_provider_inner(
+        state,
+        runtime.as_ref(),
+        draft,
+    )
+    .await
+    {
+        Ok(mutation) => {
+            rebuild_after_provider(state, &runtime).await;
+            Ok(Some(mutation.note))
+        }
+        Err(ApiError(OpenCompanyError::InvalidRequest(message))) => Ok(Some(message)),
+        Err(ApiError(err)) => Ok(Some(format!("The provider could not be connected: {err}"))),
+    }
+}
+
+/// Swaps the seeded company's echo brain for the one its new provider affords.
+async fn rebuild_after_provider(
+    state: &AppState,
+    runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+) {
+    if !crate::server::ops::company_key::restart_required_for(runtime.as_ref()).await {
+        return;
+    }
+    if let Err(err) = crate::runtime::rebuild_company(state, runtime.id()).await {
+        tracing::warn!(
+            company = %runtime.id(),
+            error = %err,
+            "provider connected but the runtime could not be rebuilt; a restart is still required",
+        );
+    }
 }
 
 /// Stores the wizard's TinyHumans key as the seeded company's own credential,
@@ -1196,6 +1513,15 @@ mod setup_test_group_3;
 #[cfg(test)]
 #[path = "setup/setup_test_group_4.rs"]
 mod setup_test_group_4;
+#[cfg(test)]
+#[path = "setup/setup_test_group_5.rs"]
+mod setup_test_group_5;
+#[cfg(test)]
+#[path = "setup/setup_test_group_6.rs"]
+mod setup_test_group_6;
+#[cfg(test)]
+#[path = "setup/setup_test_group_7.rs"]
+mod setup_test_group_7;
 #[cfg(test)]
 #[path = "setup/setup_test_support_1.rs"]
 mod setup_test_support_1;
@@ -1321,7 +1647,7 @@ const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 /// Without this the default is whichever model the provider happens to list
 /// first, which is a position in someone else's catalogue rather than a choice.
 #[cfg(feature = "openhuman")]
-const PREFERRED_SETUP_MODEL: &str = "z-ai/glm-5.3-flash";
+const PREFERRED_SETUP_MODEL: &str = "deepseek/deepseek-v4-flash";
 
 #[cfg(feature = "openhuman")]
 fn probe_model_candidates(
@@ -1341,8 +1667,8 @@ fn probe_model_candidates(
         .collect()
 }
 
-/// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
-/// the operator has just typed, before anything is written.
+/// `POST /api/v1/setup/inference/test` — a live probe of a credential the
+/// operator has just typed, before anything is written.
 ///
 /// The company-scoped `POST {scope}/inference/test` cannot serve the wizard for
 /// the same reason the roster route could not: it resolves a `CompanyRuntime`
@@ -1373,7 +1699,108 @@ async fn test_inference(
     Json(req): Json<InferenceTestRequest>,
 ) -> Result<Json<InferenceTestDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
-    Ok(Json(probe_inference(&req, &ProcessEnv).await))
+    Ok(Json(
+        probe_inference(&req, &ProcessEnv, &state.config().api_url).await,
+    ))
+}
+
+/// `POST /api/v1/setup/inference/probe` — read a drafted endpoint's model
+/// catalogue before there is a company to store it against.
+///
+/// The company-scoped `POST {scope}/inference/probe` is the same probe behind
+/// an `AdminScopedCompany`, and first run has neither a company nor an admin —
+/// so the wizard's self-managed branch reaches
+/// [`probe_draft_inner`](crate::server::ops::inference::providers::probe_draft_inner)
+/// through this gate instead. The probe itself is the same function, not a
+/// second implementation of it.
+///
+/// ## What this widens, and what it does not
+///
+/// It puts one more outward dial behind [`authorize`]'s first-run gate. The
+/// one already there is [`test_inference`], which takes the same
+/// `{provider, key, baseUrl}`, applies the same `endpoint_has_credentials`
+/// refusal, and dials the same address on the same terms — so this adds
+/// another *caller* of a primitive this surface already exposes rather than a
+/// new kind of exposure. Both are loopback-bound, both require a genuinely
+/// local peer with no proxy-forwarding header, and both are reachable only
+/// while setup is incomplete or the registry is empty.
+///
+/// Its own refusals are unchanged and unconditional: a URL carrying userinfo
+/// is refused before the request, and `probe::check_endpoint` screens the URL
+/// and every redirect target inside the probe.
+///
+/// ## Why the wizard needs it rather than reusing the test
+///
+/// `test_inference` answers with one `model`; this step has to *offer* the
+/// endpoint's list, which is what the model step is. And its env-default
+/// fallback means a blank key silently probes the **host's** own credential —
+/// right for "does this host reach a model", wrong for "does the key I just
+/// typed work".
+async fn probe_inference_draft(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(body): Json<crate::server::ops::inference::providers::ProbeDraft>,
+) -> Result<axum::response::Response, crate::server::Rejection> {
+    authorize(&state, &headers, peer).await?;
+    Ok(crate::server::ops::inference::providers::probe_draft_inner("setup", body).await)
+}
+
+/// What `POST /api/v1/setup/composio/api-key/test` is asked.
+///
+/// The company-scoped route takes **no body** on purpose: it reads the key from
+/// the company's own store, and a body carrying one would turn it into "send
+/// this credential to that host". This one has to take the key, because there
+/// is no company to read it from — and it is the same primitive all the same,
+/// because the destination is not in the body either way:
+/// `composio_direct::probe_api_key` dials Composio's own compile-time URL.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposioKeyTestRequest {
+    api_key: String,
+}
+
+/// `POST /api/v1/setup/composio/api-key/test` — check a Composio API key the
+/// operator has just typed, before there is a company to store it against.
+///
+/// Its own SSRF footing is the reason this one is cheap to add: the endpoint is
+/// fixed at compile time, so no caller — authenticated or not — can point it
+/// anywhere. All this route can do is spend an outbound request on a key the
+/// caller supplied and report one of three fixed sentences.
+///
+/// Without it an operator types a wrong Composio key in onboarding and learns
+/// nothing until they open Connections and find an empty tool belt — which is
+/// the same objection that rules out skipping the inference probe.
+async fn test_composio_key(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<ComposioKeyTestRequest>,
+) -> Result<Json<crate::server::ops::composio::ApiKeyTestDto>, crate::server::Rejection> {
+    authorize(&state, &headers, peer).await?;
+    let key = req.api_key.trim();
+    if key.is_empty() {
+        return Err(ApiError::from(OpenCompanyError::InvalidRequest(
+            "Paste a Composio API key to check it.".to_string(),
+        ))
+        .into());
+    }
+    Ok(Json(
+        match crate::server::ops::composio::classify_key("setup", key).await {
+            None => crate::server::ops::composio::ApiKeyTestDto {
+                ok: true,
+                probe_class: None,
+                message: None,
+            },
+            // `describe_verdict`, not `describe`: this route stored nothing,
+            // and the latter's copy opens by saying it did.
+            Some(class) => crate::server::ops::composio::ApiKeyTestDto {
+                ok: false,
+                probe_class: Some(class),
+                message: Some(crate::company::composio_probe::describe_verdict(class).to_string()),
+            },
+        },
+    ))
 }
 
 /// Runs the probe against the resolved config.
@@ -1381,14 +1808,16 @@ async fn test_inference(
 async fn probe_inference<E: EnvSource + Sync>(
     req: &InferenceTestRequest,
     env: &E,
+    api_url: &str,
 ) -> InferenceTestDto {
-    let env_default =
-        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| {
-            crate::company::inference::EnvDefault {
-                base_url: config.base_url,
-                credential: config.credential,
-            }
-        });
+    // The endpoint follows the host's `api_url` with or without an instance
+    // credential — the same default the runtime builder attaches — so a key
+    // typed into the wizard on a staging host is probed against staging.
+    let (config, _) = crate::harness::provider::platform_inference_default_at(env, Some(api_url));
+    let env_default = Some(crate::company::inference::EnvDefault {
+        base_url: config.base_url,
+        credential: config.credential,
+    });
     let normalized_base_url =
         crate::company::inference::normalize_setup_base_url(&req.provider, req.base_url.as_deref());
     // **Refused before anything is sent.** The catalogue read below and the
@@ -1490,11 +1919,24 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
+    let candidates = probe_model_candidates(models);
+
+    // TinyHumans owns both proxy surfaces. Their model catalog is authenticated,
+    // so a successful read already proves the key; a second chat request proves
+    // only that the account has credit and consumes provider capacity. Let setup
+    // accept the credential here. The first real turn will then report an
+    // insufficient balance (or a genuine runtime rate limit) in its proper place.
+    if matches!(req.provider.as_str(), "managed" | "tinyhumans") {
+        return InferenceTestDto {
+            ok: true,
+            base_url,
+            model: candidates.first().map(|model| model.id.clone()),
+            error: None,
+        };
+    }
+
     let mut last_failure = None;
-    for model in probe_model_candidates(models)
-        .into_iter()
-        .map(|model| model.id)
-    {
+    for model in candidates.into_iter().map(|model| model.id) {
         let candidate = decl.clone().with_chosen_model(model.clone());
         match crate::harness::provider::probe(&candidate, &model, None).await {
             Ok(()) => {
@@ -1534,6 +1976,7 @@ async fn probe_inference<E: EnvSource + Sync>(
 async fn probe_inference<E: EnvSource + Sync>(
     req: &InferenceTestRequest,
     _env: &E,
+    _api_url: &str,
 ) -> InferenceTestDto {
     InferenceTestDto {
         ok: false,
@@ -1675,6 +2118,7 @@ async fn propose_roster(
     } else {
         propose_for_setup(
             &answers,
+            &state.config().api_url,
             req.inference_provider.as_deref(),
             req.inference_base_url.as_deref(),
             req.inference_key.as_deref(),
@@ -1752,6 +2196,7 @@ async fn propose_roster(
 #[cfg(feature = "openhuman")]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    api_url: &str,
     provider: Option<&str>,
     base_url: Option<&str>,
     credential: Option<&str>,
@@ -1759,6 +2204,7 @@ async fn propose_for_setup(
 ) -> crate::company::setup::RosterProposal {
     match crate::harness::roster_build::RosterBuilder::for_setup(
         &ProcessEnv,
+        Some(api_url),
         provider,
         base_url,
         credential,
@@ -1780,6 +2226,7 @@ async fn propose_for_setup(
 #[cfg(not(feature = "openhuman"))]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    _api_url: &str,
     _provider: Option<&str>,
     _base_url: Option<&str>,
     _credential: Option<&str>,

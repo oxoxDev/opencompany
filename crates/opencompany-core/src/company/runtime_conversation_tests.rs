@@ -6,8 +6,6 @@ use super::CompanyEvent;
 use super::tests_approval::runtime_with_events;
 #[cfg(feature = "openhuman")]
 use crate::ports::tasks::TaskTitle;
-#[cfg(all(feature = "openhuman", feature = "hivemind"))]
-use std::sync::Arc;
 
 /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
 /// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
@@ -224,6 +222,7 @@ async fn a_private_dm_relay_is_authored_by_the_dm_agent_not_the_orchestrator() {
     // exactly as `HarnessBrain` would. Journaling never reads it; it only
     // drives `relay_speaker`.
     let record = crate::ports::types::CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -366,10 +365,7 @@ async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
                 reply_to: None,
                 steps: Vec::new(),
             },
-            // A `reply_to` naming an empty chat id — not degenerate:
-            // `origin_chat_id` preserves `Some("")` for a card spawned
-            // from General, and `chat_history::same_conversation` treats
-            // "" as an alias for General, so this must still journal.
+            // A legacy empty chat id is #general, so this must still journal.
             OutboundMessage {
                 message_id: None,
                 task_id: Some("t-2".to_string()),
@@ -440,15 +436,15 @@ async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
     let CompanyEvent::AgentReply { chat_id, .. } = relays
         .iter()
         .find(
-            |event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()),
+            |event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == "general"),
         )
         .expect("the empty-chat_id General relay must be present")
     else {
         unreachable!()
     };
     assert_eq!(
-        chat_id, "",
-        "General's own empty chat_id must be preserved verbatim"
+        chat_id, "general",
+        "a legacy empty chat_id reads back as #general"
     );
 }
 
@@ -582,96 +578,3 @@ async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
 // rather than rendering it flat, so a stale root would make the
 // continuation invisible — strictly worse than the bug being fixed, since
 // today's answer at least reaches the channel.
-
-/// A runtime whose one agent is allowed to refer to the `design` desk, so a
-/// forward reaches the width bound instead of stopping at authorization.
-#[cfg(all(feature = "openhuman", feature = "hivemind"))]
-async fn runtime_that_may_refer() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
-    let home_dir = tempfile::Builder::new()
-        .prefix("opencompany-refer-")
-        .tempdir()
-        .expect("tempdir");
-    let manifest: crate::company::types::CompanyManifest = toml::from_str(
-        r#"
-        [company]
-        name = "Acme"
-
-        [[agent]]
-        id = "ceo"
-        role = "Chief"
-        delegates_to = ["design"]
-
-        [[agent]]
-        id = "designer"
-        role = "Designer"
-
-        [[group_chat]]
-        id = "design"
-        name = "Design"
-        members = ["designer"]
-
-        [policy]
-        mode = "supervised"
-        "#,
-    )
-    .expect("manifest");
-    let rt = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
-        .build()
-        .await
-        .expect("runtime");
-    (rt, home_dir)
-}
-
-/// **The width bound: how many desks one pass may ask.**
-///
-/// `max_hops` bounds how DEEP a chain runs and says nothing about how WIDE
-/// it is — the library leaves that to the host, because only a host knows
-/// what a question costs it. Here it is a full model turn on another desk.
-///
-/// Pinned with a cap of 1 so the second forward is the one that trips it,
-/// and with distinct triggers so the idempotency marker cannot be what
-/// refuses it.
-#[cfg(all(feature = "openhuman", feature = "hivemind"))]
-#[tokio::test]
-async fn a_second_crossing_question_is_refused_once_the_width_is_spent() {
-    use tinyhivemind::dispatch::{EnqueueOutcome, EnqueueRefusal};
-    use tinyhivemind::referral::ReferralQueue;
-
-    let (rt, _home) = runtime_that_may_refer().await;
-    let rt = Arc::new(rt);
-    let gate = Arc::new(tokio::sync::Mutex::new(()));
-    let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4, None);
-
-    let forward = |trigger: u64| tinyhivemind::referral::Referral {
-        key: tinyhivemind::dispatch::DispatchKey {
-            trigger_sequence: trigger,
-        },
-        kind: tinyhivemind::referral::ReferralKind::Forward,
-        source_id: "ceo".to_string(),
-        target_id: "designer".to_string(),
-        content: "who owns the login screen?".to_string(),
-        from: tinyhivemind::dispatch::DispatchConversation {
-            desk_id: "engineering".to_string(),
-            thread_root: None,
-        },
-        to: tinyhivemind::dispatch::DispatchConversation {
-            desk_id: "design".to_string(),
-            thread_root: None,
-        },
-        origin: None,
-        child_hop: 1,
-    };
-
-    assert_eq!(
-        queue.enqueue_once(forward(101)).await.expect("decides"),
-        EnqueueOutcome::Enqueued,
-        "the first question is within the cap"
-    );
-    assert_eq!(
-        queue.enqueue_once(forward(202)).await.expect("decides"),
-        EnqueueOutcome::Refused {
-            reason: EnqueueRefusal::FeatureDisabled
-        },
-        "a different trigger, so this is the WIDTH bound refusing it, not the marker"
-    );
-}

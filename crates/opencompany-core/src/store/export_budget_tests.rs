@@ -17,6 +17,7 @@ async fn an_old_bundle_cannot_smuggle_a_withdrawn_message_back_in() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -116,6 +117,7 @@ async fn template_provenance_survives_roundtrip() {
     // Register a company carrying template provenance in the source home.
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -258,6 +260,7 @@ async fn operator_overlays_including_desk_order_survive_roundtrip() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -390,6 +393,7 @@ async fn budget_overrides_survive_roundtrip_including_zero_and_explicit_none() {
 
     let (s1, e1, m1, c1) = fs_ports(&home1);
     s1.save(&CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         id: id.clone(),
         manifest: budget_manifest(),

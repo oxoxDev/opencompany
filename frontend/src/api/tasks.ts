@@ -430,6 +430,7 @@ export type TimelineKind =
   | "tool_failed"
   | "approval"
   | "completed"
+  | "card"
   | "tool_call"
   | "thinking"
   | "note";

@@ -1,4 +1,4 @@
-//! The login routes: magic link, password, session, logout.
+//! The login routes: magic link, password, first-admin claim, session, logout.
 //!
 //! ## The generic-failure rule
 //!
@@ -25,7 +25,7 @@
 //! kind of grant, not a second one: eligibility only, minted on redemption,
 //! revoked by unsetting the source.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -80,10 +80,7 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
         .merge(public_scoped("/auth/me", get(me).patch(edit_me)))
-        .merge(public_scoped(
-            "/auth/hub",
-            get(hub_providers).post(hub_sign_in),
-        ))
+        .merge(public_scoped("/auth/claim", post(claim_first_admin)))
         .merge(public_scoped("/auth/password", post(set_password)))
         .merge(public_scoped(
             "/auth/wallet/challenge",
@@ -126,44 +123,12 @@ struct VerifyCode {
     code: String,
 }
 
-/// A platform token, handed back by the hub on the sign-in redirect.
+/// The first admin's chosen login and password, on a company nobody has
+/// joined yet. See [`claim_first_admin`].
 #[derive(Debug, Deserialize)]
-struct HubToken {
-    token: String,
-}
-
-/// One sign-in button, ready to render.
-///
-/// The console never assembles a hub URL itself. Only the host knows the hub's
-/// base URL and the origin the hub must return to, and a frontend guessing at
-/// either would aim a live sign-in at whatever it guessed.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HubProviderOption {
-    id: &'static str,
-    label: &'static str,
-    start_url: String,
-}
-
-/// What the console needs to draw its sign-in screen.
-#[derive(Debug, Serialize)]
-struct HubProvidersResult {
-    /// Empty on every host with no hub wired, which is how the console knows to
-    /// render the magic-link form alone rather than buttons that lead nowhere.
-    providers: Vec<HubProviderOption>,
-}
-
-/// What the console may ask a hub sign-in to return to, beyond its company.
-#[derive(Debug, Deserialize)]
-struct HubProvidersQuery {
-    /// The console destination the hub sign-in should land on, asked as a
-    /// *query* parameter because the console's fragment cannot survive the
-    /// OAuth round trip — the hub appends `token=…&key=auth` to the return URI
-    /// it was given, and anything after a `#` there would swallow them. Only
-    /// setup's dead-link recovery forwards a destination today (`from=setup`);
-    /// every other sign-in omits it and lands wherever it always did.
-    #[serde(default)]
-    from: Option<String>,
+struct ClaimFirstAdmin {
+    email: String,
+    password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -581,8 +546,9 @@ pub(crate) async fn create_session(
 /// for: a `Set-Cookie` by default, or the token in the body for a client that
 /// cannot receive a cookie at all (see [`cookie::SESSION_CARRIER_HEADER`]).
 ///
-/// One choke point for every browser login path — magic link, password, hub and
-/// wallet — so a carrier is added once rather than four times, and no path can
+/// One choke point for every browser login path — magic link, password, the
+/// first-admin claim and wallet — so a carrier is added once rather than four
+/// times, and no path can
 /// acquire one without the session-minting invariants in [`create_session`].
 async fn mint_session(
     state: &AppState,
@@ -818,22 +784,6 @@ fn redirect_fragment(redirect: &str) -> Option<String> {
     safe.then(|| redirect.to_string())
 }
 
-/// The safe subset of a hub sign-in destination hint.
-///
-/// `from` is carried in the hub's return URI as a query parameter — a fragment
-/// would swallow the hub's own `token=` on the way back, which is why this is
-/// not a [`redirect_fragment`]. It is round-tripped through an external service
-/// and back into the console's address bar, so it is validated to a slug
-/// subset (`setup`, today): a value that cannot be honoured is dropped rather
-/// than refused, exactly like [`redirect_fragment`].
-fn redirect_from(from: &str) -> Option<&str> {
-    let safe = from.len() <= 32
-        && from
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-    safe.then_some(from)
-}
-
 /// Mails the magic link. Returns whether it was actually sent.
 ///
 /// `redirect`, when present, is appended to the link so the console lands on
@@ -851,6 +801,12 @@ async fn deliver_code(
     // answer: the throttle and the dev echo both branch on it, and a second
     // spelling here is how those three drift apart.
     if !mail_transport_wired(state) {
+        return false;
+    }
+    // A plain username has no mailbox: a login on a host with no mail that
+    // later gained one. Nothing to send to, so nothing is sent — the person
+    // signs in with their password, as they always did.
+    if LoginIdentity::parse(email).mailbox().is_none() {
         return false;
     }
     let connections = state.connections();
@@ -923,159 +879,71 @@ async fn verify_code(
     mint_session(&state, &runtime, &user, &headers).await
 }
 
-/// `403` for an ecosystem sign-in this host cannot or will not honor.
+/// `POST …/auth/claim` — the first person in picks the admin login and sets
+/// its password, then is signed in.
 ///
-/// Unlike [`invalid_login`], these say what went wrong. The generic-failure
-/// rule exists so the login routes cannot be used as a membership oracle, and
-/// nothing here leaks membership: "this host has no hub" is a fact about the
-/// *deployment* the caller already knew, and "the hub rejected that" is about
-/// the token. `not_a_member` is the one that touches a person, and it is only
-/// ever reached by someone who has just proved to the hub that they hold that
-/// address — they are not learning anything they did not already know.
-fn hub_refused(code: &'static str, message: &'static str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(serde_json::json!({ "error": message, "code": code })),
-    )
-        .into_response()
-}
-
-/// Where the hub sends the browser back to after a sign-in.
+/// The way into a company nobody has joined yet, from the screen the person is
+/// actually looking at. Every other first sign-in needed a credential the host
+/// might not be able to deliver — a mailed link with no transport, or a shell
+/// command on the host — and the console dead-ended on a form that could not
+/// work (issue #1718 was the CLI half of that; this is the console half).
 ///
-/// Built from [`AppConfig::host_base_url`](crate::AppConfig::host_base_url) —
-/// the configured `OPENCOMPANY_PUBLIC_URL` when there is one, otherwise
-/// `http://{bind}`. That single seam is what makes hosted a configuration
-/// change rather than a code change: locally the bind fallback yields
-/// `http://127.0.0.1:<port>/`, which is the RFC 8252 loopback URI the hub
-/// already accepts; hosted, `OPENCOMPANY_PUBLIC_URL` yields the real origin and
-/// this function is untouched.
+/// Open **only while the company has no users**, and closed for good after.
+/// That is what keeps a first-come claim from being an open door: it admits
+/// exactly one person, and after them the only way in is the roster. Where the
+/// deployment already named its first admin — a manifest `[users].admins`
+/// entry or `OPENCOMPANY_ADMIN_EMAIL` — only that address may claim, so a
+/// stranger who reaches a provisioned tenant before its owner cannot take it.
 ///
-/// Carries `?company=` so the console lands scoped to the company it left from.
-/// The hub appends its own `token=…&key=auth` with `&`, so the two coexist.
-///
-/// `from`, when the console asked for one, names the destination the sign-in
-/// should land on. It rides here as a query parameter (a fragment would capture
-/// the hub's `token=` on the way back) and is validated by [`redirect_from`].
-fn console_redirect_uri(state: &AppState, company: &CompanyId, from: Option<&str>) -> String {
-    let origin = state.config().host_base_url();
-    let mut uri = format!("{}/?company={}", origin.trim_end_matches('/'), company);
-    if let Some(from) = from.and_then(redirect_from) {
-        uri.push_str(&format!("&from={from}"));
-    }
-    uri
-}
-
-/// `GET …/auth/hub` — the ecosystem sign-in buttons, ready to render.
-///
-/// Answers `{"providers": []}` rather than a 404 on a host with no hub, so the
-/// console has one code path: ask, render what comes back, and fall through to
-/// the magic-link form when nothing does. A host that cannot complete a
-/// sign-in — for either of the two reasons below — takes that same path.
-async fn hub_providers(
-    company: PublicCompany,
-    State(state): State<AppState>,
-    Query(query): Query<HubProvidersQuery>,
-) -> Json<HubProvidersResult> {
-    // No exchange means no way to check a token that came back, so there is no
-    // honest button to offer. Refusing here — rather than at redemption — is
-    // the difference between a console that says "sign in with a link" and one
-    // that sends someone through Google to be turned away on return.
-    // A hub sign-in resolves to an email address and applies this company's
-    // email roster, so it is a variety of email sign-in and belongs to that mode
-    // alone. Offering the buttons in wallet or none mode would send someone
-    // through Google to be refused on return — the same thing this guard
-    // refuses to do for its own reason.
-    if !company.runtime.auth_mode().uses_email() || state.hub_identity().is_none() {
-        return Json(HubProvidersResult {
-            providers: Vec::new(),
-        });
-    }
-    let redirect_uri = console_redirect_uri(&state, company.runtime.id(), query.from.as_deref());
-    let api_url = &state.config().api_url;
-    Json(HubProvidersResult {
-        providers: crate::server::hub_identity::HUB_PROVIDERS
-            .iter()
-            .map(|provider| HubProviderOption {
-                id: provider.id,
-                label: provider.label,
-                start_url: crate::server::hub_identity::login_start_url(
-                    api_url,
-                    provider.id,
-                    &redirect_uri,
-                ),
-            })
-            .collect(),
-    })
-}
-
-/// `POST …/auth/hub` — turn an ecosystem sign-in into a session here.
-///
-/// The console sends the browser to the hub's OAuth start pointed back at this
-/// origin; the hub completes the provider dance and returns a platform JWT in
-/// the URL. This route takes that token, asks the hub whose it is, and — if
-/// that address is eligible in *this* company by the same rules a magic link
-/// answers to — mints an ordinary human session.
-///
-/// It is deliberately the same three calls the magic-link path makes:
-/// [`eligibility`], [`upsert_from_eligibility`], [`mint_session`]. First login
-/// and Nth login stay one code path, and an ecosystem sign-in gets no privilege
-/// a mailed link would not have given the same person. In particular this does
-/// not touch `platform_auth`: that surface is the hosting layer's machine
-/// credential, and a human signing in must not acquire one.
-///
-/// The token is used for exactly one outbound request and then dropped. It is
-/// never persisted, never logged, and never echoed into an error.
-async fn hub_sign_in(
+/// The refusals are specific rather than the generic `invalid_login`. The
+/// generic-failure rule protects who is *on* the roster, and this route only
+/// answers while the roster is empty — the one fact it discloses, that nobody
+/// has joined, is the same one `auth/config` publishes as `claimable`.
+async fn claim_first_admin(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<HubToken>,
+    Json(body): Json<ClaimFirstAdmin>,
 ) -> Result<Response, crate::server::Rejection> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal.into());
     }
-
-    // Refuse before going anywhere when this host has no hub to ask. Accepting
-    // the token on trust would make an unverifiable JWT a bearer credential.
-    let Some(exchange) = state.hub_identity().cloned() else {
-        return Err(hub_refused(
-            "hub_unavailable",
-            "this host is not part of a TinyHumans ecosystem",
-        )
-        .into());
-    };
-
-    // The hub answering is what proves the token was real — this tenant cannot
-    // check the signature and does not try. Everything below reasons about the
-    // identity the hub returned, never about the request body.
-    let identity = match exchange.identify(&body.token).await {
-        Ok(identity) => identity,
-        // A 4xx from the hub means the token is expired, revoked, or was never
-        // real — a dead credential, not a broken hub. Surfacing the 502 the
-        // error type otherwise maps to would tell the user the ecosystem is
-        // down when all they need to do is sign in again.
-        Err(OpenCompanyError::TinyHumans { code, .. }) if code.starts_with("http_4") => {
-            return Err(
-                hub_refused("hub_rejected", "that sign-in has expired — sign in again").into(),
-            );
+    let standing = bootstrap_admins(state.config(), &runtime).await?;
+    let claimed = super::bootstrap::claim_first_admin(
+        runtime.users(),
+        runtime.id(),
+        &standing,
+        &body.email,
+        &body.password,
+    )
+    .await?;
+    let user = match claimed {
+        Ok(user) => user,
+        Err(super::bootstrap::ClaimRefusal::AlreadyClaimed) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "this company already has an admin — sign in instead",
+                    "code": "already_claimed",
+                })),
+            )
+                .into_response()
+                .into());
         }
-        // Anything else really is the hub being unreachable or wrong, and keeps
-        // its 502/503 so an operator can tell the two apart.
-        Err(err) => return Err(ApiError(err).into_response().into()),
+        Err(super::bootstrap::ClaimRefusal::NotTheNamedAdmin) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "this host already names its first admin — claim it with that address",
+                    "code": "not_the_named_admin",
+                })),
+            )
+                .into_response()
+                .into());
+        }
     };
-
-    let email = normalize_email(&identity.email);
-    let now = now_millis();
-    let Some(role) = eligibility(state.config(), &runtime, &email, now).await? else {
-        // Signed in to the ecosystem, but not a person this company knows. A
-        // distinct code so the console can say "ask an admin to invite you"
-        // instead of "that sign-in is dead".
-        return Err(
-            hub_refused("not_a_member", "that account has no access to this company").into(),
-        );
-    };
-    let user = upsert_from_eligibility(&runtime, &email, role, now).await?;
+    tracing::info!(company = %runtime.id(), "first admin claimed");
     mint_session(&state, &runtime, &user, &headers).await
 }
 
@@ -1477,11 +1345,15 @@ struct AuthConfigResult {
     /// Whether a password may be offered alongside the magic-link form. Only
     /// ever true in `email` mode.
     passwords: bool,
-    /// Whether a magic link asked for here can actually reach the person: a
-    /// wired transport, or a loopback host that hands the code back in the
-    /// response. False means the link form is a dead end and the console must
-    /// say so rather than draw it.
+    /// Whether a magic link asked for here reaches a mailbox — this host has a
+    /// mail transport wired. False means the console draws no link form at
+    /// all: a password is the only sign-in, and the screen says so rather
+    /// than sending someone to wait for a message no process here will send.
     magic_link: bool,
+    /// Whether nobody has joined this company yet, so the first person in may
+    /// pick the admin login and its password (`POST …/auth/claim`). Only ever
+    /// true in `email` mode, and only until the first user exists.
+    claimable: bool,
 }
 
 /// `GET …/auth/config` — the sign-in mode this company uses.
@@ -1515,10 +1387,22 @@ async fn auth_config(
         // property of the deployment, exactly like `mode`.
         name: company.runtime.display_name().await,
         passwords: mode.uses_email(),
-        // The same two predicates `request_code` itself branches on, asked
+        // The same predicate `request_code` itself delivers through, asked
         // rather than restated: whether the console draws the form and whether
-        // the code goes anywhere must never be two separate opinions.
-        magic_link: mail_transport_wired(&state) || state.config().is_local_only(),
+        // the code goes anywhere must never be two separate opinions. The
+        // loopback echo (`dev_code`) is deliberately *not* counted: it is a
+        // developer convenience on the API, and a sign-in screen that offers
+        // "email me a link" on a host with no mail is the confusion this
+        // field exists to remove.
+        magic_link: mail_transport_wired(&state),
+        // A store read on an unauthenticated route, but a cold one: the
+        // console asks once per sign-in screen, and it is the difference
+        // between a first visitor being offered a way in and being offered a
+        // form nobody can pass.
+        claimable: mode.uses_email()
+            && super::bootstrap::is_unclaimed(company.runtime.users(), company.runtime.id())
+                .await
+                .unwrap_or(false),
     })
 }
 

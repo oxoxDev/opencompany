@@ -9,7 +9,7 @@ use super::tools::{
 use super::workflow_build_fixtures_tests::*;
 use super::workflow_build_shared_tests::*;
 use super::*;
-use openhuman_core::tools::traits::Tool;
+use tinytools::Tool;
 
 // ---------------------------------------------------------------------------
 // Create-time copilot (issue #753)

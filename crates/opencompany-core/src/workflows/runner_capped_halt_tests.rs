@@ -406,6 +406,7 @@ description = "Runs Acme."
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -433,6 +434,7 @@ description = "Runs Acme."
 
 pub(super) fn deps(dir: &std::path::Path) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -467,6 +469,7 @@ pub(super) fn deps(dir: &std::path::Path) -> HarnessDeps {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -522,6 +525,7 @@ allow = ["*"]
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

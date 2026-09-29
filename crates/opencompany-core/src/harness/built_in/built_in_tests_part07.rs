@@ -24,6 +24,7 @@ async fn ensure_rebuilds_when_an_overlay_agent_is_added() {
 
     let dir = tempfile::tempdir().unwrap();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -59,6 +60,7 @@ async fn ensure_rebuilds_when_an_overlay_agent_is_added() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -415,6 +417,7 @@ async fn ensure_gates_shell_tools_once_the_token_budget_is_crossed() {
         total_budget: None,
     };
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -450,6 +453,7 @@ async fn ensure_gates_shell_tools_once_the_token_budget_is_crossed() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

@@ -40,7 +40,6 @@ list group=Other reach=Nothing standing=PerCall
 list_skills group=Other reach=Nothing standing=PerCall
 list_tasks group=Other reach=Nothing standing=PerCall
 mcp_call_tool group=Other reach=Consequence standing=PerCall
-mcp_list_servers group=Other reach=Nothing standing=PerCall
 mcp_list_tools group=Other reach=Nothing standing=PerCall
 mcp_registry_list_tools group=Other reach=Nothing standing=PerCall
 mcp_registry_tool_call group=Other reach=Consequence standing=PerCall
@@ -58,6 +57,7 @@ paypal_get_wallet_balance group=Other reach=Nothing standing=PerCall
 paypal_list_transactions group=Other reach=Nothing standing=PerCall
 publish_artifact group=Publish reach=Consequence standing=Grantable
 query_company group=Other reach=Nothing standing=PerCall
+read group=Other reach=Nothing standing=PerCall
 read_run group=Other reach=Nothing standing=PerCall
 read_run_output group=Other reach=Nothing standing=PerCall
 read_skill_resource group=Other reach=Nothing standing=PerCall

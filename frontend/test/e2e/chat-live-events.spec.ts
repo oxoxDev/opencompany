@@ -63,6 +63,20 @@ function railRow(page: Page, channelName: string): Locator {
   return page.getByRole("complementary").first().getByRole("button", { name: channelName });
 }
 
+test("offers #general in the rail, from the host's desk list", async ({ page }) => {
+  await openChannel(page, ENGINEERING.id);
+
+  await expect(railRow(page, ENGINEERING.channel)).toBeVisible();
+  await expect(railRow(page, "general")).toBeVisible();
+});
+
+test("a legacy #/chat/main link opens #general under its own address", async ({ page }) => {
+  await page.goto("/#/chat/main");
+
+  await expect(page.getByPlaceholder("Message #general")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => new URL(page.url()).hash).toMatch(/^#\/chat\/general(?:\?|$)/);
+});
+
 /**
  * The three tests below find the reply to their own turn by the offline echo
  * brain's `You said: <text>` — which is exactly the right way to prove an SSE
@@ -189,18 +203,51 @@ test("a turn sent from the composer renders exactly one company bubble", async (
   await expect(reply(page, marker)).toHaveCount(1);
 });
 
-test("a running turn shows its tool rows in the channel", async ({ page }) => {
+test("a turn sent in #general gets its reply there", async ({ page }) => {
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
+  await openChannel(page, "general");
+  await expect(page).toHaveURL(/#\/chat\/general(?:[/?]|$)/);
+  const before = await settledBubbleCount(page);
+
+  const marker = `general-${Date.now()}`;
+  const sent = page.waitForRequest(
+    (r) => r.method() === "POST" && /\/chat$/.test(new URL(r.url()).pathname),
+  );
+  await page.getByPlaceholder("Message #general").fill(marker);
+  await page.keyboard.press("Enter");
+  expect((await sent).postDataJSON()).toMatchObject({ text: marker, chat: "general" });
+
+  await expect(reply(page, marker)).toHaveCount(1, { timeout: 60_000 });
+  await expect(bubbles(page)).toHaveCount(before + 2);
+});
+
+test("a running turn shows its current tool in the channel", async ({ page }) => {
+  // This spec supplies an SSE stream itself. The default Console E2E lane is
+  // the appropriate host for that isolated rendering contract; the live-brain
+  // lane owns the real-agent coverage and its long-lived stream cannot be
+  // replaced after the harness has subscribed.
+  test.skip(LIVE_BRAIN, "the default Console E2E lane covers the synthetic SSE rendering fixture");
   // The one test that writes its own stream. The frames below are the exact
   // shape `src/turn_stream.rs` puts on the wire and `use-events.ts` types; the
   // offline brain this suite runs against calls no tools, so there is no live
   // turn to watch without inventing one. What is being proved is that a frame
   // carrying a desk's thread id reaches *that channel's* timeline — which is
   // what Chat never did.
+  const atMillis = Date.now();
   const frames = [
-    { type: "tool_call", seq: 1, chatId: ENGINEERING.id, toolCallId: "t1", label: "workspace_list" },
+    {
+      type: "tool_call",
+      seq: 1,
+      atMillis,
+      chatId: ENGINEERING.id,
+      toolCallId: "t1",
+      label: "workspace_list",
+    },
     {
       type: "tool_result",
       seq: 2,
+      atMillis: atMillis + 1,
       chatId: ENGINEERING.id,
       toolCallId: "t1",
       label: "workspace_list",
@@ -212,28 +259,90 @@ test("a running turn shows its tool rows in the channel", async ({ page }) => {
       status: "ok",
       elapsedMs: 120,
     },
-    { type: "tool_call", seq: 3, chatId: ENGINEERING.id, toolCallId: "t2", label: "workspace_read" },
+    {
+      type: "tool_call",
+      seq: 3,
+      atMillis: atMillis + 2,
+      chatId: ENGINEERING.id,
+      toolCallId: "t2",
+      label: "workspace_read",
+    },
   ];
-  await page.route("**/events", (route) =>
-    route.fulfill({
+  let releaseFrames: (() => void) | undefined;
+  const framesReleased = new Promise<void>((resolve) => {
+    releaseFrames = resolve;
+  });
+  let streamRequested: (() => void) | undefined;
+  const streamIsWaiting = new Promise<void>((resolve) => {
+    streamRequested = resolve;
+  });
+  await page.route("**/events**", async (route) => {
+    streamRequested?.();
+    await framesReleased;
+    await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
       body: frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
-    }),
-  );
+    });
+  });
 
-  await openChannel(page, ENGINEERING.id);
+  // Do not await the navigation before releasing the intercepted EventSource:
+  // Playwright includes the routed stream in the navigation's pending work.
+  // Waiting for `openChannel` first therefore deadlocks the fixture, while
+  // fulfilling immediately can deliver the frames before the channel map is
+  // mounted. The visible composer is the exact readiness boundary we need.
+  const channelOpened = openChannel(page, ENGINEERING.id);
+  await streamIsWaiting;
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
+  await expect(railRow(page, ENGINEERING.channel)).toBeVisible({ timeout: 30_000 });
+  releaseFrames?.();
+  await channelOpened;
 
-  // The rows themselves, not a typing dot — and the finished one keeps the
-  // elapsed time the frame carried.
-  await expect(page.getByText("workspace_list").first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("3 files").first()).toBeVisible();
-  await expect(page.getByText("workspace_read").first()).toBeVisible();
+  // Chat names only the current activity; completed tool details live in Raw
+  // turns. The result frame settles workspace_list, leaving workspace_read as
+  // the newest running step and therefore the activity label.
+  await expect(workingRow(page)).toContainText("workspace_read", { timeout: 30_000 });
+  await expect(page.getByText("workspace_list")).toHaveCount(0);
+  await expect(page.getByText("3 files")).toHaveCount(0);
   await expect(page.getByText("Replying…")).toHaveCount(0);
 
-  // Addressed, not broadcast: the other desk's channel shows none of it.
+  // The recorded rows are scoped to their channel, not broadcast to another.
+  await openChannel(page, CONTENT.id);
+  await expect(workingRow(page)).toHaveCount(0);
+});
+
+test("a settled turn keeps its raw tool rows out of the channel", async ({ page }) => {
+  // Raw tool calls belong only in Raw turns; the live-reply cases above prove
+  // SSE routing, while this fixture proves durable history is filtered.
+  await page.route("**/chat/history?*", (route) => {
+    const desk = new URL(route.request().url()).searchParams.get("desk");
+    if (desk !== ENGINEERING.id) return route.continue();
+    return route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([
+        {
+          id: "tool-turn-e2e",
+          channel: ENGINEERING.id,
+          author: "engineering",
+          text: "I checked the workspace.",
+          atMillis: Date.now(),
+          mine: false,
+          steps: [
+            { kind: "tool_call", status: "ok", label: "workspace_list", result: "3 files", elapsedMs: 120 },
+            { kind: "tool_call", status: "running", label: "workspace_read" },
+          ],
+        },
+      ]),
+    });
+  });
+  await openChannel(page, ENGINEERING.id);
+  await expect(page.getByText("I checked the workspace.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("workspace_list")).toHaveCount(0);
+  await expect(page.getByText("workspace_read")).toHaveCount(0);
   await openChannel(page, CONTENT.id);
   await expect(page.getByText("workspace_list")).toHaveCount(0);
+  await expect(page.getByText("workspace_read")).toHaveCount(0);
 });
 
 /* -------------------------------------------------------------------------- *

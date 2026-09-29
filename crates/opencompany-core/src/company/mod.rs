@@ -75,11 +75,28 @@ pub mod ledger_file;
 pub mod ledgers;
 mod manifest;
 pub mod mcp;
+/// The one rule that decides whether two MCP records name the same server,
+/// shared by the console's server list and the agent prompt that tells a model
+/// which dispatch tool reaches which server.
+pub(crate) mod mcp_endpoint;
+/// Which of an agent's two MCP dispatch tools reaches which connected server,
+/// rendered for its system prompt. Ungated: the prompt is composed from company
+/// data, and the rule is worth testing without a harness build.
+// The only caller is the prompt builder, which needs `openhuman` to exist and
+// `mcp` to be wired. The renderer stays ungated regardless so its tests run in
+// the default lane rather than only in the `mcp` lane's filter (issue #770).
+#[cfg_attr(not(all(feature = "openhuman", feature = "mcp")), allow(dead_code))]
+pub(crate) mod mcp_families;
 /// The bundle's MCP declaration file: `companies/<name>/mcp.json`. A vertical
 /// ships the tool servers its work needs the way it already ships its ledgers,
 /// rather than starting with an empty tool surface somebody has to fill in by
 /// hand from the console before the company can do anything.
 pub mod mcp_file;
+/// Per-tool approval policy for MCP servers: the tier vocabulary, the
+/// operator's stored overrides, and the ladder that resolves one from the
+/// other. Ungated — the console route that edits a policy ships without the
+/// harness, and the gate that enforces one ships with it.
+pub mod mcp_policy;
 pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
@@ -92,6 +109,10 @@ pub mod mcp_oauth;
 // rules are ordinary text handling with real edge cases, and they are worth
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
+// The team section of every agent's prompt: the roster, the desks, and who
+// this agent may hand work to. Always compiled for the same reason `prompt`
+// is — `opencompany prompt` renders it from a manifest alone.
+pub mod team_brief;
 // The shape of one drafted teammate mandate or persona (issue #1776). Same
 // always-compiled argument as `prompt` above: the model call that produces a
 // draft is behind `openhuman`, but what a draft IS — which fields are
@@ -114,8 +135,26 @@ pub mod search;
 // polish pass and the fallback when that pass cannot run, so a company with no
 // inference credential still gets a real team.
 pub mod setup;
+/// One turn of the copilot that drafts a whole skill document, and what it is
+/// allowed to see.
+pub mod skill_draft;
 pub mod skill_effective;
 mod skill_file;
+pub mod skill_provenance;
+/// The scan every skill an operator did not write passes through, and the
+/// sanitizer that renders untrusted catalogue text as data. Always compiled:
+/// the write plane runs it on every install in every build, and the sanitizer
+/// is the structural half of the same control.
+pub mod skill_scan;
+/// Reading a skill an operator uploaded — a bare `SKILL.md`, or an archive
+/// carrying one — with the archive's shape refused before anything is
+/// decompressed.
+pub mod skill_upload;
+/// The rules a skill document must satisfy before the product will store it.
+/// Always compiled: registry install, the empty-registry fallback and console
+/// authoring share it, and three entry points that validated separately are
+/// exactly how they drift apart.
+pub mod skill_validate;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
@@ -185,7 +224,6 @@ use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
 pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
-pub(crate) use manifest::hive_problems;
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
@@ -197,6 +235,7 @@ pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
 pub use skill_file::{
     SkillDoc, load_catalog_skills, load_dir_skills, parse_skill_md, render_skill_md,
 };
+pub use skill_provenance::{SkillDrift, VersionChange, drift, skill_digest, trust_tier};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,

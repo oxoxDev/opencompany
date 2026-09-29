@@ -7,7 +7,7 @@ runs is a single switch — `OPENCOMPANY_COMPANY`** — an example directory nam
 
 The same two images deploy everywhere below; only the wiring differs.
 
-## Local / any Docker host — Compose
+## Local / Docker or Podman — Compose
 
 Everything Docker lives in this directory: `Dockerfile` (built with the
 repository root as its context, so run it as `docker build -f deploy/Dockerfile .`
@@ -22,6 +22,10 @@ cp .env.example .env
 docker compose up --build
 ```
 
+These commands also work when `docker` is Podman's Docker-compatible CLI and
+`podman-compose` is its Compose provider. `scripts/launch-demo.sh` uses this
+same portable invocation for the hot-reload stack.
+
 From the repository root, `docker compose -f deploy/docker-compose.yml up --build`
 is the same thing — Compose reads `.env` from the compose file's directory
 either way.
@@ -29,9 +33,55 @@ either way.
 - Console → http://localhost:5173 (proxies the API, so it's same-origin).
 - Host API → http://localhost:8080 (e.g. `/healthz`, `/api/v1/companies`).
 
+There are no default credentials. Open <http://localhost:5173>: a company
+nobody has joined yet asks the first visitor to choose the admin login and a
+password, and signs them in. Do that before exposing the port to anyone else —
+the offer closes the moment the first account exists. Set
+`OPENCOMPANY_ADMIN_EMAIL` to restrict the claim to one address.
+
+To create the admin from the shell instead, from the repository root:
+
+```sh
+./scripts/init-demo-admin.sh marketing you@example.com
+./scripts/launch-demo.sh marketing up
+```
+
+Run the initializer once per fresh data volume. A plain `down` preserves the
+login; `./scripts/launch-demo.sh marketing down -v` deletes it with the rest of
+that demo's data.
+
 Switch companies by editing `OPENCOMPANY_COMPANY` in `.env` and re-running
 `docker compose up`. Compile optional features into the host with
 `OPENCOMPANY_FEATURES="medulla tinyplace sqlite"`.
+
+To exercise the development Compose flow end to end, including both published
+ports, first-admin initialization, and the console's proxy connection to the
+host, run:
+
+```sh
+./scripts/test-compose-e2e.sh
+```
+
+The fast test for the first-admin helper uses a Docker stub and does not start
+containers:
+
+```sh
+./scripts/test-init-demo-admin.sh
+```
+
+The development overlay keeps Cargo and frontend dependency caches in shared
+external volumes, while each Compose project retains its own `opencompany-data`
+volume. The demo launcher and administrator helper create the cache volumes
+automatically when needed, so repeated demo runs do not rebuild dependencies or
+remove another project's caches.
+
+The Compose E2E test requires Docker (or a compatible Compose provider), `curl`,
+and a working local build environment. It creates a temporary project, asks
+Compose for free host ports (`E2E_API_PORT` and `E2E_CONSOLE_PORT` may override
+them), initializes `E2E_ADMIN_EMAIL`/`E2E_ADMIN_PASSWORD`, and removes the
+project-scoped containers and data volume on exit. Shared dependency caches are
+preserved. Run it with `./scripts/test-compose-e2e.sh`; on failure the script
+prints the Compose status and logs.
 
 For a selectable memory engine, add `tinymemory` (hosted engines —
 Supermemory, Mem0, Cognee — plus the `null` driver) and `tinymemory-embedded`

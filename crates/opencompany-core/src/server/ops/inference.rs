@@ -33,7 +33,6 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::app::config::EnvSource;
 use crate::company::IMPLICIT_HARNESS_ID;
 use crate::company::Inference;
 use crate::company::inference::catalogue;
@@ -142,7 +141,7 @@ async fn resolved_endpoint(
 > {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
-    let platform = platform_default(&crate::app::config::ProcessEnv);
+    let platform = platform_default(runtime);
     let Some(decl) = resolve_effective(runtime.id(), &manifest, platform.as_ref(), secrets)
         .await
         .map_err(ApiError)?
@@ -223,7 +222,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
 /// carries a credential — only a non-secret `keyConfigured` flag.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InferenceStatusDto {
+pub(crate) struct InferenceStatusDto {
     /// Provider kind (`managed` / `openrouter` / `openai_compatible` / `ollama`)
     /// **as the operator selected it**, not as it resolves.
     ///
@@ -925,40 +924,27 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
     RunnerGap::NotWired
 }
 
-/// This deployment's platform-injected managed default — the same
-/// `(base_url, credential)` pair the harness routes on
-/// ([`harness_inference_from_env`](crate::harness::provider::harness_inference_from_env)),
-/// read from the environment and never from a tenant secret.
+/// This runtime's platform managed default — the same `(base_url,
+/// credential)` pair the harness routes on, handed to the runtime by the
+/// builder that built its brain
+/// ([`CompanyRuntime::platform_default`](crate::company::runtime::CompanyRuntime::platform_default)).
 ///
-/// `None` when no managed credential resolves — which is exactly when the
-/// harness resolves no env default either. Deriving it from that one function
-/// rather than reading `OPENCOMPANY_INFERENCE_URL` directly is what keeps
-/// display and routing honest in both directions: a bare URL with no credential
-/// routes nowhere, so the card must not advertise it as the endpoint in use.
+/// Read from the runtime and never from the process environment: this used to
+/// re-derive it from `OPENCOMPANY_INFERENCE_URL` and the credential variables,
+/// which was a second copy of the boot-time resolution — one that did not know
+/// the host's `api_url` (a `config.toml` value is not an environment variable),
+/// and that was `None` whenever the environment held no credential, at which
+/// point every card fell back to the production constant. A desktop pointed at
+/// staging said `api.tinyhumans.ai` on the LLM page while its key had been
+/// minted on `staging-api`.
 ///
-/// Also `None` off the `openhuman` feature, which is a shipped configuration
-/// (`deploy/Dockerfile`'s `FEATURES` arg defaults to empty, and `deploy/README.md`
-/// suggests sets like `medulla tinyplace sqlite`) — but not a gap. Nothing
-/// outside `src/harness/` reads `OPENCOMPANY_INFERENCE_URL`, so in such a build
-/// there is no injected endpoint for the card to misreport: the built-in
-/// constant is the only inference endpoint that exists, and the company is on
-/// the echo or hosted brain, which `cognition` reports on its own. The medulla
-/// hosted path talks to `DEFAULT_API_URL` over its own socket protocol rather
-/// than an OpenAI-compatible surface, so it is not an endpoint `baseUrl`
-/// describes either.
-fn platform_default(env: &dyn EnvSource) -> Option<EnvDefault> {
-    #[cfg(feature = "openhuman")]
-    {
-        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| EnvDefault {
-            base_url: config.base_url,
-            credential: config.credential,
-        })
-    }
-    #[cfg(not(feature = "openhuman"))]
-    {
-        let _ = env;
-        None
-    }
+/// `None` only for a runtime that was never built through the builder (a
+/// hand-assembled test runtime): every builder-made runtime has one, with the
+/// credential reporting `configured() == false` when the deployment holds no
+/// instance identity — which is what every managed gate tests, so a bare
+/// endpoint is never advertised as a source that would route somewhere.
+fn platform_default(runtime: &CompanyRuntime) -> Option<EnvDefault> {
+    runtime.platform_default().cloned()
 }
 
 /// Resolves the effective status DTO against the real process environment and
@@ -969,7 +955,7 @@ async fn effective_status(
 ) -> Result<InferenceStatusDto, ApiError> {
     effective_status_with(
         runtime,
-        platform_default(&crate::app::config::ProcessEnv).as_ref(),
+        platform_default(runtime).as_ref(),
         state.can_rebuild_in_place(),
     )
     .await
@@ -1069,7 +1055,11 @@ async fn effective_status_with(
             provider: d.selected_provider().to_string(),
             proxied: d.is_proxied(),
             slug: d.telemetry_slug().to_string(),
-            base_url,
+            base_url: if d.selected_provider() == inference::MANAGED_SLUG {
+                managed.base_url.clone()
+            } else {
+                base_url
+            },
             models: d.models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
@@ -1122,12 +1112,9 @@ async fn effective_status_with(
 /// reads on a route nobody calls in a loop, in exchange for the console never
 /// again being told Managed on a company where managed resolves to nothing.
 async fn managed_resolves(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
-    Ok(managed_state(
-        runtime,
-        platform_default(&crate::app::config::ProcessEnv).as_ref(),
-    )
-    .await?
-    .configured)
+    Ok(managed_state(runtime, platform_default(runtime).as_ref())
+        .await?
+        .configured)
 }
 
 /// What the managed brain would resolve to for this company.
@@ -1495,7 +1482,7 @@ async fn test_config(company: ScopedCompany) -> Response {
             // URL carrying no bearer at all — a staging tenant whose routing is
             // perfectly fine would be told its provider is unreachable, on the
             // same card that was already misreporting the URL (issue #597).
-            let decl = match platform_default(&crate::app::config::ProcessEnv) {
+            let decl = match platform_default(runtime) {
                 None => tenant,
                 Some(platform) => {
                     match resolve_effective(runtime.id(), &manifest, Some(&platform), secrets).await

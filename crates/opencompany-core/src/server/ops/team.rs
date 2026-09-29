@@ -126,6 +126,32 @@ struct TeamMemberDto {
     /// the bug: it is indistinguishable from a declaration on the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
     tier: Option<String>,
+    /// Which `[[harness]]` this teammate runs its turns on, by declared id —
+    /// the same field, from the same helper, as `GET …/team/{agent_id}`.
+    ///
+    /// Absent means the harness marked `default = true`, **not** "no harness":
+    /// every teammate resolves to one. Skipped rather than defaulted for
+    /// `tier`'s reason — a default is indistinguishable from a declaration on
+    /// the wire, and a roster card that named the default as though this
+    /// teammate had pinned it would be claiming something the record does not
+    /// say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    /// This teammate's own model pin: the hint forwarded to an ACP harness, or
+    /// the model half of its `{provider, model}` pair on a built-in one.
+    ///
+    /// Absent means it declares none and inherits the company default. Carried
+    /// on the list for the reason `tier` and `desks` are: the roster grid draws
+    /// a card per teammate, and a field the list omitted was a field the card
+    /// had to invent or leave blank — with no way to resolve it short of an
+    /// N+1 over the detail read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// The provider half of this teammate's own `{provider, model}` pair, set
+    /// only together with [`model`](Self::model) and only meaningful on a
+    /// built-in harness. Absent means the company default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     /// Whether this teammate is the company's orchestrator, resolved by the
     /// roster rule (tagged tier first, else the first declared agent) — the
     /// same field, from the same helper, as the detail read (issue #643).
@@ -430,12 +456,15 @@ fn member_row(
         name,
         role,
         description,
-        // All four through `team_agent`'s helpers, never recomputed here: the
+        // Through `team_agent`'s helpers, never recomputed here: the
         // roster list and the detail read must not be able to disagree about
         // the same teammate (issues #264, #601, #643). A second copy of the
         // orchestrator rule in particular would be a copy of a rule that has
         // two arms, and the arm it dropped would be invisible on screen.
         tier: super::team_agent::declared_tier(record, agent_id),
+        harness: super::team_agent::declared_harness(record, agent_id),
+        model: super::team_agent::declared_model(record, agent_id),
+        provider: super::team_agent::declared_provider(record, agent_id),
         is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
         tools: super::team_agent::agent_tools(record, agent_id),
         desks: super::team_agent::desks_for(record, agent_id),
@@ -687,7 +716,7 @@ async fn add_member(
         model: None,
         harness: None,
     };
-    record.overlay_agents.push(agent.clone());
+    let general_delta = record.hire_overlay_agent(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
         agent_id: agent.id.clone(),
         budget_usd_daily: body.budget_usd_daily,
@@ -756,12 +785,16 @@ async fn add_member(
     {
         tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
     }
+    journal_general_membership(&company, general_delta).await;
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
     // written out here, so this response cannot drift from the two reads
     // (issues #601, #643).
     let tier = super::team_agent::declared_tier(&record, &agent.id);
+    let harness = super::team_agent::declared_harness(&record, &agent.id);
+    let model = super::team_agent::declared_model(&record, &agent.id);
+    let provider = super::team_agent::declared_provider(&record, &agent.id);
     let is_orchestrator = super::team_agent::is_orchestrator(&record, &agent.id);
     let tools = super::team_agent::agent_tools(&record, &agent.id);
     let desks = super::team_agent::desks_for(&record, &agent.id);
@@ -771,6 +804,9 @@ async fn add_member(
         role: agent.role,
         description: agent.description,
         tier,
+        harness,
+        model,
+        provider,
         is_orchestrator,
         tools,
         desks,
@@ -824,35 +860,14 @@ async fn remove_member(
         )));
     }
 
-    // Tombstone the operator-feed divert before it can be lost (issue #1781
-    // review, Codex P2 follow-up to the desk-deletion fix): a manifest
-    // teammate at the literal id `operator` is already covered below —
-    // `retire_agent` tombstones it under the same key
-    // `operator_feed_channel`'s own `is_retired` check reads — but an
-    // *overlay* teammate is deleted outright with no tombstone at all. If
-    // this removal is what's currently holding the divert (id or, via
-    // `is_roster_agent`, nothing else does for a teammate — desks are the
-    // only case matched by display name), the fallback address must stay
-    // fixed after the removal exactly as `delete_desk` already keeps it
-    // fixed after a colliding desk's removal — see
-    // `CompanyRecord::divert_operator_feed_permanently`'s doc.
-    if record.operator_feed_channel()
-        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
-    {
-        record.divert_operator_feed_permanently();
-    }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
-    if is_manifest {
-        // A tombstone, not a manifest rewrite: `company.toml` and the global
-        // baseline merged into it are re-read on every rebuild, so a teammate
-        // "removed" by editing the roster would simply come back. Recorded here
-        // and filtered out by `CompanyRecord::effective_agents`, which is what
-        // takes the teammate off the roster, off its desks and out of the
-        // harness build rather than merely off the Team page.
-        record.retire_agent(&agent_id);
+    // A manifest teammate is tombstoned rather than edited out of
+    // `company.toml`, which is re-read on every rebuild.
+    let general_delta = if is_manifest {
+        record.retire_agent(&agent_id)
     } else {
-        record.overlay_agents.retain(|a| a.id != agent_id);
-    }
+        record.remove_overlay_agent(&agent_id).1
+    };
     // Desk seats an operator added are dropped with the teammate either way. A
     // blueprint seat is left alone — `effective_desk_members` already filters a
     // retired teammate out of it, and the manifest is not rewritten.
@@ -878,7 +893,22 @@ async fn remove_member(
     // for a typo'd name rather than a hazard to design around.
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
     company.runtime.store().save(&record).await?;
+    journal_general_membership(&company, general_delta).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Journals a `#general` membership change, best-effort: the roster write is
+/// already durable, so a refused row must not fail the request.
+async fn journal_general_membership(
+    company: &ScopedCompany,
+    delta: crate::ports::types::GeneralMembershipDelta,
+) {
+    let Some(event) = delta.into_event(company.actor.clone()) else {
+        return;
+    };
+    if let Err(err) = company.runtime.events().append(company.id(), event).await {
+        tracing::warn!(error = %err, "#general membership change could not be journaled");
+    }
 }
 
 /// `PUT {scope}/team/{agent_id}/budget` — set, change, or remove a teammate's
@@ -1161,3 +1191,6 @@ mod tests_an_admin_can_set;
 #[cfg(test)]
 #[path = "team_an_uncapped_company_is_tests.rs"]
 mod tests_an_uncapped_company_is;
+#[cfg(test)]
+#[path = "team_general_channel_tests.rs"]
+mod tests_general_channel;

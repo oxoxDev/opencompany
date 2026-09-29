@@ -27,8 +27,20 @@
 //! and the paths are updated separately.
 
 pub mod acp;
+/// The TinyHumans backend transport, installed once per process so managed
+/// search, Composio and media reach the backend. See [`backend_transport`].
+pub mod backend_transport;
 pub mod built_in;
+/// A small in-process tool loop over a `ChatModel`, for host-side passes whose
+/// tools' side effect is the result (the workflow copilot). See [`host_loop`].
+pub mod host_loop;
 pub mod lanes;
+/// The loopback OpenAI-compatible endpoint the embedded runtime reaches this
+/// crate's own inference models through. See [`model_bridge`].
+pub mod model_bridge;
+/// The one process-wide OpenHuman runtime every company agent is created on.
+/// See [`openhuman_runtime`].
+pub mod openhuman_runtime;
 pub mod router;
 /// The name an agent's openhuman session answers to — `{company}:{agent_id}`,
 /// stamped onto the session at build time and quoted by the speech tools when
@@ -66,15 +78,10 @@ pub mod profile_draft;
 /// First-run company setup's pass: one tool-less model call that designs a
 /// company's starting team from three answers. See [`roster_build`].
 pub mod roster_build;
-/// Issue #1890 F: `read_thread`, which follows a reference the operator makes
-/// to another conversation in the channel a turn is answering in. Scoped
-/// through the same `owns` predicate the chat seed uses, so it cannot reach a
-/// thread the isolation was built to keep out. See [`thread_tools`].
-/// Talking as a tool call: `desk_post`, `desk_dm`, `desk_close` and
-/// `desk_read`, whose names, argument shapes and description text all come from
-/// `tinyhivemind::speech`. Off unless the manifest says `[speech] enabled`. See
-/// [`speech_tools`].
-pub mod speech_tools;
+/// The pass that drafts ONE skill document for an operator who then keeps it or
+/// throws it away. One tool-less model call on the same drafter
+/// [`profile_draft`] builds, writing nothing. See [`skill_draft`].
+pub mod skill_draft;
 /// Issue #1032: the in-turn spend brake — the
 /// [`StopHook`](oh::agent::stop_hooks::StopHook) wrapper that makes a budget
 /// halt observable to this crate, and the [`SpendHalt`] record the
@@ -90,7 +97,6 @@ mod spend_halt_turn_test_fixtures;
 /// its step cap. Test-only.
 #[cfg(test)]
 mod spend_halt_turn_tests;
-pub mod thread_tools;
 
 /// The ACP `RunTurn`, under the path it had before the split.
 ///

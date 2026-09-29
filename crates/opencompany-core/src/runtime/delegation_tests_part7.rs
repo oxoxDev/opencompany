@@ -39,47 +39,12 @@ async fn a_responders_own_budget_pause_survives_the_relay_replacing_the_reply() 
     assert_eq!(out.reply, "All shipped.", "the relay did replace the text");
 }
 
-/// Issue #1846 review (Codex #3865395873): a responder asked DIRECTLY
-/// (no delegation) whose own turn pauses for lack of credits must settle
-/// its `direct_card` `Paused`, not `Completed` — the terminal-state
-/// asymmetry `HarnessBrain::run_task` already closed for the top-level
-/// orchestrator's own dispatched turn, mirrored here for the chat path.
-#[tokio::test]
-async fn a_direct_cards_own_settle_is_paused_when_the_responder_ran_out_of_credits() {
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(
-        &fx,
-        vec![Turn::budget_paused(
-            "Paused — engineer's turn ran out of inference budget/credits.",
-            "engineer",
-            "Paused — engineer's turn ran out of inference budget/credits, so it \
-             stopped instead of failing silently.",
-        )],
-    );
-    fx.runner(&turns)
-        .handle_operator_message(
-            "engineer",
-            "read the pricing repo and write modules.md",
-            Some("eng_desk"),
-        )
-        .await
-        .expect("operator message handled");
-
-    let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(
-        cards[0].column, COLUMN_PAUSED,
-        "a pause must not read as a completed answer: {:?}",
-        cards[0]
-    );
-}
-
 /// Issue #1846 review (Codex #3865395868, the chat-created-hand-off half):
 /// the hand-off's own card — opened by `open_hand_off_work_card`, tracked
 /// separately from any card this delegation is nested inside — must also
 /// settle `Paused` when the delegate's turn ran out of credits, not
-/// `Completed`. Same asymmetry as the direct-card case above, on the
-/// hand-off path instead.
+/// `Completed` — the terminal-state asymmetry `HarnessBrain::run_task`
+/// already closed for the top-level orchestrator's own dispatched turn.
 #[tokio::test]
 async fn a_hand_offs_own_card_settles_paused_when_the_delegate_ran_out_of_credits() {
     let fx = Fixture::new();

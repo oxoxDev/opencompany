@@ -9,22 +9,30 @@ security, people, embeddings, …) that the kernel should consume, not copy.
 
 ## Integration: embedded as a library (current)
 
-OpenHuman is now consumed as an **embeddable Rust library**, not an
-out-of-process daemon. The `src/harness/` module links `openhuman_core`
-directly and, under `feature = "openhuman"`, builds one openhuman
-[`Agent`] per manifest `[[agent]]` through
-[`AgentBuilder`](../../modules/openhuman/README.md). The builder's seams are
-wired to OpenCompany's own ports:
+OpenHuman is consumed as an **embeddable Rust library**, not an
+out-of-process daemon. The `src/harness/` module links `openhuman_core` and
+`openhuman_embed` directly and, under `feature = "openhuman"`, boots one
+process-wide `openhuman_embed::Runtime` and mints one `openhuman_embed::Agent`
+per manifest `[[agent]]` from an `AgentSpec`
+([`docs/modules/openhuman/README.md`](../../modules/openhuman/README.md),
+[runtime/harnesses.md](../runtime/harnesses.md#openhumans-own-library-front-door)).
+What the company declares reaches the agent through the spec:
 
-- **Memory** → `OcMemory`, an openhuman `Memory` implemented over the
-  OpenCompany [`ContextStore`](../runtime/ports-state.md#contextstore).
-- **Inference provider** → the hosted Medulla `Provider` (a `MockProvider`
-  stands in for offline tests).
-- **Approval requests** → every agent gets the intrinsic `request_approval`
-  tool. `ApprovalPolicy` keeps hard `readonly` denials, but policy-generated
-  HITL is disabled; ordinary calls do not become approval prompts.
-- **Tools / skills** → injected through the builder's tool/skill seams from the
-  company's manifest grants.
+- **Inference provider** → `Provider::openai_compatible(url, key).model(m)`
+  from the company default or the agent's own pair, served through the
+  loopback model bridge so every call is metered.
+- **Tools** → the OpenHuman-native subset of the grants as the spec's tool
+  scope; every OpenCompany tool (ledger, tasks, pages, workspace, memory over
+  the [`ContextStore`](../runtime/ports-state.md#contextstore), composio,
+  hosting, approvals) and the room's speech tools over the `opencompany` MCP
+  server, because the library has no seam for an in-process host tool
+  ([runtime/hive.md](../runtime/hive.md#speaking)).
+- **Approvals** → OpenHuman's runtime-wide gate stays off (`Access::full()`);
+  OpenCompany's `ApprovalPolicy` decides allow / deny / park where the tool is
+  served. Every agent also gets the intrinsic `request_approval` tool.
+- **Desks** → `tinyhivemind-openhuman` binds the agents into one
+  `OpenHumanHive` per `[[group_chat]]`; the host runs its completion episodes
+  ([runtime/hive.md](../runtime/hive.md)).
 
 The default build links **none** of this and keeps its offline, echo-brained
 behaviour. When the `openhuman` feature is off, tool/channel behaviour degrades
@@ -38,93 +46,64 @@ delivered, not pending.
 
 ### One teammate, one named session
 
-An openhuman `Agent` is, in the vendored crate's own words, a *"stateful agent
-session — the single execution tier"*. OpenCompany holds one per `(company,
-agent_id)` behind a mutex, because a `turn` takes `&mut self` and a session must
-serialise its own turns. So every teammate already **is** an openhuman session;
-what it lacked until now was a name.
+Every company agent is one `openhuman_embed::Agent` — a cheap clone handle
+over immutable per-agent state, not a resident session. Each conversational
+turn resumes the agent's one stable OpenHuman session, named
+`{company}:{agent_id}` by `session_key::openhuman_session_key` — company
+first, because the process is multi-tenant and an `agent_id` is unique only
+within its company — and OpenHuman keeps that thread on disk under the
+runtime's workspace. The runtime id the agent is minted under is
+`session_key::runtime_agent_id` (`{company}--{agent}`, lowercased, hashed
+past 64 characters, since ids match `^[a-z0-9][a-z0-9_-]{0,63}$` and stay
+reserved while any clone lives).
 
-`AgentBuilder` defaults `event_session_id` to the literal `"standalone"` and
-`event_channel` to `"internal"`, and this crate set neither. Those two fields
-are the identity every `DomainEvent` a session publishes is tagged with —
-`AgentTurnStarted`, `AgentTurnCompleted`, `AgentError` — plus the
-`PromptEnforcementContext` a blocked prompt is reported against. Every agent of
-every company on the process therefore announced itself as the same session,
-and a subscriber could not tell whose turn had started, whose had failed, or
-whose prompt had been refused.
-
-That cost nothing while one turn ran at a time. It stops being free with
-[openhuman#6208], which gave the library host an explicit `HostKind::Library`
-(caller-supplied inference, no app login, no fake `Session::local`) and replaced
-the conversation store's process-wide mutex with per-root lifecycle, per-root
-metadata and per-thread transcript locks — then proved 100 overlapping turns on
-distinct session ids against one live core. Concurrency is precisely the
-condition under which an unlabelled event stream stops being readable.
-
-Every session is now named `{company}:{agent_id}` on channel `opencompany`,
-minted by `harness::session_key::openhuman_session_key` and stamped at build
-time. Company first, because the process is multi-tenant and an `agent_id` is
-unique only within its own company. The key is a pure function of the two ids
-so that a roster rebuild — which fires whenever any of its freshness
-fingerprints moves, including a persona edit or a budget change — cannot rename
-a live session under a subscriber.
+Turns of one agent are serialised by its own `turn_lock`, which the
+`CompanyAgent` holds beside the handle; turns of different agents run at the
+same time, which [openhuman#6208] made safe by replacing the conversation
+store's process-wide mutex with per-root and per-thread locks and proving 100
+overlapping turns on distinct sessions against one live core. That is the
+condition a desk round runs under: several seats at once, one turn each, and
+never two turns of one seat ([runtime/hive.md](../runtime/hive.md)).
 
 The confined workflow copilot is named the same way. It does not come off the
 roster, so it does not inherit the roster's call, and an unnamed session there
 would put the one turn that runs under a *confinement* back in the crowd.
 
-A DM between teammates is therefore a hop from one named openhuman session to
-another: the row leaves the sender's session and is picked up by the
-recipient's own session on its next turn, through the watermark delta in
-[runtime/speech.md](../runtime/speech.md). Both ends are logged at `debug` as
-`from_session` / `to_session`, which is the only place both are known at once.
+A `dm` between seats is a row on the desk with an `audience`; the recipient
+is assigned the next round and reads it in its delta
+([runtime/speech.md](../runtime/speech.md)). Both sessions are logged at
+`debug` as `from_session` / `to_session`, which is the only place both are
+known at once.
 
 [openhuman#6208]: https://github.com/tinyhumansai/openhuman/pull/6208
 
-### Cost metering seam (partial — pending openhuman#4940)
+### Cost metering
 
-openhuman surfaces a completed turn's token/cost totals only through a
-`pub(crate)` accessor (`Agent::take_last_turn_usage_totals`), so a host crate
-cannot read the real `TurnCost` after `turn()`. The harness cost mapping
-(`TurnCost` → ledger + [`UsageMeter`](../runtime/ports-console.md#usagemeter))
-is complete and
-tested, but until the **public turn-usage accessor**
-(tinyhumansai/openhuman#4940) lands, `HarnessPool::run` records a **zero-usage
-turn** — which, per the cost contract, writes nothing. Usage/Finances token and
-cost numbers are therefore structurally correct but empty of real inference
-cost until that PR is the seam for real metering.
+A turn's usage arrives on the `on_progress` channel as
+`AgentProgress::ModelCallCompleted` / `TurnCostUpdated`; `progress_pump.rs`
+folds them into the `TurnCost` the harness maps onto the ledger and the
+[`UsageMeter`](../runtime/ports-console.md#usagemeter). The model bridge
+additionally taps every call's provider-reported usage, so a turn is metered
+from what the provider charged rather than from a count the host made.
 
 ### Group-chat / desk routing
 
-openhuman is single-agent; desk (group-chat) routing is OpenCompany's job. v1
-is single-responder. The full ops `chat` handler that resolves a desk's members
-and journals the reply — including approval **resume** on a follow-up cycle —
-lives in the WS3 chat handler, not inline in the harness.
+openhuman is single-agent; a desk is OpenCompany's composition over it.
+`tinyhivemind-openhuman` binds the desk's agents into one `OpenHumanHive`,
+its `CompletionDriver` proposes rounds and folds what the host commits, and
+the host — `src/hive/` — runs the seats concurrently, journals every
+utterance, routes broadcasts through Jev over the TinyHumans System One proxy,
+and crosses desks by referral ([runtime/hive.md](../runtime/hive.md)).
 
-## Legacy: JSON-RPC launcher/wire path
+## Legacy: JSON-RPC launcher/wire path — removed
 
-The former out-of-process seam is retained for one release behind
-`feature = "openhuman-rpc"` and is then removed:
-
-- **Process**: the launcher (`opencompany open-human [--mode core|desktop]
-  [--release] [--dry-run]`) drives `cargo run --bin openhuman-core` (Core) or
-  `cargo tauri dev`/`build` directly (Desktop) with the exact argument
-  sequences OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/
-  `tauri:build:ui` pnpm scripts invoke. The Desktop preflight ports those
-  scripts into Rust — it installs the vendored CEF-aware `tauri-cli`, pins
-  `CEF_PATH`, and loads `<root>/.env`, seeding it from `<root>/.env.example`
-  only in Desktop mode when the file is absent (Core never touches `.env`); on
-  macOS it additionally seeds the Chromium keychain + signing identity. Tauri
-  still drives the Vite dev server via `beforeDevCommand`. CEF on macOS,
-  `wry` on Linux/Windows. `OPENCOMPANY_OPENHUMAN_URL` attaches to a running
-  `openhuman-core serve`.
-- **Wire**: JSON-RPC at `http://127.0.0.1:<port>/rpc` (methods
-  `openhuman.<namespace>_<function>`, per-launch bearer) plus REST
-  `GET /health`, `GET /schema`, `GET /events`; `OpenHumanToolProvider` /
-  `OpenHumanChannelAdapter` adapt it to the `ToolProvider`/`ChannelAdapter`
-  ports.
-
-New work targets the embedded library; the RPC path takes no new features.
+The out-of-process seam (`src/openhuman/`, feature `openhuman-rpc`: the
+`opencompany open-human` launcher, the JSON-RPC `OpenHumanRpc` transport and
+the `OpenHumanToolProvider` / `OpenHumanChannelAdapter` adapters) is gone.
+A manifest that still names `provider = "openhuman"` on `[tools]` or a
+channel builds on the built-in tool provider and the operator channel with a
+boot warning, never a failure. `OPENCOMPANY_OPENHUMAN_URL` attaches to
+nothing.
 
 ## Desktop story
 
@@ -132,15 +111,10 @@ The Tauri app is a natural prosumer install path: OpenHuman as the shell,
 OpenCompany as the company runtime behind it. Whether the prosumer UI ships
 as an OpenHuman mode or a separate frontend is an open product question
 ([product/prosumer.md](../product/prosumer.md)); the runtime API is the same
-either way. Launching the desktop host from an OpenCompany checkout is wired through
-`opencompany open-human --mode desktop` (add `--release` for a bundle): it
-calls `cargo tauri dev`/`build` directly and ports OpenHuman's own script
-preflight into Rust — installing the vendored CEF-aware `tauri-cli`, pinning
-`CEF_PATH`, loading `<root>/.env`, and on macOS seeding the Chromium keychain
-and `APPLE_SIGNING_IDENTITY` — so the CEF runtime, Vite dev server, and signing
-are set up exactly as OpenHuman expects, without shelling out to pnpm. Tauri's
-`beforeDevCommand` still drives the Vite dev server. CEF on macOS; `wry`
-(WebKitGTK / WebView2) on Linux and Windows.
+either way. OpenCompany's own desktop shell is `crates/opencompany-app`
+([runtime/desktop.md](../runtime/desktop.md)); launching OpenHuman's Tauri
+host is done from the OpenHuman checkout with its own scripts, not from this
+binary.
 
 ## Upstreaming policy
 
@@ -154,10 +128,9 @@ identified so far:
 2. **Library-crate split** — *realized.* The tool/channel/credential/policy
    domains are consumed as the embeddable `openhuman_core` crate; the harness
    links them instead of speaking RPC.
-3. **Public turn-usage accessor** (tinyhumansai/openhuman#4940) — expose the
-   completed turn's token/cost totals publicly (today `pub(crate)`) so a host
-   crate can read the real `TurnCost` after `turn()` and feed real cost
-   metering. This is the seam the harness cost hook waits on.
+3. **Public turn-usage accessor** — *realized* as `AgentProgress`'s
+   `ModelCallCompleted` / `TurnCostUpdated` frames on the embed API's
+   `on_progress` channel; the harness meters from them.
 4. **External approval hook** — policy tiers currently resolve in-app; a
    webhook/RPC callback would let OpenCompany's `ApprovalGate` be the
    resolver of record.

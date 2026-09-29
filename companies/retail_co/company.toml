@@ -32,11 +32,6 @@
 name = "retail-co"
 output = "A customer's order problem resolved by the desk that owns the remedy, with every read and write recorded as a tool call"
 human_role = "Read the transcript and say whether the desks did what the retail policy required"
-# The desk that owns the company's own line. Without this, General resolves to
-# no desk and a message there falls to a root agent picked by filename order.
-# The target is deliberately NOT called General: tinyhivemind refuses an
-# episode on a desk whose id or name is a General spelling.
-general_desk = "company_line"
 
 [brain]
 mode = "hosted"
@@ -89,6 +84,7 @@ enabled = true
 # secret rather than `OPENCOMPANY_INFERENCE_KEY`, so a host-level env var does
 # not stand in for it: the first turn fails with a 401 from the platform
 # endpoint, not from the provider named here.
+
 [inference]
 provider = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
@@ -99,6 +95,7 @@ base_url = "https://openrouter.ai/api/v1"
 # `vision-v1` is mapped too: nothing here sends an image, and leaving a tier
 # unmapped is what makes a stray request fall back to a provider default
 # nobody chose.
+
 [inference.models]
 chat-v1 = "deepseek/deepseek-v4-flash"
 reasoning-v1 = "deepseek/deepseek-v4-flash"
@@ -119,62 +116,25 @@ vision-v1 = "deepseek/deepseek-v4-flash"
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# The company's own line, as a real desk.
-#
-# The id is NOT a General spelling: tinyhivemind refuses a desk whose identity
-# collides with one (`reserved desk identity`), and a company that declares
-# `id = "general"` boots clean and then fails every message on its main thread.
-# The NAME is `General`, and `resolve_desk_id` matches a manifest desk by name
-# as well as by id — with no General guard on that pass — so the company's own
-# line resolves here instead of resolving to nothing.
-#
-# That is the actual defect this fixes. With general resolving to no desk, the
-# desk selector bails out and the message falls to a *root* agent chosen by
-# filename order: a delivered-order case was answered by `amendments`, the
-# pending-order seat, holding three write tools and no exchange tool.
+# A room with every seat, for cases that need the whole company at once.
 # ---------------------------------------------------------------------------
 
 [[group_chat]]
 id = "company_line"
 name = "Company Line"
-description = "The company's own line. Everybody who works here."
-# Documentation only — the runtime seats the live roster here, so a
-# teammate created tomorrow is in this room without anybody editing
+description = "Every seat in one room."
 members = ["triage", "exchanges", "refunds", "cancellations", "amendments"]
 
-[group_chat.hive]
-enabled = true
-turn_budget = 12
-quorum = 2
-blind_round = true
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-[group_chat.hive.aside]
-# The private agent-to-agent line: a seat may add ONE `!aside @peer` line under
-# its move. Off unless a desk asks — `AsidePolicy::DEFAULT` permits nothing,
-# deliberately, because the mechanism does not get the benefit of the doubt.
-#
-# Every person and the operator still read every row in full. This is a
-# deliberation device, never a security boundary: an exchange no human could
-# audit is the covert channel the design exists to avoid. A peer outside the
-# aside still sees that it happened, who was in it, and where it settled.
-#
-# Defaults left alone: a pair (`max_members = 1`, excluding the author), two
-# rows (`max_messages = 2` — a question and an answer), and `must_surface`,
-# which makes a pair deposit one desk-visible line before opening another.
-enabled = true
-
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 2
-# How long a question put to a PERSON may run. The default of 2 is one question
-# and one reply, which is what a crossing to a teammate did before it could run
-# as a conversation — and it showed: a live pair opened four separate two-row
-# exchanges rather than one that settled, the fourth ending "hey — i'm not
-# following what you're asking me here", with no way to ask back.
-pair_messages = 4
 
 # ---------------------------------------------------------------------------
 # Pending orders. Two seats, competing remedies.
@@ -186,53 +146,16 @@ name = "Order Operations"
 description = "Pending orders: cancel outright, or amend items, address or payment in place."
 members = ["cancellations", "amendments"]
 
-[group_chat.hive]
-enabled = true
-# Two seats, and enough budget to survive ONE bad proposal.
-#
-# Eight was too tight, and the way it failed is instructive: `exchanges`
-# proposed with item ids it had invented, `refunds` objected and named the real
-# ones — cross-inhibition working exactly as intended — and the correction then
-# had nowhere to go. `exchanges` spent its remaining turns supporting its own
-# corrected option, which adds no quorum (two DIFFERENT members must back it),
-# and the budget ran out on "refunds, do you agree?". Three of the eight turns
-# were a duplicate evidence line, an unmarked line that folds to nothing, and
-# that self-support.
-#
-# Twelve leaves room for the correction cycle a two-seat desk needs. It is still
-# short on purpose: conformity in a group of language models rises with
-# interaction time, so a long episode buys correlated error rather than scrutiny.
-turn_budget = 12
-quorum = 2
-blind_round = true
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-[group_chat.hive.aside]
-# The private agent-to-agent line: a seat may add ONE `!aside @peer` line under
-# its move. Off unless a desk asks — `AsidePolicy::DEFAULT` permits nothing,
-# deliberately, because the mechanism does not get the benefit of the doubt.
-#
-# Every person and the operator still read every row in full. This is a
-# deliberation device, never a security boundary: an exchange no human could
-# audit is the covert channel the design exists to avoid. A peer outside the
-# aside still sees that it happened, who was in it, and where it settled.
-#
-# Defaults left alone: a pair (`max_members = 1`, excluding the author), two
-# rows (`max_messages = 2` — a question and an answer), and `must_surface`,
-# which makes a pair deposit one desk-visible line before opening another.
-enabled = true
-
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 2
-# How long a question put to a PERSON may run. The default of 2 is one question
-# and one reply, which is what a crossing to a teammate did before it could run
-# as a conversation — and it showed: a live pair opened four separate two-row
-# exchanges rather than one that settled, the fourth ending "hey — i'm not
-# following what you're asking me here", with no way to ask back.
-pair_messages = 4
 
 # ---------------------------------------------------------------------------
 # Delivered orders. Same shape.
@@ -244,38 +167,43 @@ name = "Returns and Exchanges"
 description = "Delivered orders: exchange an item for a variant of the same product, or take a return for refund."
 members = ["exchanges", "refunds"]
 
-[group_chat.hive]
-enabled = true
-# Twelve, not eight: one bad proposal plus its correction does not fit in
-# eight when self-support adds no quorum. See the order_ops note above.
-turn_budget = 12
-quorum = 2
-blind_round = true
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-[group_chat.hive.aside]
-# The private agent-to-agent line: a seat may add ONE `!aside @peer` line under
-# its move. Off unless a desk asks — `AsidePolicy::DEFAULT` permits nothing,
-# deliberately, because the mechanism does not get the benefit of the doubt.
-#
-# Every person and the operator still read every row in full. This is a
-# deliberation device, never a security boundary: an exchange no human could
-# audit is the covert channel the design exists to avoid. A peer outside the
-# aside still sees that it happened, who was in it, and where it settled.
-#
-# Defaults left alone: a pair (`max_members = 1`, excluding the author), two
-# rows (`max_messages = 2` — a question and an answer), and `must_surface`,
-# which makes a pair deposit one desk-visible line before opening another.
-enabled = true
-
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 2
-# How long a question put to a PERSON may run. The default of 2 is one question
-# and one reply, which is what a crossing to a teammate did before it could run
-# as a conversation — and it showed: a live pair opened four separate two-row
-# exchanges rather than one that settled, the fourth ending "hey — i'm not
-# following what you're asking me here", with no way to ask back.
-pair_messages = 4
+
+# **A desk `amendments` sits on, with somebody `order_ops` does not have.**
+#
+# Added to test that a crossing still works once the episode prompt offers a
+# seat only the desks it is a member of. Before that narrowing, `amendments`
+# was offered `@#returns` — a desk it has no standing on, cannot read a line
+# of, and gets nothing back from but one report line. Membership is what makes
+# a crossing's answer legible: `agent_channels` gives a seat the desks it sits
+# on, so a question put to one of those lands somewhere the asker can read.
+#
+# `refunds` is the point of the desk. It is not on `order_ops`, so a crossing
+# here reaches knowledge the asking room genuinely does not hold, which is the
+# only thing a crossing is for.
+
+[[group_chat]]
+id = "policy"
+name = "Remedy Policy"
+description = "Which remedy a case is entitled to, and how the money comes back — across pending and delivered orders alike."
+members = ["amendments", "refunds"]
+
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
+
+[group_chat.routing.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true

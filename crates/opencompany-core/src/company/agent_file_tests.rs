@@ -153,6 +153,51 @@ fn a_prompt_file_path_may_not_escape_the_agents_directory() {
     }
 }
 
+/// The Windows spellings of an escape, which `is_absolute` does not catch.
+///
+/// On Windows `Path::new("/etc/passwd").is_absolute()` is **false** —
+/// absoluteness there needs a prefix — so the guard leans on the `RootDir` and
+/// `Prefix` component arms for these.
+/// `a_prompt_file_path_may_not_escape_the_agents_directory` covers the rootless
+/// form as a side effect of its `/etc/passwd` case, but only when it runs on
+/// Windows; these spellings say so directly.
+///
+/// `#[cfg(windows)]` because the arms are unreachable on Unix: `is_absolute`
+/// already subsumes `RootDir` there and `Component::Prefix` does not exist, so
+/// on a Linux runner the inputs below parse as ordinary relative filenames and
+/// asserting refusal would assert the wrong thing. That asymmetry is why the
+/// guard could be wrong for as long as it was — no lane in CI runs this file on
+/// Windows.
+#[cfg(windows)]
+#[test]
+fn a_windows_rooted_or_prefixed_prompt_file_path_is_refused() {
+    // TOML literal strings (single-quoted): a double-quoted "C:\outside" would
+    // read \o as an escape and fail to parse before the guard is reached.
+    for escape in [
+        // `RootDir`: rooted but with no prefix, which is the form `is_absolute`
+        // answers `false` to on Windows.
+        r"\etc\passwd",
+        // `Prefix(Disk)`.
+        r"C:\outside\secrets.md",
+        // `Prefix(UNC)` — **two** leading backslashes. One would be another
+        // `RootDir` case wearing a UNC costume, which is what this line said
+        // before and why the UNC arm was not actually covered.
+        r"\\server\share\secrets.md",
+    ] {
+        let dir = bundle(&[(
+            "copywriter.toml",
+            &format!("role = \"Copywriter\"\nprompt_files = ['{escape}']\n"),
+        )]);
+        let problems = problems_of(
+            load_agents(dir.path()).unwrap_err_or_else_panic(&format!("{escape} is refused")),
+        );
+        assert!(
+            problems[0].contains("outside"),
+            "{escape} was not refused: {problems:?}"
+        );
+    }
+}
+
 /// A per-file teammate's `model` is carried, like its `harness`.
 ///
 /// `AgentFile` had `harness` but not `model`, so serde dropped the line as

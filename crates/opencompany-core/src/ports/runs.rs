@@ -284,7 +284,11 @@ pub struct RunRecord {
     pub agent_id: String,
     /// The conversation this attempt belongs to, when one raised it
     /// (issue #983) — the only handle a card-less chat turn has.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub chat_id: Option<String>,
     /// Which attempt at `task_id` this is, **1-based** — the first run of a card
     /// is `Attempt 1`. Assigned by the backend at create time; see
@@ -325,6 +329,15 @@ pub struct RunRecord {
     /// first-class id — the same honest fallback the blocked-node rows use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// The desk episode this attempt is a seat turn of, when it is one
+    /// (plan hive-desks, Phase 8). `None` for a card dispatch, a workflow
+    /// node, an ordinary chat turn, and every row written before the field
+    /// existed; the Observatory then draws no round band for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_id: Option<String>,
+    /// The round revision inside that episode (raw, 0-based).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_revision: Option<u64>,
     pub created_at_millis: u64,
     /// Epoch-millis the cycle actually began. `None` while `Pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,6 +446,11 @@ pub struct NewRun {
     /// and a workflow node, which belong to no conversation, and for a turn
     /// whose root is the channel itself.
     pub thread_root: Option<EventSeq>,
+    /// The desk episode this is a seat turn of (plan hive-desks, Phase 8).
+    /// See [`RunRecord::episode_id`].
+    pub episode_id: Option<String>,
+    /// The round revision inside that episode.
+    pub round_revision: Option<u64>,
 }
 
 impl NewRun {
@@ -450,6 +468,8 @@ impl NewRun {
             workflow_run_id: None,
             node_id: None,
             thread_root: None,
+            episode_id: None,
+            round_revision: None,
         }
     }
 
@@ -467,6 +487,8 @@ impl NewRun {
             workflow_run_id: None,
             node_id: None,
             thread_root: None,
+            episode_id: None,
+            round_revision: None,
         }
     }
 
@@ -479,6 +501,16 @@ impl NewRun {
     #[must_use]
     pub fn in_thread(mut self, root: impl Into<Option<EventSeq>>) -> Self {
         self.thread_root = root.into();
+        self
+    }
+
+    /// Names the desk episode and round this chat turn is a seat of (plan
+    /// hive-desks, Phase 8), so the Observatory can lane it under its round
+    /// and `GET /runs` cross-checks the concurrency the journal brackets show.
+    #[must_use]
+    pub fn in_episode(mut self, episode_id: impl Into<String>, round_revision: u64) -> Self {
+        self.episode_id = Some(episode_id.into());
+        self.round_revision = Some(round_revision);
         self
     }
 
@@ -502,6 +534,8 @@ impl NewRun {
             workflow_run_id: Some(workflow_run_id.into()),
             node_id: Some(node_id.into()),
             thread_root: None,
+            episode_id: None,
+            round_revision: None,
         }
     }
 }

@@ -33,7 +33,8 @@ src/feedback/           Feedback items, privacy scrubber, GitHub issue filing
 src/runtime/            CompanyRuntime, CycleRunner, cron scheduler, registry
 src/server/             Axum HTTP router and handlers
 src/server/users/       Human sign-in: magic link, passwords, sessions, invites
-src/openhuman/          OpenHuman launcher seams
+src/harness/            Execution engines: the embedded OpenHuman runtime and agents (feature `openhuman`)
+src/hive/               Hive desks: completion episodes, speech over MCP, Jev routing, referral
 src/tiny/               TinyAgents/OpenHuman status surface
 src/globals/            The global baseline: agents, workflows, skills, starting tool belt
 src/ledger/             Dynamic ledgers: declared record shapes and the append-only fold

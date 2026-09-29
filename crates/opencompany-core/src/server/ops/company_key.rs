@@ -297,15 +297,17 @@ fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber>
 /// clear an entry between tests, so a later test reusing a company id would
 /// silently inherit an earlier test's forced answer. `thread_local!` sidesteps
 /// that rather than relying on every test to remember a teardown call: every
-/// test in this file uses the default (single-threaded) `#[tokio::test]`
-/// runtime, so a test's own body and every future it drives — including the
-/// router call this override answers — run on that one OS thread, and libtest
-/// gives each test function its own thread. A fresh, empty map per thread
-/// means a fresh map per test, with no entry able to outlive the test that
-/// wrote it.
+/// caller uses the default (single-threaded) `#[tokio::test]` runtime — the
+/// tests beside this module and, since the onboarding redesign, the setup
+/// apply's own group — so a test's own body and every future it drives,
+/// including the router call this override answers, run on that one OS thread,
+/// and libtest gives each test function its own thread. A fresh, empty map per
+/// thread means a fresh map per test, with no entry able to outlive the test
+/// that wrote it. A teardown call would be the thing that can be forgotten;
+/// this cannot.
 #[cfg(test)]
 #[path = "company_key_prober_override.rs"]
-mod prober_override;
+pub(crate) mod prober_override;
 
 /// Resolves the credential status DTO for a company.
 ///
@@ -397,7 +399,7 @@ async fn tinyhumans_row_has_model(runtime: &CompanyRuntime) -> Result<bool, ApiE
 /// company. Never fails — an unreadable manifest reads as "not configured",
 /// which answers `false` here rather than surfacing a second error on top of
 /// whatever the fan-out itself already reported.
-async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
+pub(crate) async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
     let configured = matches!(
         super::inference::inference_resolution(runtime).await,
         InferenceResolution::Resolved
@@ -709,9 +711,9 @@ async fn start_link(
 
     let started = state.hub_links().start(&OsTokens, runtime.id().as_ref());
 
-    // Where the hub returns to. `key=link` is this console's own marker, kept
-    // distinct from the `key=auth` the hub appends on a sign-in so the two
-    // return legs can never be mistaken for each other in `App.tsx`.
+    // Where the hub returns to. `key=link` is this console's own marker: a
+    // magic link carries no marker at all, so `App.tsx` can tell the two
+    // landings apart and never redeems a grant code as a sign-in.
     let callback_url = format!(
         "{}?company={}&key=link&state={}",
         callback_base(&state, &headers),
@@ -726,7 +728,7 @@ async fn start_link(
     // once, so an admin who pressed a button in their own console landed on a
     // Google account picker that named nobody and offered no other account.
     // The site page names the instance asking, says what will be created, and
-    // offers the same providers the sign-in screen does — then sends them to
+    // offers the hub's own providers — then sends them to
     // this very endpoint with the provider they picked. The parameters are
     // built once either way, so the two paths cannot disagree about the
     // challenge.

@@ -13,6 +13,7 @@
 // stale id (issue #370).
 
 import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+import { migrateLegacyGeneralId } from "@/lib/chat";
 
 /** Namespaced so a host serving several companies remembers each separately. */
 function keyFor(scope: LocalScope): string {
@@ -39,10 +40,24 @@ function storage(): Storage | null {
   }
 }
 
-/** The channel this company was last read in, or `null` if nothing is remembered. */
+/**
+ * The channel this company was last read in, or `null` if nothing is
+ * remembered. A `#general` remembered under a legacy id is rewritten to
+ * `general` on the way out.
+ */
 export function readLastChannel(scope: LocalScope): string | null {
-  const value = storage()?.getItem(keyFor(scope));
-  return value && value.length > 0 ? value : null;
+  const store = storage();
+  if (!store) return null;
+  try {
+    const key = keyFor(scope);
+    const value = store.getItem(key);
+    if (!value) return null;
+    const current = migrateLegacyGeneralId(value);
+    if (current !== value) store.setItem(key, current);
+    return current;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -56,8 +71,8 @@ export function readLastChannel(scope: LocalScope): string | null {
 export function writeLastChannel(scope: LocalScope, channelId: string): void {
   const store = storage();
   if (!store) return;
-  const key = keyFor(scope);
   try {
+    const key = keyFor(scope);
     if (store.getItem(key) === channelId) return;
     store.setItem(key, channelId);
   } catch {

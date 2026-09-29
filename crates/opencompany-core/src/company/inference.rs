@@ -1482,6 +1482,18 @@ async fn resolve_legacy_scoped(
         // set a company key, watched Composio move onto their account, and left
         // every agent turn on the server's.
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+        // The default is always present now — its endpoint is the platform
+        // this host is on, credential or not — so presence no longer means a
+        // credential. What separates a company that can think from one that
+        // cannot is the same predicate `managed_decl`'s caller applies: did a
+        // credential reach the declaration through `managed_identity` (a
+        // pasted key, the company's account, the instance identity)? None of
+        // them means the operator configured nothing and the deployment holds
+        // no identity, which is the echo brain, exactly as an absent default
+        // was before the endpoint and the credential were split.
+        if !credential.configured() {
+            return Ok(None);
+        }
         return Ok(Some(InferenceDecl {
             provider: DEFAULT_PROVIDER.to_string(),
             // Nothing is declared and the platform's own endpoint is answering:

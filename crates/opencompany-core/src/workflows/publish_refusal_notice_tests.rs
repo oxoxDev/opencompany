@@ -43,7 +43,7 @@ use crate::company::{CompanyManifest, parse_workflow};
 use crate::harness::HarnessPool;
 use crate::harness::publish::PublishDestination;
 use crate::ports::WorkflowRunContext;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::CompanyRecord;
 use crate::store::FsOps;
 
 use super::gated_tool_turn_tests::{Turn, deps, spawn_script};
@@ -112,10 +112,11 @@ tier = "orchestrator"
 
 fn record() -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("acme"),
+        id: crate::test_support::per_test_company_id("acme"),
         manifest: manifest(),
         ledger: Vec::new(),
         lifecycle: "running".to_string(),
@@ -226,15 +227,23 @@ async fn spawn_interleaved_publish_script() -> String {
                             "function": { "name": "file_write", "arguments": json!({ "path": source, "content": "draft" }).to_string() }
                         }]
                     }),
-                    1 => json!({
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [{
-                            "id": format!("publish-{lane}"),
-                            "type": "function",
-                            "function": { "name": "publish_artifact", "arguments": json!({ "path": source }).to_string() }
-                        }]
-                    }),
+                    1 => {
+                        // Plan hive-desks Phase 3: `publish_artifact` is a
+                        // company tool, reached through `mcp_call_tool`.
+                        let (name, args) = crate::hive::tools::via_opencompany_mcp(
+                            "publish_artifact",
+                            json!({ "path": source }),
+                        );
+                        json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": format!("publish-{lane}"),
+                                "type": "function",
+                                "function": { "name": name, "arguments": args.to_string() }
+                            }]
+                        })
+                    }
                     2 => {
                         // Both tool calls have executed and their refusals are
                         // queued; releasing one run before the other would let

@@ -209,10 +209,10 @@ async function goToReview() {
 }
 
 /**
- * Gets past step 0 onto the model step, and is a no-op where step 0 is absent.
+ * Gets past step 0 onto step 1, and is a no-op where step 0 is absent.
  *
- * The flow opens on the setup-way choice, and the provider picker sits behind
- * "Set it up yourself".
+ * The flow opens on the setup-way choice, and the add-provider sequence sits
+ * behind "Set it up yourself".
  */
 async function chooseSelfManaged() {
   if (!find("setup-way-self-managed")) return;
@@ -220,13 +220,10 @@ async function chooseSelfManaged() {
   await next();
 }
 
-/** Answer the model step with "No model", which settles it without a key. */
-async function chooseNoModel() {
-  await chooseSelfManaged();
-  await click("setup-provider-select");
-  await act(async () => {
-    (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
-  });
+/** Onto the managed step 1, which is the branch a verdict still gates. */
+async function chooseManaged() {
+  await click("setup-way-managed");
+  await next();
 }
 
 describe("a host whose model answers", () => {
@@ -291,34 +288,33 @@ describe("a host whose credential resolves but no longer reaches", () => {
       "step-review",
     ]);
     expect(container.textContent).toContain("step 2 of 6");
-    expect(find("setup-provider-select"), "the model step must render").toBeTruthy();
+    expect(find("setup-add-provider"), "step 1 must render").toBeTruthy();
   });
 
-  it("shows the failure, and names whose model did not answer", async () => {
+  it("shows the failure on the branch a credential is typed on", async () => {
     await show(unreachable());
-    await chooseSelfManaged();
+    await chooseManaged();
 
     expect(text("setup-test-failed")).toContain(DEAD);
     // Not "This host already has a model" — it has a credential that no longer
     // works, and the operator needs to know which of the two is true.
-    expect(text("setup-model-prompt")).toMatch(/host's model didn't answer/i);
+    expect(all("setup-host-model")).toHaveLength(0);
   });
 
-  it("still gates the step, so the failure cannot be walked past", async () => {
+  it("still gates the managed branch, so the failure cannot be walked past", async () => {
     await show(unreachable());
-    await chooseSelfManaged();
+    await chooseManaged();
 
     await next();
     expect(find("setup-problem"), "a failed connection must hold the step").toBeTruthy();
-    expect(find("setup-provider-select"), "and must not have left it").toBeTruthy();
+    expect(find("setup-field-key"), "and must not have left it").toBeTruthy();
   });
 
   it("is completable once the operator supplies a key of their own", async () => {
     const seen: Seen = { probes: [] };
     await show(unreachable(seen));
-    await chooseSelfManaged();
+    await chooseManaged();
 
-    await click("setup-key-override");
     await fill("setup-field-key", "sk-mine");
     await click("setup-test-connection");
     await settle();
@@ -337,7 +333,7 @@ describe("a host whose credential resolves but no longer reaches", () => {
     const seen: Seen = { probes: [] };
     await show(unreachable(seen));
 
-    await chooseNoModel();
+    await chooseSelfManaged();
     await next(); // -> business
     await goToReview();
 
@@ -350,7 +346,7 @@ describe("a host whose credential resolves but no longer reaches", () => {
   it("never claims on review that the host supplies the model", async () => {
     await show(unreachable());
 
-    await chooseNoModel();
+    await chooseSelfManaged();
     await next(); // -> business
     await goToReview();
 
@@ -378,15 +374,15 @@ describe("a host that reaches no model of its own", () => {
     expect(container.textContent).toContain("step 2 of 6");
     // Read off the page rather than a test id, so this says the same thing
     // against the flow as it stands today.
-    expect(container.textContent).toContain("Your agents need a model to work");
+    expect(container.textContent).toContain("Connect what your team thinks with");
   });
 
-  it("still gates that step on a verdict the operator earns", async () => {
+  it("still gates the managed branch on a verdict the operator earns", async () => {
     await show(clientWith(status()));
-    await chooseSelfManaged();
+    await chooseManaged();
 
     await next();
     expect(find("setup-problem"), "an untested connection must hold the step").toBeTruthy();
-    expect(find("setup-provider-select"), "and must not have left it").toBeTruthy();
+    expect(find("setup-field-key"), "and must not have left it").toBeTruthy();
   });
 });

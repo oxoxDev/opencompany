@@ -161,6 +161,7 @@ async fn repeating_a_description_does_not_replay_the_prior_turn() {
                 Message::User(_) => "user",
                 Message::Assistant(_) => "assistant",
                 Message::Tool(_) => "tool",
+                Message::Custom(_) => "custom",
             })
             .collect::<Vec<_>>()
     );

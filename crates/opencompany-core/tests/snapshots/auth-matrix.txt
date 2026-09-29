@@ -54,13 +54,6 @@ DELETE /api/v1/companies/{id}/desks/{desk_id} must-change-password-admin refused
 DELETE /api/v1/companies/{id}/desks/{desk_id} platform permitted source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id} tenant-owner permitted source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/companies/{id}/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} member permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
@@ -68,6 +61,13 @@ DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} must-change-pas
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/companies/{id}/desks/{desk_id}/members/{agent_id} tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/companies/{id}/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
 DELETE /api/v1/companies/{id}/grants/{gid} admin permitted source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/companies/{id}/grants/{gid} anonymous refused:401:unauthorized source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/companies/{id}/grants/{gid} member refused:403:forbidden source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
@@ -117,6 +117,13 @@ DELETE /api/v1/companies/{id}/mcp/registry/{server_id} must-change-password-admi
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/registry/{server_id} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -124,6 +131,13 @@ DELETE /api/v1/companies/{id}/mcp/servers/{name} must-change-password-admin refu
 DELETE /api/v1/companies/{id}/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} admin permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/companies/{id}/memory/document/{source} member permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
@@ -271,13 +285,6 @@ DELETE /api/v1/company/desks/{desk_id} must-change-password-admin refused:403:pa
 DELETE /api/v1/company/desks/{desk_id} platform permitted source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
 DELETE /api/v1/company/desks/{desk_id} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
 DELETE /api/v1/company/desks/{desk_id} tenant-owner permitted source=operator access=scoped features=openhuman blast=destructive note="Members may delete operator-created desks." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
-DELETE /api/v1/company/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's installed grammar and fall back to the manifest." wait=-
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} member permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
@@ -285,6 +292,13 @@ DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} must-change-password-a
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
 DELETE /api/v1/company/desks/{desk_id}/members/{agent_id} tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may remove an operator-added desk member." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
+DELETE /api/v1/company/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may drop a desk's routing overlay and fall back to the manifest." wait=-
 DELETE /api/v1/company/grants/{gid} admin permitted source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/company/grants/{gid} anonymous refused:401:unauthorized source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/company/grants/{gid} member refused:403:forbidden source=operator access=admin features=openhuman blast=authority note="Admins revoke a standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
@@ -334,6 +348,13 @@ DELETE /api/v1/company/mcp/registry/{server_id} must-change-password-admin refus
 DELETE /api/v1/company/mcp/registry/{server_id} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/registry/{server_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/registry/{server_id} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -341,6 +362,13 @@ DELETE /api/v1/company/mcp/servers/{name} must-change-password-admin refused:403
 DELETE /api/v1/company/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+DELETE /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 DELETE /api/v1/company/memory/document/{source} admin permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/company/memory/document/{source} anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
 DELETE /api/v1/company/memory/document/{source} member permitted source=ops access=scoped features=openhuman blast=destructive note="Members may forget an ingested document." wait=-
@@ -579,13 +607,13 @@ GET /api/v1/companies/{id}/desks must-change-password-admin refused:403:password
 GET /api/v1/companies/{id}/desks platform permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/desks tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/desks tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/companies/{id}/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/companies/{id}/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
 GET /api/v1/companies/{id}/domain admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/domain anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/domain member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -593,6 +621,13 @@ GET /api/v1/companies/{id}/domain must-change-password-admin refused:403:passwor
 GET /api/v1/companies/{id}/domain platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/domain tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/domain tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/episodes admin permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes member permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes platform permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/companies/{id}/episodes tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
 GET /api/v1/companies/{id}/events admin permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/events anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/events member permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -754,6 +789,13 @@ GET /api/v1/companies/{id}/mcp/registry/search must-change-password-admin refuse
 GET /api/v1/companies/{id}/mcp/registry/search platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/registry/search tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/registry/search tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/companies/{id}/mcp/servers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/servers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/mcp/servers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -768,6 +810,13 @@ GET /api/v1/companies/{id}/mcp/servers/{name}/tools must-change-password-admin r
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/companies/{id}/mcp/servers/{name}/tools tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/companies/{id}/memory admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/memory anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/memory member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -810,13 +859,6 @@ GET /api/v1/companies/{id}/notifications must-change-password-admin refused:403:
 GET /api/v1/companies/{id}/notifications platform refused:401:unauthorized source=ops access=person features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/notifications tenant-non-owner refused:403:forbidden source=ops access=person features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/notifications tenant-owner refused:401:unauthorized source=ops access=person features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel admin permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel member permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel platform permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/companies/{id}/operator-channel tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/pages admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/pages anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/pages member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1188,13 +1230,13 @@ GET /api/v1/company/desks must-change-password-admin refused:403:password_change
 GET /api/v1/company/desks platform permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/desks tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/desks tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
-GET /api/v1/company/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the move grammar in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
+GET /api/v1/company/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may read the routing policy in force on a desk." wait=-
 GET /api/v1/company/domain admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/domain anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/domain member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1202,6 +1244,13 @@ GET /api/v1/company/domain must-change-password-admin refused:403:password_chang
 GET /api/v1/company/domain platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/domain tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/domain tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/episodes admin permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes member permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes platform permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
+GET /api/v1/company/episodes tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="Members may list the episodes the company's desks ran or are running." wait=-
 GET /api/v1/company/events admin permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/events anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/events member permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1363,6 +1412,13 @@ GET /api/v1/company/mcp/registry/search must-change-password-admin refused:403:p
 GET /api/v1/company/mcp/registry/search platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/registry/search tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/registry/search tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/company/mcp/servers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/servers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/mcp/servers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1377,6 +1433,13 @@ GET /api/v1/company/mcp/servers/{name}/tools must-change-password-admin refused:
 GET /api/v1/company/mcp/servers/{name}/tools platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/company/mcp/servers/{name}/tools tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
 GET /api/v1/company/mcp/servers/{name}/tools tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may discover tools using the stored server credential." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy member permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
+GET /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="Members may read what a tool call does; only an admin decides it." wait=-
 GET /api/v1/company/memory admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/memory anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/memory member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1419,13 +1482,6 @@ GET /api/v1/company/notifications must-change-password-admin refused:403:passwor
 GET /api/v1/company/notifications platform refused:401:unauthorized source=ops access=person features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/notifications tenant-non-owner refused:403:forbidden source=ops access=person features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/notifications tenant-owner refused:401:unauthorized source=ops access=person features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel admin permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel member permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel platform permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
-GET /api/v1/company/operator-channel tenant-owner permitted source=operator access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/pages admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/pages anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/pages member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -2112,6 +2168,20 @@ POST /api/v1/companies/{id}/skills must-change-password-admin refused:403:passwo
 POST /api/v1/companies/{id}/skills platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/draft admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/draft tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/skills/upload admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/skills/upload tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills/{slug}/install admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills/{slug}/install anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/skills/{slug}/install member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2637,6 +2707,20 @@ POST /api/v1/company/skills must-change-password-admin refused:403:password_chan
 POST /api/v1/company/skills platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/draft admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/draft tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/skills/upload admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/skills/upload tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills/{slug}/install admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills/{slug}/install anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/skills/{slug}/install member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2861,13 +2945,6 @@ PUT /api/v1/companies/{id}/credential/model must-change-password-admin refused:4
 PUT /api/v1/companies/{id}/credential/model platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/credential/model tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/credential/model tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/companies/{id}/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/order admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/order anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/order member permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
@@ -2875,6 +2952,13 @@ PUT /api/v1/companies/{id}/desks/{desk_id}/order must-change-password-admin refu
 PUT /api/v1/companies/{id}/desks/{desk_id}/order platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/order tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/order tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/companies/{id}/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
 PUT /api/v1/companies/{id}/domain admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/companies/{id}/domain anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/companies/{id}/domain member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2938,6 +3022,13 @@ PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env must-change-password-adm
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/registry/{server_id}/env tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -2945,6 +3036,13 @@ PUT /api/v1/companies/{id}/mcp/servers/{name} must-change-password-admin refused
 PUT /api/v1/companies/{id}/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/companies/{id}/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/memory/engine member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -3113,13 +3211,6 @@ PUT /api/v1/company/credential/model must-change-password-admin refused:403:pass
 PUT /api/v1/company/credential/model platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/credential/model tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/credential/model tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
-PUT /api/v1/company/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
-PUT /api/v1/company/desks/{desk_id}/hive tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/company/desks/{desk_id}/order admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/company/desks/{desk_id}/order anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/company/desks/{desk_id}/order member permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
@@ -3127,6 +3218,13 @@ PUT /api/v1/company/desks/{desk_id}/order must-change-password-admin refused:403
 PUT /api/v1/company/desks/{desk_id}/order platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/company/desks/{desk_id}/order tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
 PUT /api/v1/company/desks/{desk_id}/order tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may reorder a desk's members." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing platform permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
+PUT /api/v1/company/desks/{desk_id}/routing tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's routing overlay." wait=-
 PUT /api/v1/company/domain admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/company/domain anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/company/domain member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -3190,6 +3288,13 @@ PUT /api/v1/company/mcp/registry/{server_id}/env must-change-password-admin refu
 PUT /api/v1/company/mcp/registry/{server_id}/env platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/registry/{server_id}/env tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/registry/{server_id}/env tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/registry/{server_id}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -3197,6 +3302,13 @@ PUT /api/v1/company/mcp/servers/{name} must-change-password-admin refused:403:pa
 PUT /api/v1/company/mcp/servers/{name} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/mcp/servers/{name} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+PUT /api/v1/company/mcp/servers/{name}/tools/policy tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 PUT /api/v1/company/memory/engine admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/memory/engine anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/memory/engine member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-

@@ -1,28 +1,5 @@
 use super::*;
 
-/// The exact string the hub's gate receives from a hosted console.
-///
-/// Pinned because it is the thing `tinyhumansai/backend#1243` has to accept,
-/// and it is **not** a bare origin — the `?company=` rides along. A gate that
-/// compares this string against a registry of provisioned origins rejects
-/// every real request and reproduces issue #512 exactly; only the origin
-/// component is stable, and in shared-single-DB mode the company id is
-/// namespaced `<tenant>--<id>` and varies per tenant and over time.
-#[test]
-fn a_hosted_start_url_carries_the_tenant_origin_and_its_company() {
-    let start = login_start_url(
-        "https://hub.example.com",
-        "google",
-        "https://smoke1.example.com/?company=smoke1",
-    );
-
-    assert_eq!(
-        start,
-        "https://hub.example.com/auth/google/login\
-         ?redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dsmoke1"
-    );
-}
-
 /// The exact string the hub's `GET /auth/key` receives, pinned whole.
 ///
 /// Every value percent-encoded the same way, `scopes` included: the hub

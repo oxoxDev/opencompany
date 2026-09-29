@@ -45,3 +45,35 @@ fn the_channel_is_not_the_builders_unlabelled_default() {
         "`internal` is what openhuman calls a session nobody named"
     );
 }
+
+#[test]
+fn a_runtime_agent_id_is_the_company_and_teammate_folded_to_the_runtime_alphabet() {
+    assert_eq!(
+        runtime_agent_id(&CompanyId::new("acme"), "designer"),
+        "acme--designer"
+    );
+    assert_eq!(
+        runtime_agent_id(&CompanyId::new("Acme Co"), "QA.Lead"),
+        "acme-co--qa-lead"
+    );
+    // A leading character outside the runtime's alphabet gets a prefix
+    // rather than a refusal at `Runtime::agent`.
+    assert!(runtime_agent_id(&CompanyId::new("-x"), "y").starts_with('a'));
+}
+
+#[test]
+fn a_long_runtime_agent_id_is_truncated_with_a_hash_that_keeps_it_unique() {
+    let company = CompanyId::new("a".repeat(70));
+    let one = runtime_agent_id(&company, "one");
+    let two = runtime_agent_id(&company, "two");
+    assert!(one.len() <= 64, "{one}");
+    assert!(two.len() <= 64, "{two}");
+    assert_ne!(
+        one, two,
+        "two ids sharing their first 56 bytes stay distinct"
+    );
+    assert!(
+        one.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    );
+}

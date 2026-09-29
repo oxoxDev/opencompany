@@ -31,6 +31,7 @@ fn task_id_correlation_is_additive_and_omitted_when_absent() {
         steps: Vec::new(),
         task_id: None,
         outputs: Vec::new(),
+        episode: None,
     };
     assert_eq!(
         serde_json::to_string(&untagged).unwrap(),
@@ -49,6 +50,7 @@ fn task_id_correlation_is_additive_and_omitted_when_absent() {
         steps: Vec::new(),
         task_id: Some("t-1".to_string()),
         outputs: Vec::new(),
+        episode: None,
     };
     let back: CompanyEvent =
         serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
@@ -244,7 +246,7 @@ fn desk_task_completed_carries_artifact_ids_and_still_reads_the_old_shape() {
 fn a_thread_parent_round_trips_and_a_pre_thread_line_still_loads() {
     for legacy in [
         r#"{"kind":"OperatorMessage","text":"hi"}"#,
-        r#"{"kind":"AgentReply","chat_id":"main","agent_id":"ceo","text":"hi"}"#,
+        r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#,
     ] {
         let event: CompanyEvent = serde_json::from_str(legacy).unwrap();
         match &event {
@@ -289,6 +291,7 @@ fn a_thread_parent_round_trips_and_a_pre_thread_line_still_loads() {
         agent_id: "ceo".into(),
         text: "on it".into(),
         steps: Vec::new(),
+        episode: None,
     };
     let json = serde_json::to_string(&answered).unwrap();
     assert!(json.contains(r#""parent":41"#), "{json}");

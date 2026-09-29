@@ -4,7 +4,7 @@
 //! OpenHuman, OpenCompany and Medulla share a single TinyHumans login, so the
 //! backend cannot tell which product is calling from credentials alone; it
 //! attributes traffic by reading this header (see
-//! `openhuman_core::api::product`, whose doc comment names the backend-side
+//! `openhuman_tinyhumans::backend::product`, whose doc comment names the backend-side
 //! reader, `src/utils/sdkSource.ts` in `tinyhumansai/backend`). Without it, an
 //! opencompany-driven request would be counted as `openhuman` — the vendored
 //! runtime's own default — and OpenCompany usage would be invisible in
@@ -12,7 +12,7 @@
 //!
 //! The embedded `openhuman_core` crate (behind this crate's `openhuman`
 //! feature) already solves this for its own outbound calls: a host calls
-//! `openhuman_core::api::set_product_identity` once at startup and every
+//! `openhuman_tinyhumans::set_product_identity` once at startup and every
 //! `IntegrationClient` it constructs afterward picks up the header
 //! automatically. That covers `src/harness/toolbelt.rs`, `composio.rs` and
 //! `search.rs` — but nothing else. This crate's *own* backend traffic
@@ -40,7 +40,7 @@
 pub const PRODUCT_IDENTITY: &str = "opencompany";
 
 /// The header name the TinyHumans backend reads to attribute a request to a
-/// product. Mirrors `openhuman_core::api::PRODUCT_IDENTITY_HEADER` exactly —
+/// product. Mirrors `openhuman_tinyhumans::backend::PRODUCT_IDENTITY_HEADER` exactly —
 /// see the drift-guard test in this module's `tests`, which fails the build
 /// the moment the two crates' header names would otherwise disagree.
 pub const PRODUCT_IDENTITY_HEADER: &str = "x-sdk-name";
@@ -77,13 +77,13 @@ pub fn product_identity_header() -> (&'static str, &'static str) {
 /// the traffic is just silently counted as another product's.
 #[cfg(feature = "openhuman")]
 pub fn install_into_embedded_core() {
-    match openhuman_core::api::ProductIdentity::new(PRODUCT_IDENTITY) {
+    match openhuman_tinyhumans::ProductIdentity::new(PRODUCT_IDENTITY) {
         Some(identity) => {
             tracing::debug!(
                 identity = identity.as_str(),
                 "[product] installed the product identity into the embedded core"
             );
-            openhuman_core::api::set_product_identity(identity);
+            openhuman_tinyhumans::set_product_identity(identity);
         }
         // Unreachable while `PRODUCT_IDENTITY` is a lower-case ASCII literal —
         // core's sanitiser only returns `None` when nothing survives its

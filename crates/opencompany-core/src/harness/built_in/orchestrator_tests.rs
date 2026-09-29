@@ -11,6 +11,8 @@ mod support2;
 use support1::*;
 use support2::*;
 
+#[path = "orchestrator_tests_general_channel.rs"]
+mod tests_general_channel;
 #[path = "orchestrator_tests_part1.rs"]
 mod tests_part1;
 #[path = "orchestrator_tests_part10.rs"]

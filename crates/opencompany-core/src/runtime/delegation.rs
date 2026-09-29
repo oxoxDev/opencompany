@@ -349,13 +349,13 @@ struct HandOff {
 }
 
 /// The prompt for the CEO-relay hand-back turn: the operator's original message
-/// plus each teammate's reply, framed so the orchestrator relays the answer back
-/// as its own single, coherent response and does not delegate again.
+/// plus each teammate's reply, framed so the orchestrator passes the answer
+/// along briefly and does not delegate again.
 pub(crate) fn build_relay_prompt(original: &str, desk_replies: &[(String, String)]) -> String {
     let mut prompt = format!(
         "The operator asked:\n{original}\n\nYou delegated this to your team and their reply is \
-below. Relay their answer back to the operator now as your own single, coherent response — \
-summarize it or pass it along. Do not delegate again; just relay what came back."
+below. Pass their answer along to the operator now, by name, in a sentence or two. Do not \
+delegate again; just relay what came back."
     );
     for (member, reply) in desk_replies {
         prompt.push_str(&format!("\n\n{member} replied:\n{reply}"));
@@ -375,8 +375,12 @@ summarize it or pass it along. Do not delegate again; just relay what came back.
 /// message directly.
 #[derive(Default)]
 pub(crate) struct DelegationOutcome {
-    /// A chat bubble to surface as-is (unused by the current delegations).
+    /// Legacy single standalone bubble slot. Existing delegation kinds leave
+    /// it empty; retained for the stable test seam.
     pub(crate) bubble: Option<OutboundMessage>,
+    /// Chat bubbles to surface as-is. Conversation dispatch uses this for the
+    /// recipient's DM reply and any bounded child replies it caused.
+    pub(crate) bubbles: Vec<OutboundMessage>,
     /// A synchronous desk reply to relay through a second orchestrator turn.
     pub(crate) desk_reply: Option<DeskReply>,
     /// Set when an operator CANCELLED this delegation's run mid-flight, so its
@@ -667,6 +671,39 @@ pub(crate) struct Drained {
     pub(crate) spawned_task: Option<String>,
     /// Board-write refusals from this drain.
     pub(crate) refused_cards: Vec<RefusedCardWrite>,
+}
+
+impl Drained {
+    fn absorb(&mut self, out: DelegationOutcome, target: Option<String>) {
+        if out.cancelled
+            && let Some(target) = target
+        {
+            self.cancelled_desks.push(target);
+        }
+        if let Some(id) = out.spawned_task {
+            self.spawned_task.get_or_insert(id);
+        }
+        if let Some(bubble) = out.bubble {
+            self.bubbles.push(bubble);
+        }
+        self.bubbles.extend(out.bubbles);
+        if let Some(reply) = out.desk_reply {
+            self.desk_replies.push(reply);
+        }
+        if let Some(refused) = out.refused_card {
+            self.refused_cards.push(refused);
+        }
+    }
+
+    fn merge(&mut self, nested: Drained) {
+        self.bubbles.extend(nested.bubbles);
+        self.desk_replies.extend(nested.desk_replies);
+        self.cancelled_desks.extend(nested.cancelled_desks);
+        self.refused_cards.extend(nested.refused_cards);
+        if let Some(id) = nested.spawned_task {
+            self.spawned_task.get_or_insert(id);
+        }
+    }
 }
 
 /// The operator-facing result of one operator message after delegation: the
@@ -1435,13 +1472,10 @@ impl<'a> DelegationRunner<'a> {
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
-        // Two ways it does, and until #1035 this saw only the first. The triage
-        // naming a title is one; the operator asking for a workflow is the
-        // other, and the handler takes it as an override — `workflow_requested`
-        // supplies a title through `or_else` when the triage declined to. A
-        // message that went down that second road arrived here looking uncarded,
-        // and the paths below opened a card beside the one it already had.
-        let carded_by_handler = triage.title().is_some() || workflow_requested;
+        // A card actually persisted by the handler is the authority here.
+        // Intent alone must not suppress a later tool-driven delegation.
+        let handler_card = self.chat_handler_card().await?;
+        let carded_by_handler = workflow_requested || handler_card.is_some();
         // Issue #1152: the mirror image of `workflow_requested` — the operator
         // said this message is not a request for work at all.
         //
@@ -1489,20 +1523,14 @@ impl<'a> DelegationRunner<'a> {
         // conversation rather than a run row, naming the workflows the turn
         // authored. Run records stay reserved for actual work attempts (#183
         // §4), so this turn mints none — see `TaskOutputSource`.
-        let handler_card = match carded_by_handler {
-            true => self.chat_handler_card().await?,
-            false => None,
-        };
-        // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
-        // no delegation tools — the card-opening tools are wired only onto the
-        // orchestrator — so it has no way to open a card even if it wanted one
-        // and does the only thing available: the work itself, inline, untracked.
-        // Opening the card here, before their turn, is what closes that path:
-        // the tracking decision stops depending on which agent answered or which
-        // tools it happens to carry.
-        let mut direct_card = self
-            .open_direct_work_card(responder, message, chat_id, ctx)
-            .await?;
+        // A desk lead or teammate asked DIRECTLY opens no card by construction.
+        // Issue #442 used to card anything "substantial" said to one here,
+        // before their turn, because a non-orchestrator carried no tool that
+        // could — and the result was that every message typed into a desk
+        // became a board card nobody had asked for. Every roster agent now
+        // carries `spawn_task` (and the hand-off tools) itself, so whether an
+        // ask is tracked is the answering agent's decision, made with a tool
+        // call, exactly as it is for the orchestrator.
         // Same discipline `run_task` keeps on the dispatched-card path: only
         // what *this* turn stages can be attributed to this turn's card, so
         // anything a previous turn left staged is dropped before the model runs
@@ -1530,12 +1558,11 @@ impl<'a> DelegationRunner<'a> {
         // delegation tools it already has. Nothing here dispatches.
         let with_mentions;
         let message = if operator_turn && !self.also_mentioned.is_empty() {
-            // A responder with no hand-off tool at all (an overlay teammate,
-            // or a manifest member with an empty `delegates_to`) cannot act on
-            // "hand work to them" — see `responder_can_delegate`. Telling it
-            // to anyway is not a harmless nudge: it is an instruction the
-            // model has no tool to follow, for a name it now believes should
-            // be receiving work it never will.
+            // A responder whose `delegates_to` narrows its reach past a
+            // mentioned teammate cannot act on "hand work to them" — see
+            // `reachable_mentioned`. Telling it to anyway is not a harmless
+            // nudge: it is an instruction the tool would refuse, for a name it
+            // now believes should be receiving work it never will.
             with_mentions = {
                 let reachable = self.reachable_mentioned(responder);
                 let unreachable: Vec<&str> = self
@@ -1625,30 +1652,6 @@ impl<'a> DelegationRunner<'a> {
         // inference budget/credits must survive the relay turn replacing the
         // reply text, exactly like a spend halt.
         let mut budget_paused = outcome.budget_paused;
-        // Settle the direct-answer card from the turn that just ran. Done before
-        // the delegation drain because a direct responder queues nothing — it
-        // has no delegation tools — so there is no relay turn coming that could
-        // change the answer this card records.
-        //
-        // Issue #1846 review (Codex #3865395873): `budget_paused` (captured
-        // above, right beside `halted_for_spend`) has to gate the terminal
-        // state here too, exactly as it already does for the top-level
-        // orchestrator's own dispatched turn (`HarnessBrain::run_task`).
-        // Without this check a responder that paused for lack of credits
-        // still settled `Completed` — the operator read the pause notice
-        // while the card moved to In Review with that notice as though it
-        // were a finished answer.
-        let mut direct_card_id = None;
-        if let Some(card) = direct_card.as_mut() {
-            let end = if budget_paused.is_some() {
-                TaskRunEnd::Paused
-            } else {
-                TaskRunEnd::Completed
-            };
-            self.settle_work_card(card, responder, end, parked, &operator_reply)
-                .await?;
-            direct_card_id = Some(card.id.clone());
-        }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
         // lead and hands its answer back to RELAY rather than surfacing as a
         // disconnected sibling bubble. Any future delegation that surfaces its own
@@ -1678,7 +1681,7 @@ impl<'a> DelegationRunner<'a> {
         // Cloned rather than moved: the workflow drain below settles *this*
         // card, and it has to still be readable after `spawned_task` takes it
         // (issue #678).
-        let mut spawned_task: Option<String> = handler_card.clone().or(direct_card_id);
+        let mut spawned_task: Option<String> = handler_card.clone();
         let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Run).await?;
         if let Some(id) = drained.spawned_task {
             spawned_task.get_or_insert(id);
@@ -2088,23 +2091,11 @@ impl<'a> DelegationRunner<'a> {
             // be reported against whoever it was aimed at (issues #176, #884).
             let target = hand_off_target_of(&delegation).map(str::to_string);
             let out = self.run_delegation(delegation, chat_id, ctx).await?;
-            if out.cancelled
-                && let Some(desk) = target
-            {
-                drained.cancelled_desks.push(desk);
-            }
-            if let Some(id) = out.spawned_task {
-                drained.spawned_task.get_or_insert(id);
-            }
-            if let Some(bubble) = out.bubble {
-                drained.bubbles.push(bubble);
-            }
-            if let Some(desk) = out.desk_reply {
-                drained.desk_replies.push(desk);
-            }
-            if let Some(unknown) = out.refused_card {
-                drained.refused_cards.push(unknown);
-            }
+            drained.absorb(out, target);
+        }
+        if self.queue.has_queued() {
+            let nested = Box::pin(self.drain_and_execute(chat_id, ctx, hand_offs)).await?;
+            drained.merge(nested);
         }
         Ok(drained)
     }
@@ -2685,6 +2676,7 @@ impl<'a> DelegationRunner<'a> {
         // along and get folded onto the relayed operator bubble.
         Ok(DelegationOutcome {
             bubble: None,
+            bubbles: Vec::new(),
             // Not a board write; see `DelegationOutcome::assigned`.
             assigned: false,
             desk_reply: Some(DeskReply {
@@ -2911,77 +2903,6 @@ impl<'a> DelegationRunner<'a> {
         self.open_work_card(member, instruction, chat_id, ctx).await
     }
 
-    /// The card for a **desk lead or teammate asked directly** (issue #442,
-    /// path one), or `None` when this turn is not that.
-    ///
-    /// The orchestrator's own chat turn is deliberately excluded. It is the
-    /// operator's front door — every message arrives there, most of them are
-    /// answered in a line, and tracking all of them would bury the board. What
-    /// the orchestrator does with work is *hand it off*, and each hand-off opens
-    /// its own card in [`run_delegation`](Self::run_delegation). A desk thread
-    /// or a teammate DM is the opposite case: nothing downstream of it opens a
-    /// card, because the agent answering carries no tool that could.
-    ///
-    /// # It defers to the card the chat handler already opened
-    ///
-    /// The REST chat handler runs
-    /// [`detect_task_intent`](crate::company::task_intent::detect_task_intent)
-    /// over the same message **before** the cycle starts, and opens a To-do card
-    /// when it reads as a leading imperative ("draft the launch plan"). That is
-    /// the deterministic half that already existed; #442 is about everything it
-    /// does not catch. So when it has already fired, this opens nothing — one
-    /// message must not become two cards.
-    ///
-    /// Found live: without this, three consecutive desk messages opened four
-    /// cards, one of them a duplicate of the request beside it. The two
-    /// detectors are deliberately not merged — they answer different questions
-    /// with opposite defaults (that one asks "is this unambiguously an
-    /// instruction?", this one asks "is there any reason NOT to track it?") —
-    /// but exactly one of them may open the card.
-    ///
-    /// The stand-down itself now lives in
-    /// [`open_work_card`](Self::open_work_card), reached through
-    /// `carded_by_handler`, because the hand-off path needed the same guard and
-    /// only [`handle_operator_message`](Self::handle_operator_message) can
-    /// answer the question (issue #463).
-    /// # It also stands down on a question (issue #267)
-    ///
-    /// This is the **third** card path, and it is the one a triage layer would
-    /// miss if it only looked at the orchestrator: asking a desk lead "what did
-    /// you ship this week?" runs their turn directly, and [`is_trackable_work`]
-    /// — whose default is `true` by design — reads a sentence that long as work
-    /// and cards it. `answering` is the operator's own message triaged as
-    /// [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage),
-    /// which is a positive statement that the message was a read, so it
-    /// outranks that default.
-    ///
-    /// Deliberately narrower than the queue claim above: this suppresses a card,
-    /// it does not take any tool away, and the desk lead still answers exactly
-    /// as before. Since #267's review it is no longer the odd one out —
-    /// [`open_hand_off_work_card`](Self::open_hand_off_work_card) stands down
-    /// the same way, so every card path treats a question identically and the
-    /// tool set is narrowed in exactly one place.
-    async fn open_direct_work_card(
-        &self,
-        responder: &str,
-        message: &str,
-        chat_id: Option<&str>,
-        ctx: MessageContext,
-    ) -> Result<Option<TaskRecord>> {
-        if responder == self.orchestrator_id() {
-            return Ok(None);
-        }
-        if ctx.answering {
-            tracing::debug!(
-                company = %self.company,
-                responder = %responder,
-                "[delegation] not opening a direct card: the operator asked a question"
-            );
-            return Ok(None);
-        }
-        self.open_work_card(responder, message, chat_id, ctx).await
-    }
-
     /// The card the REST chat handler opened for this message, when it opened
     /// one and it is still on the board (issue #463).
     ///
@@ -3020,9 +2941,11 @@ impl<'a> DelegationRunner<'a> {
     /// message, or when nothing matches — the honest answer for a handler write
     /// that failed (it is best-effort there), for a card written before this
     /// field existed, and for every non-REST caller of this seam, none of which
-    /// have a chat handler in front of them. Callers must not read `None` as
-    /// "the handler did not fire": the stand-down is keyed on the detector, not
-    /// on this.
+    /// have a chat handler in front of them. `None` therefore reads as "no card
+    /// to adopt", which — now that the handler cards on the operator's explicit
+    /// workflow request alone — is also how `carded_by_handler` is decided,
+    /// together with that request itself (a copilot thread suppresses the card
+    /// but not the signal).
     async fn chat_handler_card(&self) -> Result<Option<String>> {
         let Some(tasks) = self.tasks else {
             return Ok(None);
@@ -3971,190 +3894,74 @@ tokio::task_local! {
 }
 
 tokio::task_local! {
-    /// What the current turn is trying to do, in the requester's own words
-    /// (issue #6014).
+    /// The hive seat the current turn runs as, when it is one (plan
+    /// hive-desks, Phase 4).
     ///
-    /// Read by [`PayloadExtractor`](crate::harness::payload_extract) when a tool
-    /// returns more than the per-result budget: knowing the task is what lets it
-    /// keep the records that answer the question and shorten the ones that do
-    /// not. Without it the extractor declines outright rather than guessing,
-    /// because a task-blind extraction is a byte cut with a model call attached
-    /// — it would drop the one issue that mattered exactly as readily as the
-    /// twenty-nine that did not.
-    ///
-    /// Set to [`operator_words`], not the composed turn text: by the time a turn
-    /// runs, `message` carries the cycle's machine briefings (open work, the
-    /// settled digest, the thread index, attachment markers), and an extractor
-    /// told the task is "here is a list of finished cards" would keep the wrong
-    /// half of the payload. The same cut the triage and the budget-pause re-park
-    /// already take, for the same reason.
-    ///
-    /// Absent on any path that has not been taught to set it, which the
-    /// extractor treats as "no hint" and declines — no worse than before it
-    /// existed.
-    pub(crate) static TURN_TASK_HINT: String;
+    /// Set by the production [`SeatRunner`](crate::hive::driver::SeatRunner)
+    /// around the pool's turn and read by `CompanyAgent::run_with_steer` after
+    /// it takes the agent's turn lock: the episode coordinates go onto the
+    /// in-flight registration the MCP server attributes speech to, the
+    /// timeout is counted from that lock, and the seat's one utterance comes
+    /// back through [`SeatTurnScope::outbox`]. A task-local for the reason
+    /// `TURN_CONVERSATION` is one: the runner and the pool are on opposite
+    /// sides of the `RunTurn` seam, and neither is constructed per turn.
+    static SEAT_TURN: std::sync::Arc<SeatTurnScope>;
 }
 
-/// The current turn's task, when one is in scope.
-pub(crate) fn current_task_hint() -> Option<String> {
-    TURN_TASK_HINT.try_with(|hint| hint.clone()).ok()
+/// The hive coordinates and the return channel of one seat turn.
+#[derive(Debug)]
+pub struct SeatTurnScope {
+    /// The episode and round the turn runs for.
+    pub hive: crate::hive::tools::HiveTurn,
+    /// How long the turn may run once it holds its lock.
+    pub timeout: std::time::Duration,
+    /// What the seat said through the MCP server — filled by the pool when
+    /// the turn returns.
+    pub outbox: std::sync::Mutex<Vec<tinyhivemind::speech::Utterance>>,
+    /// Whether the turn ran past its timeout.
+    pub timed_out: std::sync::atomic::AtomicBool,
 }
 
-/// Runs `fut` with `task` readable as the turn's task hint.
-pub(crate) async fn with_task_hint<F: std::future::Future>(task: String, fut: F) -> F::Output {
-    TURN_TASK_HINT.scope(task, fut).await
-}
-
-tokio::task_local! {
-    /// The conversation the current turn is answering in (issue #1890 F).
-    ///
-    /// A task-local for the reason [`CHAT_ONLY_TURN`] is one: a tool's belt is
-    /// built once per agent and a turn's conversation changes every message, so
-    /// the tool cannot be handed it at construction. This is the ambient fact a
-    /// tool reads at call time.
-    ///
-    /// It carries the **channel**, which is what scopes `read_thread`: a tool
-    /// able to read any thread in any channel would reintroduce through the
-    /// back door the leak #1890 A closed at the seed.
-    static TURN_CONVERSATION: Option<String>;
-
-    /// Whether the current turn has already SAID something through a speech
-    /// tool (`desk_post` / `desk_dm` / `desk_close`).
-    ///
-    /// A task-local for the same reason `TURN_CONVERSATION` is one: the tool
-    /// that sets it and the code that reads it are on opposite sides of the
-    /// model loop, and neither is constructed per turn.
-    ///
-    /// This is what keeps the return-text fallback from double-posting. With
-    /// `[speech] enabled`, an agent's line reaches the journal through the
-    /// tool; its return text is then private thinking and must not be
-    /// journaled a second time. But an agent that calls NO speech tool must
-    /// still be heard — going silent because a model forgot a tool call is not
-    /// an acceptable failure mode — so the fallback is gated on this flag
-    /// rather than on the manifest knob alone.
-    static TURN_SPEECH: std::sync::Arc<TurnSpeech>;
-}
-
-/// What one turn said through the speech tools.
-///
-/// One shared record rather than two task-locals: nesting a fourth
-/// `task_local!` scope around the turn future pushed type inference past its
-/// recursion limit, and two flags that are always set and read together were
-/// never two facts anyway.
-#[derive(Debug, Default)]
-pub struct TurnSpeech {
-    /// Whether the turn said anything at all through a speech tool — including
-    /// a `desk_dm`, which journals itself and so leaves no utterance here.
-    spoke: std::sync::atomic::AtomicBool,
-    /// What it asked to say to its whole channel, in call order.
-    ///
-    /// `desk_post` and `desk_close` do **not** append. The crate's own rule is
-    /// that *"a tool call is a request to speak — the host appends, the host
-    /// decides"*, and the host that appends is the reply path that has always
-    /// appended: it carries the folded steps, the live SSE frame, the resolved
-    /// mentions and the board-card correlation, none of which a tool holds.
-    ///
-    /// `desk_dm` is the exception and journals directly, because a narrowed
-    /// audience is not something a turn's single reply can express.
-    utterances: std::sync::Mutex<Vec<String>>,
-}
-
-impl TurnSpeech {
-    /// Whether this turn was heard.
-    pub fn spoke(&self) -> bool {
-        self.spoke.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The channel-visible lines, in call order.
-    pub fn utterances(&self) -> Vec<String> {
-        // tinysweeper: a poisoned lock (another task panicked while holding
-        // it) means the vector may be incomplete or inconsistent, but that is
-        // not a reason to answer "said nothing" — this turn may well have
-        // spoken before the panic, and silently discarding that is worse than
-        // surfacing a possibly-incomplete list with the corruption logged so
-        // it is detectable.
-        match self.utterances.lock() {
-            Ok(lines) => lines.clone(),
-            Err(poisoned) => {
-                tracing::error!(
-                    "[delegation] turn-speech mutex poisoned; returning a possibly incomplete utterance list"
-                );
-                poisoned.into_inner().clone()
-            }
+impl SeatTurnScope {
+    /// A scope for one seat turn.
+    #[must_use]
+    pub fn new(hive: crate::hive::tools::HiveTurn, timeout: std::time::Duration) -> Self {
+        Self {
+            hive,
+            timeout,
+            outbox: std::sync::Mutex::new(Vec::new()),
+            timed_out: std::sync::atomic::AtomicBool::new(false),
         }
     }
+
+    /// The utterances the turn made, drained.
+    #[must_use]
+    pub fn take_outbox(&self) -> Vec<tinyhivemind::speech::Utterance> {
+        self.outbox
+            .lock()
+            .map(|mut held| std::mem::take(&mut *held))
+            .unwrap_or_default()
+    }
+
+    /// Whether the turn ran past its timeout.
+    #[must_use]
+    pub fn timed_out(&self) -> bool {
+        self.timed_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
-/// A fresh, silent record for one turn.
-///
-/// Shared rather than task-local-owned because the two readers are on opposite
-/// sides of the scope: the tools write it *inside* the turn, and the reply path
-/// reads it *after* the turn has returned and the task-local is gone.
-pub fn new_turn_speech() -> std::sync::Arc<TurnSpeech> {
-    std::sync::Arc::new(TurnSpeech::default())
-}
-
-/// Runs `fut` with `speech` as this turn's speech record.
-pub(crate) async fn with_turn_speech<F: std::future::Future>(
-    speech: std::sync::Arc<TurnSpeech>,
+/// Runs `fut` as the seat turn `scope` describes.
+pub async fn with_seat_turn<F: std::future::Future>(
+    scope: std::sync::Arc<SeatTurnScope>,
     fut: F,
 ) -> F::Output {
-    TURN_SPEECH.scope(speech, fut).await
+    SEAT_TURN.scope(scope, fut).await
 }
 
-/// Records that this turn has said something through a speech tool.
-pub fn mark_turn_spoke() {
-    let _ = TURN_SPEECH.try_with(|speech| {
-        speech
-            .spoke
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    });
-}
-
-/// Records one channel-visible utterance for this turn.
-///
-/// Returns whether it was collected: `false` outside a tracked turn, or when
-/// the turn's speech mutex is poisoned, which tells the caller to fall back to
-/// appending it itself. tinysweeper: the poisoned branch used to fall through
-/// silently with no signal that anything was wrong; it now logs, so the
-/// corruption is detectable rather than reading as an ordinary "no active
-/// scope" — the caller's existing direct-append fallback still runs either
-/// way, so the text itself is not lost.
-pub fn collect_utterance(text: String) -> bool {
-    TURN_SPEECH
-        .try_with(|speech| match speech.utterances.lock() {
-            Ok(mut lines) => {
-                lines.push(text);
-                speech
-                    .spoke
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                true
-            }
-            Err(_) => {
-                tracing::error!(
-                    "[delegation] turn-speech mutex poisoned; falling back to a direct append"
-                );
-                false
-            }
-        })
-        .unwrap_or(false)
-}
-
-/// Run `fut` with the current turn's channel set (issue #1890 F).
-pub(crate) async fn with_turn_conversation<F: std::future::Future>(
-    chat_id: Option<String>,
-    fut: F,
-) -> F::Output {
-    TURN_CONVERSATION.scope(chat_id, fut).await
-}
-
-/// The channel the current turn is answering in, or `None` outside one — a
-/// dispatched card, a workflow node, or any path that never set it.
-///
-/// `None` is a refusal for `read_thread` rather than a wildcard: a turn with no
-/// conversation has no threads it is entitled to read.
-pub(crate) fn turn_conversation() -> Option<String> {
-    TURN_CONVERSATION.try_with(Clone::clone).ok().flatten()
+/// The seat turn the current task runs as, if it is one.
+#[must_use]
+pub fn seat_turn() -> Option<std::sync::Arc<SeatTurnScope>> {
+    SEAT_TURN.try_with(Clone::clone).ok()
 }
 
 /// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
@@ -4205,7 +4012,3 @@ mod tests_part8;
 #[cfg(test)]
 #[path = "delegation_tests_part9.rs"]
 mod tests_part9;
-
-#[cfg(test)]
-#[path = "delegation_task_hint_tests.rs"]
-mod task_hint_tests;

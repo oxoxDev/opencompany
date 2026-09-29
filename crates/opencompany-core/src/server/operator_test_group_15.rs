@@ -27,6 +27,7 @@ async fn mention_context_canonicalizes_prefixed_dm_keys() {
     // console mints.
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
             .await,
         "dm:backend_engineer",
@@ -36,6 +37,7 @@ async fn mention_context_canonicalizes_prefixed_dm_keys() {
     // not move a key that was already right.
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, &[], "dm:backend_engineer")
             .await,
         "dm:backend_engineer",
@@ -44,7 +46,10 @@ async fn mention_context_canonicalizes_prefixed_dm_keys() {
     // A `dm:` key whose bare half names a desk (the desk-first ordering the
     // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
     assert_eq!(
-        runtime.mention_context(&id, &[], "dm:Engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "dm:Engineering")
+            .await,
         "engineering",
         "a `dm:` key that resolves to a desk has to store the desk id"
     );
@@ -83,6 +88,7 @@ async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
 
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, std::slice::from_ref(&human), "engineering")
             .await,
         "engineering",
@@ -90,6 +96,7 @@ async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
     );
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
             .await,
         "engineering",
@@ -98,6 +105,7 @@ async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
     // A DM the human is actually a teammate of still badges as a DM.
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, &[human], "dm:backend_engineer")
             .await,
         "dm:backend_engineer",
@@ -120,19 +128,26 @@ async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
     // The literal `dm:engineering` desk resolves as sent; stripping would
     // misroute to the plain `engineering` desk.
     assert_eq!(
-        runtime.mention_context(&id, &[], "dm:engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "dm:engineering")
+            .await,
         "dm:engineering",
         "a desk literally named dm:<…> keeps its id — the raw key resolves first"
     );
     // The un-prefixed desk is untouched by the collision.
     assert_eq!(
-        runtime.mention_context(&id, &[], "engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "engineering")
+            .await,
         "engineering",
         "the un-prefixed desk still resolves to its own id"
     );
     // A genuine DM still re-keys onto the rail's DM channel.
     assert_eq!(
         runtime
+            .mention_seam()
             .mention_context(&id, &[], "dm:backend_engineer")
             .await,
         "dm:backend_engineer",
@@ -155,14 +170,20 @@ async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
     // A desk addressed by its display name files under the desk's id —
     // `"Engineering"` names the desk whose id is `engineering`.
     assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "Engineering")
+            .await,
         "engineering",
         "a desk named by its display name has to store the desk id, not the raw key"
     );
     // A teammate addressed by a case-variant of their id files under the
     // canonical agent id, re-keyed into the console's DM channel space.
     assert_eq!(
-        runtime.mention_context(&id, &[], "BACKEND_ENGINEER").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "BACKEND_ENGINEER")
+            .await,
         "dm:backend_engineer",
         "a teammate named by a noncanonical key has to store dm:<agent-id>"
     );
@@ -183,8 +204,11 @@ async fn mention_context_maps_unresolvable_general_spellings_to_main() {
 
     for general in ["General", "general", "main", ""] {
         assert_eq!(
-            runtime.mention_context(&id, &[], general).await,
-            crate::server::chat_history::MAIN_THREAD_ID,
+            runtime
+                .mention_seam()
+                .mention_context(&id, &[], general)
+                .await,
+            crate::ports::general_channel::GENERAL_CHANNEL_ID,
             "a mention in the General desk ({general:?}) has to store the console's \
              main-thread id, which the rail aliases onto its first rendered desk \
              channel"
@@ -193,7 +217,10 @@ async fn mention_context_maps_unresolvable_general_spellings_to_main() {
     // A desk that does resolve keeps its canonical id — the general-chat
     // mapping must not swallow a real desk.
     assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "Engineering")
+            .await,
         "engineering",
         "a real desk keeps its canonical id even when its name looks general"
     );
@@ -214,14 +241,20 @@ async fn mention_context_canonicalizes_a_memberless_desk() {
     let runtime = state.registry().get(&id).expect("company registered");
 
     assert_eq!(
-        runtime.mention_context(&id, &[], "Sales").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "Sales")
+            .await,
         "sales",
         "a memberless desk named by its display name has to store the desk id, \
          not the raw key — the rail's channel id is `sales`"
     );
     // The desk that does have a lead keeps behaving as before.
     assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
+        runtime
+            .mention_seam()
+            .mention_context(&id, &[], "Engineering")
+            .await,
         "engineering",
         "a desk with a lead still stores its canonical id"
     );
@@ -402,6 +435,7 @@ async fn is_admin_for_item_revalidates_only_the_owner_fallback_report() {
         agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
         text: "no admin has a mailbox".into(),
         steps: Vec::new(),
+        episode: None,
     }));
     assert!(
         !super::is_admin_for_item(&owner_fallback_item, &runtime, Some(&actor), true).await,
@@ -421,6 +455,7 @@ async fn is_admin_for_item_revalidates_only_the_owner_fallback_report() {
         agent_id: "ceo".into(),
         text: "ordinary reply".into(),
         steps: Vec::new(),
+        episode: None,
     }));
     assert!(
         super::is_admin_for_item(&ordinary_item, &runtime, Some(&actor), true).await,

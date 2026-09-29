@@ -2,7 +2,7 @@
 
 How a company proves who it is to the surfaces the platform brokers on its
 behalf (issue #586). The routes are listed in
-[`api-write-plane.md`](api-write-plane.md#credential-bearing-surfaces-feature-gated); this is the model
+[`api-write-plane-credentials.md`](api-write-plane-credentials.md); this is the model
 behind them.
 
 ## One key per company
@@ -127,11 +127,20 @@ what it was before this existed.
 
 ### Which hub, and the two pages the console does not reimplement
 
-Everything above happens against whichever hub `TINYHUMANS_API_URL` names — the
-production one by default, `https://staging-api.tinyhumans.ai` for a console
-working against staging. Nothing else has to be set to move the flow: the
-authorize URL is built from that value (`server::hub_identity::key_grant_url`),
-and so is the callback, from `OPENCOMPANY_PUBLIC_URL`.
+Everything above happens against whichever hub `TINYHUMANS_API_URL` (or
+`config.toml`'s `api_url`) names — the production one by default,
+`https://staging-api.tinyhumans.ai` for a console working against staging.
+Nothing else has to be set to move the flow: the authorize URL is built from
+that value (`server::hub_identity::key_grant_url`), so is the callback, so is
+the managed inference endpoint every company on the host resolves
+(`docs/modules/inference/data-model.md`, "per process, at the floor"), and so
+are the console's own "Get an API key" links — the Account dialog's from
+`account.manageKeysUrl` on `GET …/credential`, the setup wizard's from
+`inference.keys_url` on `GET /api/v1/setup`. None of those is a production
+constant any more: a host on staging sends its operator to mint a key on
+staging, presents that key to staging, and offers the one-click grant (which
+needs a company to scope to, so the wizard cannot) ahead of the paste field
+wherever `hubLink` is true.
 
 Two things the grant deliberately cannot do are **revoke** the key it minted and
 **pay** for what that key spends. Both end an errand somewhere this console has

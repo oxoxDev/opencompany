@@ -124,15 +124,21 @@ impl RosterBuilder {
     /// company that is *about* to be created — would put a row in a Usage view
     /// for a period the company did not exist. One unbilled call per install is
     /// the honest trade.
+    ///
+    /// `api_url` is the host's resolved platform URL, so a typed managed key
+    /// is probed against the platform that minted it — `config.toml` can name
+    /// staging where the environment says nothing.
     pub fn for_setup(
         env: &dyn crate::app::config::EnvSource,
+        api_url: Option<&str>,
         provider: Option<&str>,
         base_url: Option<&str>,
         credential: Option<&str>,
         model: Option<&str>,
     ) -> Option<Self> {
         use crate::harness::provider::{
-            DEFAULT_HOSTED_MODEL, HostedProvider, HostedProviderConfig, harness_inference_from_env,
+            DEFAULT_HOSTED_MODEL, HostedProvider, HostedProviderConfig,
+            harness_inference_from_env_at, platform_inference_url_at,
         };
 
         let selected_provider = provider.map(str::trim).filter(|value| !value.is_empty());
@@ -188,9 +194,7 @@ impl RosterBuilder {
             .map(str::trim)
             .filter(|key| !key.is_empty())
             .map(|key| {
-                let base_url = env
-                    .get("OPENCOMPANY_INFERENCE_URL")
-                    .unwrap_or_else(crate::company::inference::platform_base_url);
+                let base_url = platform_inference_url_at(env, api_url);
                 (
                     HostedProviderConfig {
                         base_url,
@@ -201,7 +205,8 @@ impl RosterBuilder {
                 )
             });
 
-        let (config, model_override) = typed.or_else(|| harness_inference_from_env(env))?;
+        let (config, model_override) =
+            typed.or_else(|| harness_inference_from_env_at(env, api_url))?;
         let model_name = model
             .map(str::trim)
             .filter(|model| !model.is_empty())

@@ -19,7 +19,7 @@
 #![cfg(feature = "openhuman")]
 
 use opencompany::product::PRODUCT_IDENTITY;
-use openhuman_core::api::{DEFAULT_PRODUCT_IDENTITY, ProductIdentity, product_identity};
+use openhuman_tinyhumans::{ProductIdentity, backend::DEFAULT_PRODUCT_IDENTITY, product_identity};
 
 /// The acceptance criterion itself, as a before/after pair.
 ///

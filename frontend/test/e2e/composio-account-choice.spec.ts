@@ -9,6 +9,7 @@ import {
   LIVE_BRAIN,
   LIVE_BRAIN_REASON,
 } from "./capabilities";
+import { waitForTurn } from "./orchestration";
 import { clickClearOfToasts } from "./toasts";
 
 /**
@@ -211,6 +212,15 @@ test("an operator names the account, and the page says so", async ({ page }) => 
 test.describe("the agent acts as the chosen account", () => {
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
+  // Two real agent turns, each awaited to completion (see `runOneExecute`), and
+  // an account choice between them. The suite's 60s default (`playwright.config
+  // .ts`) expires inside the second turn on CI hardware and reports a timeout
+  // rather than the behaviour under test — the run for #2270 died at
+  // `waitForTurn` with both `composio_execute` calls already answered and the
+  // composer idle. `blocker-verdicts-live.spec.ts` raises its own budget for the
+  // same reason.
+  test.setTimeout(600_000);
+
   /**
    * Make the agent run one `composio_execute` and hand back what the fixture
    * received for it.
@@ -265,7 +275,33 @@ test.describe("the agent acts as the chosen account", () => {
     await expect
       .poll(async () => (await executes(page)).length, { timeout: 30_000 })
       .toBeGreaterThan(0);
-    return executes(page);
+    const seen = await executes(page);
+
+    // Read the fixture first, then wait for the turn to actually END (issue
+    // #2270). Neither line above is that wait: `page.waitForResponse` resolves
+    // at the chat POST's *headers* while the SSE body is still streaming, and
+    // the fixture records `composio_execute` mid-stream — so without this the
+    // helper returns with the turn still in flight.
+    //
+    // Two things break when it does, and only in the live-brain lane, because
+    // the mock's stream ends in milliseconds:
+    //
+    //  1. `RoomView` holds `sending` true until the POST settles and passes it
+    //     to the composer as `disabled`, whose Send is
+    //     `disabled={disabled || !draft.trim()}`. The second call's
+    //     `page.goto("/#/chat")` is a hash change, not a reload, so React is
+    //     never remounted and that `sending` survives into it — Send never
+    //     becomes enabled and the click times out after 72 visibility polls.
+    //
+    //  2. `resetFixture` wipes the fixture's execute log out of band. A first
+    //     turn still running when the second call resets can land its
+    //     `composio_execute` in the second call's log, and the assertion on
+    //     the chosen account would then be reading the wrong turn's call.
+    //
+    // So the wait belongs here, at the end, rather than as a guard before the
+    // fill: it has to be done before the *reset*, not merely before the send.
+    await waitForTurn(page);
+    return seen;
   }
 
   test("no id is sent until somebody chooses, and then it is theirs", async ({ page }) => {

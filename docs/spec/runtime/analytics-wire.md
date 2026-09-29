@@ -14,18 +14,19 @@ The details below were read from OpenPanel's own source at commit
 schemas and disagree with them in at least one place (they describe rate
 limiting on `/track` that the router does not register).
 
-**Headers.** Authentication is two of them, and the id must be a UUIDv4 or the
-collector answers `401` before it looks at anything else:
+**Headers.** Authentication is the client id alone, and it must be a UUIDv4 or
+the collector answers `401` before it looks at anything else. The operator's
+clients are configured with **"ignore CORS and secret"**, so no
+`openpanel-client-secret` is read or sent:
 
 | Header | Value |
 |---|---|
 | `openpanel-client-id` | `OPENCOMPANY_ANALYTICS_CLIENT_ID` — a **write** or **root** client |
-| `openpanel-client-secret` | `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` |
 | `openpanel-sdk-name` | `opencompany` |
 | `openpanel-sdk-version` | the crate version |
 
-Both credential values are marked sensitive on the `HeaderValue`, which keeps
-them out of `reqwest`'s own `Debug` and out of HPACK's shared table on HTTP/2.
+The client id is marked sensitive on the `HeaderValue`, which keeps it out of
+`reqwest`'s own `Debug` and out of HPACK's shared table on HTTP/2.
 
 A credential in a header rather than in the body is the quiet improvement in
 this change. Mixpanel wanted its token stamped into every event's property bag,
@@ -186,7 +187,7 @@ not have.
 
 ## Where the credential is allowed to travel
 
-The client id and secret are **default headers on every request**, which is what
+The client id is a **default header on every request**, which is what
 makes the two rules below load-bearing in a way they were not under Mixpanel: a
 token in a request body, to one fixed `https` address this crate chose, had no
 configuration that could redirect or downgrade it.
@@ -196,16 +197,16 @@ client is built with `reqwest::redirect::Policy::none()`. Its default policy
 follows up to ten hops, and its cross-origin sanitization
 (`redirect.rs::remove_sensitive_headers`, reqwest 0.12.28, read rather than
 assumed) strips exactly `Authorization`, `Cookie`, `cookie2`,
-`Proxy-Authorization` and `WWW-Authenticate`. The `openpanel-client-*` headers
-are none of those, so one `302` — a reverse proxy sending unauthenticated
+`Proxy-Authorization` and `WWW-Authenticate`. `openpanel-client-id` is none of
+those, so one `302` — a reverse proxy sending unauthenticated
 callers to an SSO host is the ordinary way one arrives — handed this instance's
-long-lived write secret to a host the operator never named.
+long-lived write credential to a host the operator never named.
 `HeaderValue::set_sensitive` is not a defence and looks like one: it governs
 `Debug` output and HPACK indexing, not redirect handling.
 
 That sanitization also compares only host and port, never the scheme, so an
 `https` endpoint redirecting to `http://` on the same host would have carried
-the secret across in cleartext.
+the credential across in cleartext.
 
 A same-origin policy would also be safe, but it is a predicate to keep correct
 rather than an invariant to state, and all it buys is a collector that 301s
@@ -227,11 +228,11 @@ a collector that `307`s to a second one on another port and asserts the second
 was never touched. Its control,
 `the_redirect_destination_would_have_recorded_the_credential`, sends to that
 same second collector directly and asserts it records three requests *and* the
-secret header — without it, the zero would also hold for a collector that counts
+client-id header — without it, the zero would also hold for a collector that counts
 nothing.
 
 **The endpoint itself must be `https`, or loopback.** Plain `http` to a
-non-loopback host would put the secret on the wire in cleartext once per event
+non-loopback host would put the client id on the wire in cleartext once per event
 ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)), so it resolves to
 silence with its own reason rather than reporting. Loopback is the exception
 because that traffic **does not leave the host**: it goes over the host's
@@ -248,7 +249,7 @@ exception protects nothing. `reqwest`'s builder defaults to
 **only** from `NO_PROXY` — hyper-util 0.1.20's matcher has no implicit carve-out
 for `localhost` or `127.0.0.0/8` (read, not assumed). So on a host with a proxy
 configured and no matching `NO_PROXY`, `http://localhost:3000/track` went to the
-proxy in cleartext with both credential headers on it, and the endpoint check
+proxy in cleartext with the credential header on it, and the endpoint check
 prevented nothing. Measured rather than reasoned about: with the fix reverted,
 `a_loopback_endpoint_never_goes_through_a_system_proxy` records **2** requests at
 the stand-in proxy and 0 at the collector.

@@ -93,38 +93,88 @@ async fn two_concurrent_runs_cannot_take_each_others_entries() {
     );
 }
 
-/// The non-lossy fallback. A push outside any claim is not dropped and not
-/// an error — it lands in `Unscoped`, which the **chat cycle** drains and a
-/// workflow run does not.
-///
-/// This is the direction that matters: a missed turn entry point degrades
-/// to today's behaviour (the operator is still asked) rather than to a
-/// silently discarded approval, which is the failure #395 existed to fix.
+/// A push outside every claim is refused, and a chat cycle that claims
+/// afterwards must not find it: nothing unclaimed can be filed under an
+/// unrelated cycle's task or thread.
 #[tokio::test]
-async fn an_unclaimed_push_is_drained_by_the_cycle_never_by_a_run() {
+async fn an_unclaimed_push_is_refused_and_never_reaches_a_later_cycle() {
     let queue = ApprovalRequestQueue::default();
-    queue.push(gated("orphan"));
-
-    let run = queue.claim(ApprovalScope::Run("run-1".into()));
-    assert!(
-        run.scoped(async { queue.drain(10) })
-            .await
-            .requests
-            .is_empty(),
-        "a run must not adopt an entry it did not raise",
-    );
+    assert_eq!(queue.push(gated("orphan")), ApprovalPush::Unclaimed);
 
     let cycle = queue.claim(ApprovalScope::Cycle);
     let drained = cycle.scoped(async { queue.drain(10) }).await;
+    assert!(
+        drained.requests.is_empty(),
+        "an unrelated cycle must not adopt an orphaned request: {:?}",
+        drained.requests
+    );
+}
+
+/// A seat's claim drains its own bucket and nothing else, even while a cycle
+/// holds entries of its own.
+#[tokio::test]
+async fn a_seat_claim_drains_only_its_own_entries() {
+    let queue = ApprovalRequestQueue::default();
+    let cycle = queue.claim(ApprovalScope::Cycle);
+    let seat = queue.claim(ApprovalScope::Seat("desk/episode/writer".into()));
+
+    cycle
+        .scoped(async { queue.push(gated("chat.thing")) })
+        .await;
     assert_eq!(
-        drained
+        seat.scoped(async { queue.push(gated("seat.thing")) }).await,
+        ApprovalPush::Queued
+    );
+
+    let seat_got = seat.drain(10);
+    assert_eq!(
+        seat_got
             .requests
             .iter()
             .map(|r| r.tool.as_str())
             .collect::<Vec<_>>(),
-        vec!["orphan"],
-        "the cycle owns whatever nobody claimed — the pre-#439 behaviour",
+        vec!["seat.thing"],
     );
+    assert_eq!(
+        queue.len_in(&ApprovalScope::Cycle),
+        1,
+        "the cycle's entry stays"
+    );
+}
+
+/// A claim's own drain still caps and counts what it discards.
+#[tokio::test]
+async fn a_claim_drain_caps_and_counts_overflow() {
+    let queue = ApprovalRequestQueue::default();
+    let seat = queue.claim(ApprovalScope::Seat("desk/episode/writer".into()));
+    seat.scoped(async {
+        for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 2) {
+            queue.push(gated(&format!("seat.{i}")));
+        }
+    })
+    .await;
+
+    let drained = seat.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+    assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+    assert_eq!(drained.discarded, 2);
+    assert!(drained.overflow_notice().is_some());
+}
+
+/// A gated call raised where no approval can be recorded is refused outright,
+/// and the refusal says why, rather than claiming the operator was asked.
+#[tokio::test]
+async fn an_unclaimed_gated_call_is_denied_and_says_why() {
+    let (p, queue) = queued_policy("supervised", &[]);
+    let decision = p.check(&request("send_email", serde_json::json!({}))).await;
+    let ToolPolicyDecision::Deny { reason } = decision else {
+        panic!("an unclaimed gated call must be denied: {decision:?}");
+    };
+    assert!(
+        reason.contains("cannot record an approval request"),
+        "{reason}"
+    );
+    assert!(reason.contains("Do not tell anyone you asked"), "{reason}");
+    assert_eq!(queue.len_in(&ApprovalScope::Cycle), 0);
 }
 
 /// The claim's exit half. A turn that returns early — an error, a steer, an
@@ -252,11 +302,14 @@ fn grants_are_not_shared_by_default() {
 /// as it did before #172 for every non-harness construction site.
 #[tokio::test]
 async fn a_policy_without_a_shared_queue_still_decides_normally() {
-    let p = policy("supervised", &[], None);
-    assert!(matches!(
-        p.check(&request("send_email", serde_json::json!({}))).await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    in_cycle(async {
+        let p = policy("supervised", &[], None);
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }
 
 /// Issue #1458: a standing denial is only **enforced** on the agent turn
@@ -268,40 +321,43 @@ async fn a_policy_without_a_shared_queue_still_decides_normally() {
 /// operator's "don't ask again" would be silently dropped on the next run.
 #[tokio::test]
 async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
-    let grants = GrantSet::default();
-    let queue = ApprovalRequestQueue::with_grants(grants.clone());
-    grants.grant_standing(crate::runtime::grants::StandingGrant {
-        id: crate::runtime::grants::GrantId::new("deny-1"),
-        agent: String::new(),
-        workflow: Some("sports_digest".to_string()),
-        tool: "web_fetch".to_string(),
-        verdict: Verdict::Deny,
-        granted_by: crate::ports::types::Actor {
-            kind: crate::ports::types::ActorKind::User,
-            id: "user-1".into(),
-        },
-        approval_id: crate::ports::types::ApprovalId::new("appr-1"),
-        at_millis: 1_000,
-        expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
-        origin_thread: None,
-        origin_parent: None,
-        origin_task: None,
-        scope: Some("https://docs.rs".to_string()),
-    });
+    in_cycle(async {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        grants.grant_standing(crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("deny-1"),
+            agent: String::new(),
+            workflow: Some("sports_digest".to_string()),
+            tool: "web_fetch".to_string(),
+            verdict: Verdict::Deny,
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".into(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: Some("https://docs.rs".to_string()),
+        });
 
-    let p = policy("full", &["web_fetch"], None)
-        .with_requests(queue)
-        .with_workflow("sports_digest");
-    let decision = p
-        .check(&request(
-            "web_fetch",
-            serde_json::json!({ "url": "https://docs.rs/x" }),
-        ))
-        .await;
-    assert!(
-        !matches!(decision, ToolPolicyDecision::Deny { .. }),
-        "a workflow standing denial must not be advertised on the gate path: {decision:?}"
-    );
+        let p = policy("full", &["web_fetch"], None)
+            .with_requests(queue)
+            .with_workflow("sports_digest");
+        let decision = p
+            .check(&request(
+                "web_fetch",
+                serde_json::json!({ "url": "https://docs.rs/x" }),
+            ))
+            .await;
+        assert!(
+            !matches!(decision, ToolPolicyDecision::Deny { .. }),
+            "a workflow standing denial must not be advertised on the gate path: {decision:?}"
+        );
+    })
+    .await;
 }
 
 /// INPUT-axis (TOOL-006): `standing_deny_applies` derives the call's own

@@ -246,7 +246,9 @@ async fn redeem_budget_pause(
     let event = CompanyEvent::OperatorMessage {
         text: marker.message.clone(),
         by: company.actor.clone(),
-        chat: marker.chat_id.clone(),
+        chat: Some(crate::ports::general_channel::decode_general_chat_id(
+            marker.chat_id.clone().unwrap_or_default(),
+        )),
         parent: marker.parent,
         deliverable: marker.deliverable,
         mentions: marker.mentions.clone(),
@@ -334,22 +336,16 @@ async fn redeem_budget_pause(
             if let CompanyEvent::OperatorMessage { mentions, .. } = &event
                 && !mentions.is_empty()
             {
-                // `marker.chat_id` (folded into `event.chat` above) is
-                // `None` for an unaddressed original message, the same
-                // "default → orchestrator" thread `accept_chat_turn`'s own
-                // `desk` fallback resolves to elsewhere in this file's
-                // sibling routes.
-                let notify_desk = marker
-                    .chat_id
-                    .as_deref()
-                    .unwrap_or(crate::server::ops::language::DEFAULT_DESK);
+                let notify_desk = crate::ports::general_channel::decode_general_chat_id(
+                    marker.chat_id.clone().unwrap_or_default(),
+                );
                 runtime
                     .notify_mentions(
                         &company_id,
                         mentions,
                         &message_seq,
                         actor.as_ref(),
-                        notify_desk,
+                        &notify_desk,
                     )
                     .await;
             }
@@ -360,10 +356,9 @@ async fn redeem_budget_pause(
                 .run_journaled_cycle(vec![(message_seq, event)], None)
                 .await;
             if let Ok(report) = result.as_mut() {
-                let desk = marker
-                    .chat_id
-                    .clone()
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+                let desk = crate::ports::general_channel::decode_general_chat_id(
+                    marker.chat_id.clone().unwrap_or_default(),
+                );
                 crate::server::operator::journal_chat_replies(
                     &runtime,
                     &company_id,

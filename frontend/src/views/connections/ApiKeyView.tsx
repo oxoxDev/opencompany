@@ -56,6 +56,7 @@ import {
 } from "@/views/connections/account";
 import { AccountKeyDialog, type AccountKeyModelStep } from "@/views/connections/AccountKeyDialog";
 import { useRedeemKeyGrant } from "@/views/connections/use-redeem-key-grant";
+import { useStartKeyGrant } from "@/views/connections/use-start-key-grant";
 
 interface Props {
   client: OpenCompanyClient;
@@ -260,6 +261,15 @@ export function ApiKeyView({ client, company }: Props) {
     }
   }, []);
   useRedeemKeyGrant(client, company, onGrantConnected);
+  // The other end of the same flow: the dialog's "Connect with TinyHumans".
+  // In a browser it navigates away and the hook above redeems on return; in
+  // the desktop the host redeems on its own route and this resolves when the
+  // key lands, re-reading the page and closing the dialog.
+  const onGrantLanded = useCallback(() => {
+    setGeneration((n) => n + 1);
+    setEditing(false);
+  }, []);
+  const grant = useStartKeyGrant(client, company, onGrantLanded);
 
   useEffect(() => {
     let live = true;
@@ -788,6 +798,9 @@ export function ApiKeyView({ client, company }: Props) {
           onSubmitModel={(model) => void writeModel(model)}
           client={client}
           company={company}
+          onConnect={status?.hubLink && canManage ? grant.start : null}
+          connecting={grant.starting}
+          keysUrl={status?.account?.manageKeysUrl ?? null}
         />
 
         {/* Names what actually depends on the key, and what happens next rather

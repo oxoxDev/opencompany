@@ -285,15 +285,15 @@ async fn delete_desk_serializes_against_the_company_write_lock() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
-/// A desk that declares no `hive` block still reports the numbers the
-/// runtime would derive, rather than blanks.
+/// A desk that declares no `routing` block still reports the numbers the
+/// runtime would use, rather than blanks (plan hive-desks, Phase 4).
 ///
 /// This is the difference the whole DTO exists for: the manifest says
-/// nothing, so `declared` is empty — but the desk would still run on a
-/// budget and a quorum, and a console showing an empty form would be
+/// nothing, so `declared` is empty — but the desk would still run rounds of
+/// a width and under a cap, and a console showing an empty form would be
 /// describing a desk that does not exist.
 #[tokio::test]
-async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
+async fn desk_routing_reports_resolved_numbers_for_an_undeclared_block() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let manifest: CompanyManifest = toml::from_str(
@@ -301,7 +301,8 @@ async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
          [[agent]]\nid = \"a\"\nrole = \"A\"\n\
          [[agent]]\nid = \"b\"\nrole = \"B\"\n\
          [[agent]]\nid = \"c\"\nrole = \"C\"\n\
-         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n\
+         [[group_chat]]\nid = \"review\"\nname = \"Review\"\nmembers = [\"c\"]\n",
     )
     .unwrap();
     let state = state_with_manifest(&home, manifest).await;
@@ -311,7 +312,7 @@ async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
     let res = app
         .oneshot(
             Request::builder()
-                .uri("/api/v1/company/desks/solvers/hive")
+                .uri("/api/v1/company/desks/solvers/routing")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -326,34 +327,52 @@ async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
     )
     .unwrap();
 
-    assert_eq!(body["source"], "manifest");
-    assert_eq!(body["deliberates"], true);
-    // Three seats: 3 x members, and a majority that still leaves somebody out.
-    assert_eq!(body["effective"]["turnBudget"], 9);
-    assert_eq!(body["effective"]["quorum"], 2);
+    assert_eq!(body["deskId"], "solvers");
+    assert_eq!(body["source"], "default");
+    assert_eq!(
+        body["effective"]["roundWidth"],
+        crate::hive::routing::DEFAULT_ROUND_WIDTH
+    );
+    assert_eq!(
+        body["effective"]["maxRounds"],
+        crate::hive::routing::DEFAULT_MAX_ROUNDS
+    );
+    assert_eq!(
+        body["effective"]["turnTimeoutSecs"],
+        crate::hive::routing::DEFAULT_TURN_TIMEOUT_SECS
+    );
+    assert_eq!(body["effective"]["referral"]["enabled"], false);
+    assert!(
+        matches!(
+            body["effective"]["router"].as_str(),
+            Some("jev" | "fallback")
+        ),
+        "{body}"
+    );
     // Nothing was declared, so the authored block is empty — which is
-    // exactly what distinguishes it from an operator who wrote `9`.
+    // exactly what distinguishes it from an operator who wrote `5`.
     assert_eq!(body["declared"], serde_json::json!({}));
-    // Every seat holds every move until a table narrows one.
-    assert_eq!(body["seats"].as_array().unwrap().len(), 3);
-    assert_eq!(body["seats"][0]["governed"], false);
-    assert_eq!(body["seats"][0]["moves"].as_array().unwrap().len(), 9);
-    assert_eq!(body["eligibleSupporters"], 3);
-    assert_eq!(body["reachesQuorum"], true);
+    let candidates = body["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(candidates[0]["agentId"], "a");
+    assert_eq!(candidates[0]["sharedWith"], serde_json::json!([]));
+    // `c` also sits on the review desk — the seat another desk's round can
+    // delay.
+    assert_eq!(candidates[2]["sharedWith"], serde_json::json!(["review"]));
 }
 
-/// Installing a grammar takes effect, is reported back derived, and is
-/// undone by a reset — without the manifest ever being rewritten.
+/// Installing a routing block takes effect, is reported back resolved, and
+/// is undone by a reset — without the manifest ever being rewritten.
 #[tokio::test]
-async fn a_move_grammar_installs_and_resets() {
+async fn a_routing_block_installs_and_resets() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let manifest: CompanyManifest = toml::from_str(
         "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
          [[agent]]\nid = \"a\"\nrole = \"A\"\n\
          [[agent]]\nid = \"b\"\nrole = \"B\"\n\
-         [[agent]]\nid = \"c\"\nrole = \"C\"\n\
-         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\"]\n\
+         [group_chat.routing]\nround_width = 1\n",
     )
     .unwrap();
     let state = state_with_manifest(&home, manifest).await;
@@ -365,11 +384,11 @@ async fn a_move_grammar_installs_and_resets() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/api/v1/company/desks/solvers/hive")
+                .uri("/api/v1/company/desks/solvers/routing")
                 .header("cookie", &cookie)
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"quorum":2,"moves":{"a":["propose","support"],"b":["object","evidence"],"c":["support"]}}"#,
+                    r#"{"round_width":2,"max_rounds":3,"referral":{"enabled":true,"max_hops":1,"returns":true}}"#,
                 ))
                 .unwrap(),
         )
@@ -383,31 +402,47 @@ async fn a_move_grammar_installs_and_resets() {
     )
     .unwrap();
     assert_eq!(body["source"], "overlay");
-    assert_eq!(body["effective"]["quorum"], 2);
-    // `b` was narrowed to object/evidence, and still keeps the three no
-    // table can take away.
-    let b = body["seats"]
+    assert_eq!(body["declared"]["round_width"], 2);
+    assert_eq!(body["declared"]["referral"]["max_hops"], 1);
+    assert_eq!(body["effective"]["roundWidth"], 2);
+    assert_eq!(body["effective"]["maxRounds"], 3);
+    assert_eq!(body["effective"]["referral"]["enabled"], true);
+    assert_eq!(body["effective"]["referral"]["maxHops"], 1);
+    assert_eq!(body["effective"]["referral"]["returns"], true);
+
+    // The desk list carries the compact summary of what is in force.
+    let desks = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/company/desks")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let desks: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(desks.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let solvers = desks
         .as_array()
         .unwrap()
         .iter()
-        .find(|seat| seat["agentId"] == "b")
-        .unwrap()
-        .clone();
-    assert_eq!(b["governed"], true);
-    let b_moves: Vec<String> = serde_json::from_value(b["moves"].clone()).unwrap();
-    assert!(b_moves.contains(&"commit".to_string()));
-    assert!(b_moves.contains(&"question".to_string()));
-    assert!(b_moves.contains(&"defer".to_string()));
-    assert!(!b_moves.contains(&"propose".to_string()));
-    // a and c may support or propose; b may not. Two clears a quorum of two.
-    assert_eq!(body["eligibleSupporters"], 2);
-    assert_eq!(body["reachesQuorum"], true);
+        .find(|desk| desk["id"] == "solvers")
+        .unwrap();
+    assert_eq!(solvers["routing"]["source"], "overlay");
+    assert_eq!(solvers["routing"]["roundWidth"], 2);
+    assert_eq!(solvers["routing"]["maxRounds"], 3);
 
     let reset = app
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/api/v1/company/desks/solvers/hive")
+                .uri("/api/v1/company/desks/solvers/routing")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -421,62 +456,41 @@ async fn a_move_grammar_installs_and_resets() {
             .unwrap(),
     )
     .unwrap();
-    // Back to the blueprint, which declared nothing.
+    // Back to the blueprint, which declared a width of one.
     assert_eq!(body["source"], "manifest");
-    assert_eq!(body["declared"], serde_json::json!({}));
-    assert_eq!(body["eligibleSupporters"], 3);
+    assert_eq!(body["declared"], serde_json::json!({"round_width": 1}));
+    assert_eq!(body["effective"]["roundWidth"], 1);
 }
 
 /// The runtime refuses exactly what a manifest carrying the same block
 /// would be refused for — and in the same words.
 #[tokio::test]
-async fn installing_an_unreachable_quorum_is_refused() {
+async fn installing_a_zero_width_round_is_refused() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let manifest: CompanyManifest = toml::from_str(
         "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
          [[agent]]\nid = \"a\"\nrole = \"A\"\n\
          [[agent]]\nid = \"b\"\nrole = \"B\"\n\
-         [[agent]]\nid = \"c\"\nrole = \"C\"\n\
-         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+         [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\"]\n",
     )
     .unwrap();
     let state = state_with_manifest(&home, manifest).await;
     let app = router(state);
     let cookie = crate::server::test_support::fixed_cookie("acme");
 
-    // Only `a` may deposit a supporter, but the quorum asks for two — the
-    // room could never decide anything however much it agreed.
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/api/v1/company/desks/solvers/hive")
-                .header("cookie", &cookie)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"quorum":2,"moves":{"a":["propose"],"b":["object"],"c":["object"]}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-
-    // An unknown move kind, and an id that is not on the desk, are refused
-    // for the same reason: both fail *open* at runtime, handing the seat
-    // every move and letting the desk quietly go on voting.
     for body in [
-        r#"{"moves":{"a":["shrug"]}}"#,
-        r#"{"moves":{"ghost":["propose"]}}"#,
+        r#"{"round_width":0}"#,
+        r#"{"turn_timeout_secs":0}"#,
+        r#"{"minimum_confidence":7}"#,
+        r#"{"referral":{"enabled":true,"reach":"everywhere"}}"#,
     ] {
         let res = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/company/desks/solvers/hive")
+                    .uri("/api/v1/company/desks/solvers/routing")
                     .header("cookie", &cookie)
                     .header("content-type", "application/json")
                     .body(Body::from(body))
@@ -524,10 +538,10 @@ async fn desk_lifecycle_is_journaled() {
         ),
         (
             "PUT",
-            "/api/v1/company/desks/growth/hive",
-            Some(r#"{"quorum":1}"#),
+            "/api/v1/company/desks/growth/routing",
+            Some(r#"{"round_width":1}"#),
         ),
-        ("DELETE", "/api/v1/company/desks/growth/hive", None),
+        ("DELETE", "/api/v1/company/desks/growth/routing", None),
         ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
         ("DELETE", "/api/v1/company/desks/growth", None),
     ] {
@@ -559,23 +573,42 @@ async fn desk_lifecycle_is_journaled() {
     assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"TeammateAdded"), "kinds: {kinds:?}");
     assert_eq!(
-        kinds.iter().filter(|k| **k == "DeskHiveConfigured").count(),
+        kinds
+            .iter()
+            .filter(|k| **k == "DeskRoutingConfigured")
+            .count(),
         2,
         "one row for install and one for reset: {kinds:?}"
     );
+    let desk_seat_rows = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.event,
+                CompanyEvent::DeskMembersChanged { desk_id, .. } if desk_id != "general"
+            )
+        })
+        .count();
     assert_eq!(
-        kinds.iter().filter(|k| **k == "DeskMembersChanged").count(),
-        2,
+        desk_seat_rows, 2,
         "one row for the add and one for the remove: {kinds:?}"
+    );
+    assert!(
+        rows.iter().any(|row| matches!(
+            &row.event,
+            CompanyEvent::DeskMembersChanged { desk_id, added, .. }
+                if desk_id == "general" && !added.is_empty()
+        )),
+        "the new teammate joins #general: {kinds:?}"
     );
 }
 
-/// Deleting a desk takes its installed grammar with it.
+/// Deleting a desk takes its installed routing block with it.
 ///
 /// Left behind, an overlay desk re-created with the same id silently
 /// inherits a table nobody installed on it.
 #[tokio::test]
-async fn deleting_a_desk_drops_its_installed_grammar() {
+async fn deleting_a_desk_drops_its_installed_routing() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, desk_manifest()).await;
@@ -602,10 +635,10 @@ async fn deleting_a_desk_drops_its_installed_grammar() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/api/v1/company/desks/growth/hive")
+                .uri("/api/v1/company/desks/growth/routing")
                 .header("cookie", &cookie)
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"moves":{"eng":["propose","support"]}}"#))
+                .body(Body::from(r#"{"round_width":1}"#))
                 .unwrap(),
         )
         .await
@@ -645,7 +678,7 @@ async fn deleting_a_desk_drops_its_installed_grammar() {
     let res = app
         .oneshot(
             Request::builder()
-                .uri("/api/v1/company/desks/growth/hive")
+                .uri("/api/v1/company/desks/growth/routing")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -659,10 +692,9 @@ async fn deleting_a_desk_drops_its_installed_grammar() {
     )
     .unwrap();
     assert_eq!(body["source"], "default");
-    for seat in body["seats"].as_array().unwrap() {
-        assert_eq!(
-            seat["governed"], false,
-            "a re-created desk inherited a grammar"
-        );
-    }
+    assert_eq!(
+        body["declared"],
+        serde_json::json!({}),
+        "a re-created desk inherited a routing block"
+    );
 }

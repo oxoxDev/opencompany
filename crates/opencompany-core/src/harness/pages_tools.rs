@@ -49,8 +49,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
-use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 // The workspace layout — `pages/<slug>/{page.toml,page.tsx,page.compiled.mjs}`
 // — is shared with `crate::server::ops::pages`, which is always compiled and

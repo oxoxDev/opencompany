@@ -2,3 +2,5 @@
 *.rs text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
+*.graphql text eol=lf
+*.txt text eol=lf

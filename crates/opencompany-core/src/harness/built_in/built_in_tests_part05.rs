@@ -33,6 +33,7 @@ async fn a_metering_failure_does_not_swallow_a_stale_marker_retirement() {
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -80,6 +81,7 @@ async fn a_metering_failure_does_not_swallow_a_stale_marker_retirement() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -180,6 +182,7 @@ async fn a_budget_pause_summary_is_scrubbed_before_it_is_persisted_anywhere() {
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -223,6 +226,7 @@ async fn a_budget_pause_summary_is_scrubbed_before_it_is_persisted_anywhere() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -314,6 +318,7 @@ async fn a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent() {
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -358,6 +363,7 @@ async fn a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -458,6 +464,7 @@ async fn an_unrelated_success_does_not_retire_a_different_requests_marker() {
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -500,6 +507,7 @@ async fn an_unrelated_success_does_not_retire_a_different_requests_marker() {
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -579,6 +587,7 @@ async fn identical_text_in_a_different_thread_does_not_retire_the_original_marke
     let mut rec = record();
     rec.id = company.clone();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -617,6 +626,7 @@ async fn identical_text_in_a_different_thread_does_not_retire_the_original_marke
         deep_trace: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

@@ -268,12 +268,11 @@ async fn inbox_list_and_messages_project_store() {
 ///
 /// The copilot is a conversation *about a graph*, and its questions are phrased
 /// at the graph — "add a node that emails the report". The chat route's
-/// deterministic intent detector reads that as a request to the company and
-/// opens a `todo` card, which is the same class of over-reach this issue is
-/// about, reached from the route rather than from the model. The control half
+/// deterministic card path (now only the composer's explicit workflow
+/// control) must not read that as a request to the company. The control half
 /// matters as much as the confined half: the identical sentence on an ordinary
-/// thread still opens its card, so this narrows the copilot rather than
-/// disabling a feature.
+/// thread, with the control pressed, still opens its card, so this narrows
+/// the copilot rather than disabling a feature.
 #[tokio::test]
 async fn a_copilot_thread_question_opens_no_board_card() {
     let home_dir = home();
@@ -326,13 +325,15 @@ async fn a_copilot_thread_question_opens_no_board_card() {
         "a copilot correction filed company feedback: {filed}"
     );
 
-    // Control: the same sentence on the ordinary thread still opens a card, so
-    // the suppression is scoped to the copilot and not a regression of #246.
+    // Control: the same sentence on the ordinary thread, sent with the
+    // composer's workflow control, still opens a card — so the suppression is
+    // scoped to the copilot and not a regression of #845. (A plain message
+    // opens none anywhere now: tracking is an agent's own tool call.)
     let (status, _) = send(
         &state,
         "POST",
         "/api/v1/company/chat",
-        Some(json!({"message": ask})),
+        Some(json!({"message": ask, "deliverable": "workflow"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -347,17 +348,15 @@ async fn a_copilot_thread_question_opens_no_board_card() {
     );
 }
 
-/// Issue #267: a question about the board's own state is answered, not carded.
+/// Issue #267: a question about the board's own state is answered, not carded
+/// — and, since the route stopped carding on the lexical triage altogether,
+/// neither is an instruction. These are the exact messages that produced the
+/// six dead `backlog` cards on a live company; the reply still comes back OK
+/// for every one of them, because nothing here decides whether the operator
+/// gets an answer.
 ///
-/// This is the exact message that produced one of the six dead `backlog` cards
-/// on a live company. The route now triages it as `Answer`, so the
-/// deterministic card path stands down — and the reply still comes back OK,
-/// because triage decides what gets *written*, never whether the operator gets
-/// an answer.
-///
-/// The control half is the point: the same route, one sentence later, still
-/// opens a card for a real instruction. A test that only proved the question
-/// wrote nothing would also pass on a route that had stopped carding entirely.
+/// The control half keeps the route honest: the composer's explicit workflow
+/// control, the one signal it still cards on, opens exactly one card.
 #[tokio::test]
 async fn a_question_about_the_board_opens_no_card() {
     let home_dir = home();
@@ -389,8 +388,7 @@ async fn a_question_about_the_board_opens_no_card() {
         );
     }
 
-    // Control: a real instruction on the same route still opens exactly one
-    // card, so this narrows the detector rather than switching it off.
+    // A plain instruction opens nothing either: the board is a tool call.
     let (status, _) = send(
         &state,
         "POST",
@@ -402,10 +400,28 @@ async fn a_question_about_the_board_opens_no_card() {
     let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
     assert_eq!(status, StatusCode::OK);
     let cards = board.as_array().expect("the board lists cards");
+    assert!(
+        cards.is_empty(),
+        "an instruction opens no card by itself: {board}"
+    );
+
+    // Control: the explicit workflow control still opens exactly one card, so
+    // the route has not stopped carding on the one signal it still honours.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": "build the landing page", "deliverable": "workflow"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
     assert_eq!(
         cards.len(),
         1,
-        "an instruction must still open exactly one card: {board}"
+        "a requested workflow must still open exactly one card: {board}"
     );
 }
 

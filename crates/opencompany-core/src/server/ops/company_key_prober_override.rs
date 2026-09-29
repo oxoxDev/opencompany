@@ -5,13 +5,13 @@ use async_trait::async_trait;
 
 use crate::company::inference::probe::{ProbeClass, ProbeFailure};
 
-pub(super) type Outcome = std::result::Result<Vec<String>, ProbeClass>;
+pub(crate) type Outcome = std::result::Result<Vec<String>, ProbeClass>;
 
 thread_local! {
     static MAP: RefCell<HashMap<String, Outcome>> = RefCell::new(HashMap::new());
 }
 
-pub(super) fn set(company: &str, outcome: Outcome) {
+pub(crate) fn set(company: &str, outcome: Outcome) {
     MAP.with(|map| {
         map.borrow_mut().insert(company.to_string(), outcome);
     });

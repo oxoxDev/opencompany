@@ -1,4 +1,5 @@
-import { TriangleAlert, X } from "lucide-react";
+import { useMemo } from "react";
+import { X } from "lucide-react";
 
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -12,11 +13,13 @@ import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { FailedSendNotice, OutputLinkRow, TurnFailureNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
-import { AsideConversation, ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
+import { AgentConversation, ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
+import { JumpToLatest } from "./JumpToLatest";
+import { useBottomAnchor } from "./useBottomAnchor";
 import { type Mention, type Mentionable } from "./mentions";
 
 interface Props {
@@ -30,6 +33,14 @@ interface Props {
   /** The message the thread hangs off. */
   parent: ChatMessage;
   replies: ChatMessage[];
+  /**
+   * The channel's persisted history has not arrived yet, so the absence of
+   * replies is not evidence of anything — the same prop, and the same value,
+   * `MessageTimeline` gets. The anchor below needs it: a panel opened over a
+   * transcript still on the wire would anchor once against a one-screen box
+   * and never run again.
+   */
+  historyPending?: boolean;
   /**
    * The subset of `replies` already laid out inline in the channel, from
    * {@link inlineReplyIds} — excluded from the count above the list, never
@@ -60,6 +71,10 @@ interface Props {
    * with no render path at all (Codex on #2069).
    */
   liveStepsByMessage?: Record<string, TurnStep[]>;
+  /** Live agent per turn bucket — see the resolution beside `openTurnSteps`. */
+  liveAgentByTurn?: Record<string, string>;
+  /** Roster agent id → display name, so no row ever shows a raw id. */
+  agentNames?: Record<string, string>;
   sending: boolean;
   /**
    * Everything an `@` can name here (issue #1645). Drawn from the parent
@@ -73,19 +88,6 @@ interface Props {
    * composer's outside-channel warning. Absent when membership is unknown.
    */
   channelMemberIds?: string[];
-  /**
-   * Whether the channel this thread belongs to is read-only (issue #1757's
-   * Operator channel, `Boolean(channel?.system)` in `RoomView`). The main
-   * composer is not rendered on such a channel, but a thread has its own
-   * composer — so without this a durable Operator report could still be
-   * opened as a thread and replied to there, only for the server's read-only
-   * guard to reject it after the text was written. Absent means "no such
-   * channel is open", the same as the main composer's default.
-   *
-   * The panel answers it the way the channel does: **no composer at all**,
-   * and a notice in its place saying why. See the render site.
-   */
-  readOnly?: boolean;
   /**
    * Whether this thread hangs off a settled `in_review` dispatch card's review
    * surface — its settle pill or the relay bubble that followed it. When set, a
@@ -175,7 +177,12 @@ interface Props {
    * the shell keyed its open turns per thread rather than per channel; before
    * that there was no way to ask "is *this* thread working".
    */
-  openTurn?: { queued: boolean };
+  openTurn?: { queued: boolean; agentId?: string };
+  /**
+   * The open turn's teammate, already resolved to a display name — never a raw
+   * id, on the same terms as the channel pane's own rule.
+   */
+  turnAgentName?: string;
   /** This console is typing here. Distinct from the main composer's callback
    * so the ping this thread sends carries the thread's own `parentId`. */
   onTyping?: () => void;
@@ -225,12 +232,14 @@ export function ThreadPanel({
   members,
   parent,
   replies,
+  historyPending = false,
   inlineReplyIds,
   liveStepsByMessage,
+  liveAgentByTurn,
+  agentNames,
   sending,
   mentionables,
   channelMemberIds,
-  readOnly,
   youAvatar,
   resolveAttachmentUrl,
   onSend,
@@ -243,6 +252,7 @@ export function ThreadPanel({
   onClose,
   typingNames = [],
   openTurn,
+  turnAgentName,
   onTyping,
   cognition,
   onRedeemBudgetPause,
@@ -256,6 +266,44 @@ export function ThreadPanel({
   const countedReplies = inlineReplyIds
     ? replies.reduce((n, r) => (inlineReplyIds.has(r.id) ? n : n + 1), 0)
     : replies.length;
+  /**
+   * The open turn's rows, for the one indicator at the foot of this panel.
+   *
+   * Newest first over this thread's own lines, so a second question asked in
+   * the thread owns the row while an earlier one keeps its rows bucketed rather
+   * than losing them — the same rule the channel pane applies, over the subset
+   * of messages this panel actually renders.
+   *
+   * Resolved here rather than handed to each line, because position in a
+   * transcript is chronology: a "happening now" row placed back at the asking
+   * message claims the work finished before every reply beneath it, which is
+   * false the moment anything is journaled in between.
+   */
+  const openTurn_ = useMemo(() => {
+    if (!liveStepsByMessage) return undefined;
+    for (let i = replies.length - 1; i >= 0; i -= 1) {
+      const rows = liveStepsByMessage[replies[i].id];
+      if (rows?.length) return { steps: rows, key: replies[i].id };
+    }
+    const rows = liveStepsByMessage[parent.id];
+    return rows?.length ? { steps: rows, key: parent.id } : undefined;
+  }, [liveStepsByMessage, replies, parent.id]);
+  const openTurnSteps = openTurn_?.steps;
+  /**
+   * The teammate on the row, under the **same key the rows came from**.
+   *
+   * `turnAgentName` is resolved upstream from the host's open-turn record,
+   * which a turn the console never sent does not have — and the caller cannot
+   * do this lookup for us, because only this component knows which of the
+   * thread's messages owns the open bucket. Without it the row fell through to
+   * naming the running step, which is the channel's old bug one pane over.
+   */
+  const liveName = openTurn_?.key ? agentNames?.[liveAgentByTurn?.[openTurn_.key] ?? ""] : undefined;
+  const { scroller, content, onScroll, atBottom, jumpToLatest } = useBottomAnchor({
+    key: parent.id,
+    pending: historyPending,
+    growth: [replies.length, openTurnSteps?.length ?? 0, typingNames.length],
+  });
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -268,130 +316,126 @@ export function ThreadPanel({
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto">
-        <Line
-          channel={channel}
-          members={members}
-          message={parent}
-          liveSteps={liveStepsByMessage?.[parent.id]}
-          youAvatar={youAvatar}
-          resolveAttachmentUrl={resolveAttachmentUrl}
-          cognition={cognition}
-          onRedeemBudgetPause={onRedeemBudgetPause}
-          redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-          latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-          onRetrySend={onRetrySend}
-        />
-        <div className="flex items-center gap-2 px-4 py-2">
-          <span className="text-xs font-medium text-muted-foreground">
-            {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
-          </span>
-          <span className="h-px flex-1 bg-border" aria-hidden />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scroller}
+          onScroll={onScroll}
+          data-testid="thread-transcript"
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
+          {/* The column rule 2b's `ResizeObserver` watches. The rows were direct
+              children of the scroller, whose own border box never changes when
+              content overflows it — so without a wrapper of their own there is
+              nothing whose height the rows determine. */}
+          <div ref={content}>
+            <Line
+              channel={channel}
+              members={members}
+              message={parent}
+              youAvatar={youAvatar}
+              resolveAttachmentUrl={resolveAttachmentUrl}
+              cognition={cognition}
+              onRedeemBudgetPause={onRedeemBudgetPause}
+              redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+              latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+              onRetrySend={onRetrySend}
+              agentNames={agentNames}
+            />
+            <div className="flex items-center gap-2 px-4 py-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
+              </span>
+              <span className="h-px flex-1 bg-border" aria-hidden />
+            </div>
+            {replies.map((r) => (
+              <Line
+                key={r.id}
+                channel={channel}
+                members={members}
+                message={r}
+                youAvatar={youAvatar}
+                resolveAttachmentUrl={resolveAttachmentUrl}
+                cognition={cognition}
+                onRedeemBudgetPause={onRedeemBudgetPause}
+                redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
+                onRetrySend={onRetrySend}
+                latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+                agentNames={agentNames}
+              />
+            ))}
+          </div>
         </div>
-        {replies.map((r) => (
-          <Line
-            key={r.id}
-            channel={channel}
-            members={members}
-            message={r}
-            liveSteps={liveStepsByMessage?.[r.id]}
-            youAvatar={youAvatar}
-            resolveAttachmentUrl={resolveAttachmentUrl}
-            cognition={cognition}
-            onRedeemBudgetPause={onRedeemBudgetPause}
-            redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
-            onRetrySend={onRetrySend}
-            latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
-          />
-        ))}
+        {!atBottom && <JumpToLatest onClick={jumpToLatest} />}
       </div>
 
-      {/* A read-only thread gets the notice and no composer, the way its
-          channel does. The panel used to render a *disabled* composer with the
-          placeholder "This channel is read-only" — but a disabled reply box is
-          still a claim that replying is a thing you do here, and it was the
-          only thing this panel said on the subject. The explanation is what
-          should occupy the space; the affordance should not be there at all.
-
-          `noopSend` went with it: with no composer there is nothing left to
-          wire a no-op to. The belt that mattered is the server's read-only
-          guard (issue #1757), which is untouched, plus `RoomView`'s own
-          `if (readOnly) return;` before it calls `client.chat`. */}
-      {readOnly ? (
-        <p
-          role="status"
-          data-testid="thread-read-only-notice"
-          className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-        >
-          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-          <span className="min-w-0">
-            The <span className="font-medium text-foreground">Operator</span> channel is a
-            read-only feed of automation reports and notifications. There is nothing to reply to
-            here.
-          </span>
-        </p>
-      ) : (
-        <>
-          {openTurn && (
-            <div className="px-4 py-2">
-              <WorkingIndicator
-                srLabel={openTurn.queued ? "Queued…" : "Replying…"}
-                queued={openTurn.queued}
-              />
-            </div>
-          )}
-          <TypingLine names={typingNames} />
-          {reviewing && (
-            <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
-              <p className="text-xs text-muted-foreground">
-                This card is ready for review. A reply sends it back for another pass
-                with your notes.
-              </p>
-              {reviewTaskId !== undefined && onReviewCard !== undefined && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 shrink-0 px-2 text-xs"
-                  disabled={reviewInFlight}
-                  onClick={() => onReviewCard(reviewTaskId, "approve")}
-                >
-                  {reviewInFlight ? "Approving…" : "Approve"}
-                </Button>
-              )}
-            </div>
-          )}
-          {additionalReviewAnchors?.map((anchor) => (
-            <div
-              key={anchor.taskId}
-              className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5"
-            >
-              <p className="text-xs text-muted-foreground">
-                Another card in this thread is also ready for review.
-              </p>
-              {onReviewCard !== undefined && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 shrink-0 px-2 text-xs"
-                  disabled={reviewingTaskId?.has(anchor.taskId) ?? false}
-                  onClick={() => onReviewCard(anchor.taskId, "approve")}
-                >
-                  {reviewingTaskId?.has(anchor.taskId) ? "Approving…" : "Approve"}
-                </Button>
-              )}
-            </div>
-          ))}
-          <MessageComposer
-            compact
-            placeholder={reviewing ? "Send for another pass…" : "Reply…"}
-            disabled={sending}
-            mentionables={mentionables}
-            channelMemberIds={channelMemberIds}
-            onSend={onSend}
-            onTyping={onTyping}
+      {(openTurn || !!openTurnSteps?.length) && (
+        <div className="px-4 py-2">
+          {/* Named, not blind. The rows used to render against each line
+              in the body while this row said only "Replying…" — so the
+              panel showed the work in the past tense of its position and
+              the presence in the present tense of its wording. One row,
+              at the foot, carrying both. */}
+          <WorkingIndicator
+            srLabel={openTurn?.queued ? "Queued…" : "Replying…"}
+            steps={openTurnSteps}
+            name={liveName ?? turnAgentName}
+            queued={openTurn?.queued}
           />
-        </>
+          {/* …and what it has done, the same pair the channel shows. The
+              line names the teammate and stops; this names the call in
+              flight in its own summary. */}
+          {!!openTurnSteps?.length && <StepTimeline steps={[...openTurnSteps]} />}
+        </div>
       )}
+      <TypingLine names={typingNames} />
+      {reviewing && (
+        <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
+          <p className="text-xs text-muted-foreground">
+            This card is ready for review. A reply sends it back for another pass
+            with your notes.
+          </p>
+          {reviewTaskId !== undefined && onReviewCard !== undefined && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 shrink-0 px-2 text-xs"
+              disabled={reviewInFlight}
+              onClick={() => onReviewCard(reviewTaskId, "approve")}
+            >
+              {reviewInFlight ? "Approving…" : "Approve"}
+            </Button>
+          )}
+        </div>
+      )}
+      {additionalReviewAnchors?.map((anchor) => (
+        <div
+          key={anchor.taskId}
+          className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5"
+        >
+          <p className="text-xs text-muted-foreground">
+            Another card in this thread is also ready for review.
+          </p>
+          {onReviewCard !== undefined && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 shrink-0 px-2 text-xs"
+              disabled={reviewingTaskId?.has(anchor.taskId) ?? false}
+              onClick={() => onReviewCard(anchor.taskId, "approve")}
+            >
+              {reviewingTaskId?.has(anchor.taskId) ? "Approving…" : "Approve"}
+            </Button>
+          )}
+        </div>
+      ))}
+      <MessageComposer
+        compact
+        placeholder={reviewing ? "Send for another pass…" : "Reply…"}
+        disabled={sending}
+        mentionables={mentionables}
+        channelMemberIds={channelMemberIds}
+        onSend={onSend}
+        onTyping={onTyping}
+      />
     </aside>
   );
 }
@@ -400,7 +444,6 @@ function Line({
   channel,
   members,
   message,
-  liveSteps,
   youAvatar,
   resolveAttachmentUrl,
   cognition,
@@ -408,12 +451,11 @@ function Line({
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
   onRetrySend,
+  agentNames,
 }: {
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
-  /** This message's in-flight turn rows, if one is running (see `MessageRow`). */
-  liveSteps?: readonly TurnStep[];
   youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   cognition?: CognitionState | null;
@@ -421,6 +463,7 @@ function Line({
   redeemingBudgetPauseAgent?: string | null;
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
   onRetrySend?: (messageId: string) => void;
+  agentNames?: Record<string, string>;
 }) {
   // Four arguments, not three: `youAvatar` is the last parameter, and omitting
   // it left your own line with no avatar to seed from but the name "You" —
@@ -516,18 +559,9 @@ function Line({
             resolveUrl={resolveAttachmentUrl}
           />
         )}
-        {/* The same two step blocks `MessageRow` renders, because a message
-            asked or answered inside a thread is not a lesser message.
-            `buildTimeline` keeps every parented line OUT of the channel
-            timeline, so this panel is the only surface a threaded query has —
-            without these, a turn started from an open thread showed no account
-            of itself anywhere, even after the panel was closed (Codex on
-            #2069). */}
-        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {/* And the crossings, for the same reason the steps are here: a room's
             turns are threaded, so this panel is the only surface a deliberating
             desk's line has. Rendered only here would be a channel-only feature
@@ -541,14 +575,19 @@ function Line({
             direct={message.referredFrom.direct}
             sequence={message.referredFrom.sequence}
             direction={message.referredFrom.direction ?? "asked"}
+            agentNames={agentNames}
           />
         )}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
+          <ReferralConversation
+            crossing={message.referralConversation}
+            rowId={message.id}
+            agentNames={agentNames}
+          />
         )}
-        {message.asideConversation && (
-          <AsideConversation aside={message.asideConversation} />
-        )}
+        {message.agentConversations?.map((exchange) => (
+          <AgentConversation key={exchange.root} exchange={exchange} agentNames={agentNames} />
+        ))}
       </div>
     </div>
   );

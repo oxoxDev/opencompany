@@ -253,3 +253,63 @@ export function byWorkflowRun(runs: ObservatoryRun[]): Map<string, ObservatoryRu
   }
   return map;
 }
+
+/**
+ * One round of an episode, as a band across the waterfall: the interval from
+ * the first seat's start to the last seat's finish, and the seats that ran.
+ */
+export interface RoundBandSpan {
+  key: string;
+  episodeId: string;
+  revision: number;
+  startMs: number;
+  /** `null` while any seat of the round is still going. */
+  endMs: number | null;
+  agentIds: string[];
+  /** The desk, from the first attempt that named one. */
+  chatId: string | null;
+}
+
+/**
+ * Folds attempts into the rounds they were seats of.
+ *
+ * An attempt with no `episodeId` belongs to no round — a DM turn, a card
+ * dispatch, a workflow node, every row from a host predating episodes — and
+ * contributes nothing here, which is what keeps the waterfall of an ordinary
+ * company free of bands. Two attempts with the same episode and revision ran
+ * **together**, which is the claim the band makes and a flat list of bars
+ * cannot: a relay race and a concurrent round look identical until the seats
+ * of one round are drawn as one thing.
+ *
+ * Bands come back in start order; rounds of one episode share its id.
+ */
+export function roundsFromRuns(runs: ObservatoryRun[]): RoundBandSpan[] {
+  const bands = new Map<string, RoundBandSpan>();
+  for (const run of runs) {
+    if (run.episodeId == null || run.roundRevision == null) continue;
+    const key = `${run.episodeId}:${run.roundRevision}`;
+    const startMs = run.startedAtMillis ?? run.createdAtMillis;
+    const held = bands.get(key);
+    if (!held) {
+      bands.set(key, {
+        key,
+        episodeId: run.episodeId,
+        revision: run.roundRevision,
+        startMs,
+        endMs: run.finishedAtMillis,
+        agentIds: [run.agentId],
+        chatId: run.chatId,
+      });
+      continue;
+    }
+    held.startMs = Math.min(held.startMs, startMs);
+    // One open seat keeps the whole round open.
+    held.endMs =
+      held.endMs === null || run.finishedAtMillis === null
+        ? null
+        : Math.max(held.endMs, run.finishedAtMillis);
+    if (!held.agentIds.includes(run.agentId)) held.agentIds.push(run.agentId);
+    held.chatId ??= run.chatId;
+  }
+  return [...bands.values()].sort((a, b) => a.startMs - b.startMs || a.revision - b.revision);
+}

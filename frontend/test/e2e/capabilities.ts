@@ -225,6 +225,30 @@ export const EULER_REASON =
   "Point it at another problem with PW_EULER_PROBLEM=<number>.";
 
 /**
+ * Whether this run is the **hive lane**: the live-brain host (mock brain,
+ * `--features openhuman,mcp`) but serving `companies/hive_demo` — two desks
+ * sharing a seat — and running the one spec that watches a desk answer as a
+ * room: two lanes working at once, a dm chip, the completion marker.
+ *
+ * Set `PW_HIVE=1` alongside `PW_LIVE_BRAIN=1`, or run `npm run e2e:hive`,
+ * which sets both and — when this config manages the host — points it at
+ * that company and at a data root of its own.
+ *
+ * A lane rather than one more live-brain spec for the reason {@link EULER}
+ * is: it needs a different company. The harness company's desks have one
+ * member each, and a one-member desk runs no round.
+ */
+export const HIVE = process.env.PW_HIVE === "1";
+
+/** The company a hive run must be serving, relative to the repository root. */
+export const HIVE_COMPANY = "companies/hive_demo";
+
+/** The reason string a `HIVE` skip carries, so no skip is ever bare. */
+export const HIVE_REASON =
+  "needs a --features openhuman,mcp host serving companies/hive_demo behind the mock brain; " +
+  "run `npm run e2e:hive` (which sets PW_HIVE=1 and PW_LIVE_BRAIN=1).";
+
+/**
  * Whether this run is the **visual lane**: the same default-feature host every
  * ordinary run drives, but running `visual.spec.ts`, which compares full-page
  * renders of the console's top-level surfaces against committed baselines.

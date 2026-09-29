@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Building2,
+  KeyRound,
   Loader2,
   MailCheck,
   Monitor,
@@ -10,33 +11,28 @@ import {
 } from "lucide-react";
 
 import {
+  claimFirstAdmin,
   fetchAuthConfig,
-  fetchHubProviders,
   loginWithPassword,
   requestCode,
   requestWalletChallenge,
-  verifyCode,
   verifyWalletSignature,
   type AuthConfig,
-  type HubProvider,
   type SignIn,
 } from "@/api/auth";
 import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
+import { generatePassword, passwordProblem } from "@/lib/generate-password";
 import { resendLabel, secondsUntilResend } from "@/views/login/resend";
 import { arrivedViaSetupHandoff, SETUP_HANDOFF_FRAGMENT } from "@/setup/state";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { NewPasswordField } from "@/components/new-password-field";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { cn } from "@/lib/utils";
-
-/** Where the ecosystem's terms live. Same documents OpenHuman links from its welcome screen. */
-const TERMS_OF_USE_URL = "https://tinyhumans.gitbook.io/openhuman/legal/terms-of-use";
-const PRIVACY_POLICY_URL = "https://tinyhumans.gitbook.io/openhuman/legal/privacy-policy";
 
 interface Props {
   client: OpenCompanyClient;
@@ -44,9 +40,8 @@ interface Props {
   /**
    * Why they landed here, when it was not simply "not signed in yet".
    *
-   * Set after a refused ecosystem sign-in *or* a magic link that would not
-   * redeem — the expired-or-spent link being by far the commonest of the two,
-   * since every email-mode sign-in is one and they last fifteen minutes.
+   * Set after a magic link that would not redeem — the expired-or-spent link,
+   * which is the routine fate of one left in a mailbox overnight.
    * Without it a rejected or ineligible sign-in renders an ordinary form and
    * looks like the click did nothing — the one failure mode most likely to be
    * reported as "the button is broken" (issue #1305). It never names an
@@ -77,12 +72,31 @@ type Mode = "link" | "password";
  * exactly the screen it always did. `magicLink` is assumed to work for the same
  * reason: a host that has not told us otherwise is one that either mails links
  * or echoes them, and starting from false would blank the form on every
- * deployment for the length of one fetch.
+ * deployment for the length of one fetch. `claimable` starts false: the claim
+ * card is an offer to *create* an account, and flashing it at every returning
+ * member for the length of a fetch would be alarming.
  */
-const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true, magicLink: true };
+const ASSUMED_CONFIG: AuthConfig = {
+  mode: "email",
+  passwords: true,
+  magicLink: true,
+  claimable: false,
+};
 
 /**
- * The sign-in view: magic link by default, password for anyone who set one.
+ * The sign-in view.
+ *
+ * Three screens for an email company, and the host decides which:
+ *
+ * - **Nobody has joined yet** (`claimable`): the first person in picks the
+ *   admin login and a password, and is signed in. This is how a fresh
+ *   `docker compose up` gets its admin — from the screen it is looking at,
+ *   rather than from a shell command it was never told about.
+ * - **The host can mail** (`magicLink`): a link by default, a password for
+ *   anyone who set one.
+ * - **The host cannot mail**: a password, and only a password. "Email me a
+ *   link" on a host with no transport was the single most confusing thing this
+ *   screen did, and it is not offered.
  *
  * Two rules this view must not break:
  *
@@ -95,17 +109,11 @@ const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true, magicLink: 
  *    steal.
  */
 export function Login({ client, company, notice, onSignedIn }: Props) {
-  const [mode, setMode] = useState<Mode>("link");
   /**
-   * The ecosystem sign-in buttons this host offers, or `[]` if it offers none.
-   *
-   * Asked of the host rather than assumed, because only the host knows the
-   * hub's base URL and the origin the hub must return to. A self-hosted host
-   * answers with an empty list and this view renders the magic-link form alone,
-   * which is why a failure to fetch is swallowed: no buttons is a valid state,
-   * not an error worth showing anyone.
+   * Link or password — the person's own choice, honoured only where the host
+   * can mail a link at all. See `effectiveMode`.
    */
-  const [hubProviders, setHubProviders] = useState<HubProvider[]>([]);
+  const [mode, setMode] = useState<Mode>("link");
   /**
    * How this company signs people in.
    *
@@ -126,8 +134,12 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
-  // Only ever set on a host with no mail transport (local dev).
-  const [devCode, setDevCode] = useState<string | null>(null);
+  /** The login the first admin is choosing, on a claimable company. */
+  const [claimLogin, setClaimLogin] = useState("");
+  /** Their password: generated on first render, editable, shown in the clear. */
+  const [claimPassword, setClaimPassword] = useState(() => generatePassword());
+  /** Set once they have tried to submit, so a too-short password is called out. */
+  const [claimTouched, setClaimTouched] = useState(false);
   /**
    * When the last link was asked for, or `null` if none has been.
    *
@@ -157,59 +169,22 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
     };
   }, [client, company]);
 
-  // The real config can arrive *after* someone has already switched into
-  // password mode off the optimistic `ASSUMED_CONFIG`. If it turns out this
-  // host does not offer passwords, password mode must not survive that —
-  // otherwise the form below stays open on a route that will refuse it.
-  useEffect(() => {
-    if (!authConfig.passwords && mode === "password") setMode("link");
-  }, [authConfig.passwords, mode]);
-
   /**
-   * A host in `email` mode that can deliver nothing.
+   * The screen actually drawn: the person's choice where the host can mail a
+   * link, and the password otherwise.
    *
-   * Not the same as "no email sign-in": hub OAuth and passwords never touch a
-   * mailbox, so this company still signs people in exactly as it says it does.
-   * What is dead is the *link*, and only the host knows that — `auth/request`
-   * answers `sent: true` here precisely as it does where the mail went out.
+   * Derived rather than forced into state, so the real config arriving after
+   * the optimistic `ASSUMED_CONFIG` — or an operator wiring mail up behind
+   * this very screen — changes the form without a stale choice surviving it.
+   * A host with no transport draws no link form at all: `auth/request` answers
+   * `sent: true` there exactly as it does where the mail went out, so the
+   * form would send someone to wait for a message no process here will send.
    */
-  const linkGoesNowhere = authConfig.mode === "email" && !authConfig.magicLink;
-
-  /**
-   * Step out of link mode once, on such a host, when there is somewhere to step.
-   *
-   * Once, deliberately: someone may switch back on purpose — an operator who
-   * has just configured a transport behind this very screen is the likeliest
-   * visitor here — and a rule that re-applied itself would make the toggle
-   * beneath the form unusable rather than merely mistaken.
-   */
-  const demotedLink = useRef(false);
-  useEffect(() => {
-    if (demotedLink.current || !linkGoesNowhere || !authConfig.passwords) return;
-    demotedLink.current = true;
-    setMode("password");
-  }, [linkGoesNowhere, authConfig.passwords]);
-
-  useEffect(() => {
-    let cancelled = false;
-    // A dead setup hand-off link keeps its marker in the hash while it falls
-    // back to this form, so an ecosystem button asked for from here must land on
-    // the same destination the link promised — the host carries it on the
-    // sign-in's return URI (`from=setup`), which survives the OAuth round trip
-    // the way a fragment cannot. Absent for any other sign-in, which lands
-    // wherever it always did.
-    fetchHubProviders(client, company, arrivedViaSetupHandoff() ? "setup" : undefined)
-      .then((providers) => {
-        if (!cancelled) setHubProviders(providers);
-      })
-      .catch(() => {
-        // No buttons. The form below still works, and a host that cannot answer
-        // this question could not have completed the flow anyway.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, company]);
+  const effectiveMode: Mode = !authConfig.magicLink
+    ? "password"
+    : authConfig.passwords
+      ? mode
+      : "link";
 
   /**
    * Seconds before the host would mail another link to this address.
@@ -224,7 +199,7 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
   const waitingToResend = secondsLeft > 0;
 
   /** The line under the heading. Empty means the heading stands alone. */
-  const headingNote = subtitle(authConfig, mode, sent);
+  const headingNote = subtitle(authConfig, effectiveMode, sent);
 
   // Four ticks a second, and only while something is counting. The label is in
   // whole seconds, so a 1s interval would show each number for anywhere between
@@ -260,7 +235,11 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const result = await requestCode(
+      // `dev_code`, when the host echoes one, is deliberately not read: this
+      // form is only drawn where the host mails, and a code handed back to
+      // whoever asked is a developer convenience on the API, not a sign-in
+      // screen.
+      await requestCode(
         client,
         company,
         email,
@@ -274,7 +253,6 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
       );
       // Always the same acknowledgement, whoever they are.
       setSent(true);
-      setDevCode(result.dev_code ?? null);
       setLinkSentAt(Date.now());
       return true;
     } catch (err) {
@@ -298,14 +276,30 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
     }
   }
 
-  async function redeemDevCode() {
-    if (!devCode) return;
+  /**
+   * Create the first admin account and sign in as them.
+   *
+   * The password is validated here for the one rule the host has — length —
+   * so a too-short one is called out beside the field rather than as a
+   * refusal from the round trip. Everything else is the host's answer.
+   */
+  async function claim(e: React.FormEvent) {
+    e.preventDefault();
+    setClaimTouched(true);
+    if (passwordProblem(claimPassword)) return;
     setBusy(true);
     setError(null);
     try {
-      onSignedIn(await verifyCode(client, company, devCode));
+      onSignedIn(await claimFirstAdmin(client, company, claimLogin, claimPassword));
     } catch (err) {
-      setError(friendly(err));
+      if (err instanceof ApiError && err.code === "already_claimed") {
+        // Somebody got there first, between this screen loading and the
+        // submit. The claim is over; fall through to the ordinary form.
+        setAuthConfig((config) => ({ ...config, claimable: false }));
+        setError("Someone already set up this company. Sign in instead.");
+      } else {
+        setError(friendly(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -492,86 +486,65 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
         ) : null}
 
         {/*
-          Ecosystem sign-in, above the form because it is the path most people
-          take: one click, no mailbox round trip. Rendered only when the host
-          says it has a hub — a self-hosted console shows the form alone.
-
-          Each button is a plain link to a host-supplied URL, not a fetch: the
-          hub's OAuth start is a top-level navigation, and the browser must own
-          it so the provider's own domain appears in the address bar.
+          Nobody has joined yet: the first person in picks the admin login and
+          a password, and is signed in on the spot. Drawn *instead of* the
+          sign-in form rather than beside it — with no users there is nobody
+          who could pass that form, and two cards would ask which one to use.
         */}
-        {authConfig.mode === "email" && hubProviders.length > 0 && (
-          <div className="mb-6 space-y-3">
-            <div className="grid gap-2">
-              {hubProviders.map((provider) => (
-                <a
-                  key={provider.id}
-                  href={
-                    arrivedViaSetupHandoff()
-                      ? `${provider.startUrl}${provider.startUrl.includes("?") ? "&" : "?"}from=setup`
-                      : provider.startUrl
-                  }
-                  className={cn(buttonVariants({ variant: "outline", size: "lg" }), "w-full")}
-                >
-                  Continue with {provider.label}
-                </a>
-              ))}
-            </div>
+        {authConfig.mode === "email" && authConfig.claimable ? (
+          <Card className="p-6" data-testid="login-claim">
+            <form className="space-y-4" onSubmit={claim}>
+              <div className="flex items-start gap-3">
+                <KeyRound className="mt-0.5 size-5 shrink-0 text-primary" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Set up the admin account</p>
+                  <p className="text-sm text-muted-foreground">
+                    Nobody has signed in here yet. Choose how you&apos;ll sign in and
+                    you&apos;ll go straight in as the admin.
+                  </p>
+                </div>
+              </div>
 
-            <p className="text-center text-2xs leading-5 text-muted-foreground">
-              By continuing, you agree to the{" "}
-              <a
-                href={TERMS_OF_USE_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="font-medium underline underline-offset-2 hover:text-foreground"
-              >
-                Terms
-              </a>{" "}
-              and{" "}
-              <a
-                href={PRIVACY_POLICY_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="font-medium underline underline-offset-2 hover:text-foreground"
-              >
-                Privacy Policy
-              </a>
-              .
-            </p>
+              <div className="space-y-2">
+                <Label htmlFor="claim-login">{authConfig.magicLink ? "Email" : "Email or username"}</Label>
+                <Input
+                  id="claim-login"
+                  type="text"
+                  autoComplete="username"
+                  autoFocus
+                  required
+                  value={claimLogin}
+                  onChange={(e) => setClaimLogin(e.target.value)}
+                  placeholder={authConfig.magicLink ? "you@company.com" : "you@company.com or admin"}
+                  data-testid="claim-login"
+                />
+              </div>
 
-            <div className="flex items-center gap-3">
-              <div className="h-px flex-1 bg-border" />
-              <span className="text-xs text-muted-foreground">or</span>
-              <div className="h-px flex-1 bg-border" />
-            </div>
-          </div>
-        )}
+              <NewPasswordField
+                id="claim-password"
+                value={claimPassword}
+                onChange={setClaimPassword}
+                problem={claimTouched ? passwordProblem(claimPassword) : undefined}
+              />
 
-        {/*
-          Said here because it is the last place it can be said. Every other
-          surface reports a link as sent, so an operator who is never told will
-          type an address, be thanked, and wait for a message no process on this
-          host will ever produce. The form stays below regardless: mail can be
-          configured without restarting this console, and a person who knows a
-          link is coming should still be able to ask for one.
-        */}
-        {linkGoesNowhere && (
-          <Alert className="mb-4" data-testid="login-no-mail">
-            <TriangleAlert className="size-4" />
-            <AlertDescription className="text-foreground">
-              {hubProviders.length > 0
-                ? `This host can't send mail, so a sign-in link won't arrive. Use one of the buttons above${authConfig.passwords ? ", or the password you set for this company." : "."}`
-                : authConfig.passwords
-                  ? "This host can't send mail, so a sign-in link won't arrive. Sign in with the password you set for this company — an admin can issue you one if you have none."
-                  : "This host can't send mail, so a sign-in link won't arrive. Whoever runs it needs to configure a mail transport before this screen can sign anyone in."}
-            </AlertDescription>
-          </Alert>
-        )}
+              {error ? (
+                <Alert variant="destructive">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              ) : null}
 
-        {authConfig.mode === "email" ? (
+              <Button type="submit" className="w-full" disabled={busy} data-testid="claim-submit">
+                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                Create admin account and sign in
+                {!busy ? <ArrowRight className="ml-2 size-4" /> : null}
+              </Button>
+            </form>
+          </Card>
+        ) : null}
+
+        {authConfig.mode === "email" && !authConfig.claimable ? (
         <Card className="p-6">
-          {sent && mode === "link" ? (
+          {sent && effectiveMode === "link" ? (
             <div className="space-y-4">
               <div className="flex items-start gap-3">
                 <MailCheck className="mt-0.5 size-5 shrink-0 text-primary" />
@@ -583,21 +556,6 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
                   </p>
                 </div>
               </div>
-
-              {devCode ? (
-                <Alert>
-                  <AlertDescription className="space-y-2">
-                    <p className="text-xs">
-                      This host has no email configured, so the link was returned
-                      instead of sent. That only happens in local development.
-                    </p>
-                    <Button size="sm" onClick={redeemDevCode} disabled={busy}>
-                      {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-                      Use it now
-                    </Button>
-                  </AlertDescription>
-                </Alert>
-              ) : null}
 
               {/*
                 The error alert has to be repeated here rather than lifted out
@@ -646,7 +604,6 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
                   size="sm"
                   onClick={() => {
                     setSent(false);
-                    setDevCode(null);
                     setResent(false);
                     setError(null);
                   }}
@@ -658,13 +615,16 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
           ) : (
             <form
               className="space-y-4"
-              onSubmit={mode === "link" ? sendLink : signInWithPassword}
+              onSubmit={effectiveMode === "link" ? sendLink : signInWithPassword}
             >
               <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
+                {/* A host with no mail never needed a mailbox: the login the
+                    first admin chose may be a plain username, and an `email`
+                    input would refuse it before the host ever saw it. */}
+                <Label htmlFor="email">{authConfig.magicLink ? "Email" : "Email or username"}</Label>
                 <Input
                   id="email"
-                  type="email"
+                  type={authConfig.magicLink ? "email" : "text"}
                   autoComplete="username"
                   // Only when something was refused. Whoever is reading a
                   // notice has one thing left to do — ask for another link —
@@ -680,7 +640,7 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
                 />
               </div>
 
-              {mode === "password" ? (
+              {effectiveMode === "password" ? (
                 <div className="space-y-2">
                   <Label htmlFor="password">Password</Label>
                   <Input
@@ -702,7 +662,7 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
 
               <Button type="submit" className="w-full" disabled={busy}>
                 {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                {mode === "link" ? "Email me a link" : "Sign in"}
+                {effectiveMode === "link" ? "Email me a link" : "Sign in"}
                 {!busy ? <ArrowRight className="ml-2 size-4" /> : null}
               </Button>
             </form>
@@ -717,8 +677,15 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
           link away, since the handler clears `sent` with no acknowledgement
           (issue #1333). "Use a different address" is the way back to the form,
           and this returns with it.
+
+          Only where both are on offer: a host with no mail has one sign-in and
+          nothing to switch to.
         */}
-        {authConfig.mode === "email" && authConfig.passwords && !(sent && mode === "link") ? (
+        {authConfig.mode === "email" &&
+        !authConfig.claimable &&
+        authConfig.passwords &&
+        authConfig.magicLink &&
+        !(sent && effectiveMode === "link") ? (
         <div className="mt-4 text-center">
           <Button
             variant="link"
@@ -729,14 +696,16 @@ export function Login({ client, company, notice, onSignedIn }: Props) {
               setSent(false);
             }}
           >
-            {mode === "link" ? "Use a password instead" : "Email me a link instead"}
+            {effectiveMode === "link" ? "Use a password instead" : "Email me a link instead"}
           </Button>
         </div>
         ) : null}
 
-        {authConfig.mode === "email" && mode === "password" ? (
+        {authConfig.mode === "email" && !authConfig.claimable && effectiveMode === "password" ? (
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            Forgot it? Sign in with a link, then set a new password.
+            {authConfig.magicLink
+              ? "Forgot it? Sign in with a link, then set a new password."
+              : "Forgot it? An admin can set you a temporary password."}
           </p>
         ) : null}
       </main>
@@ -771,12 +740,12 @@ function subtitle(config: AuthConfig, mode: Mode, sent: boolean): string {
   // different claims about the same act (issue #1333). The card carries the
   // whole message by then, so there is nothing left to add.
   if (sent && mode === "link") return "";
-  // Promising a link from a host with no transport is the one line here that
-  // sends someone away to wait for nothing.
-  if (mode === "link" && !config.magicLink) return "This host can\'t email you a link.";
+  if (config.claimable) return "";
   return mode === "link"
     ? "We\'ll email you a link. No password needed."
-    : "Use the password you set for this company.";
+    : config.magicLink
+      ? "Use the password you set for this company."
+      : "Sign in with your password.";
 }
 
 /**
@@ -797,7 +766,10 @@ function friendly(err: unknown): string {
       return `${err.message}. Reload to see the right sign-in.`;
     }
     if (err.code === "invalid_login") {
-      return "That didn't work. Check the address and password, or sign in with a link.";
+      return "That didn't work. Check the login and password.";
+    }
+    if (err.code === "not_the_named_admin") {
+      return "This host already names its first admin. Sign in with that address to claim it.";
     }
     if (err.status === 0) {
       return "Can't reach the company host.";

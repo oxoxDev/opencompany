@@ -69,6 +69,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
                     agent_id: "maya".to_string(),
                     text: text.to_string(),
                     steps: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -128,6 +129,7 @@ async fn chat_history_projects_threads_and_reactions() {
                 agent_id: "maya".to_string(),
                 text: "the root".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         )
         .await
@@ -147,6 +149,7 @@ async fn chat_history_projects_threads_and_reactions() {
                 agent_id: "maya".to_string(),
                 text: "in the thread".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         )
         .await

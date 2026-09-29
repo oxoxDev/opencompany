@@ -396,6 +396,7 @@ async fn orphaned_companies_are_found_through_the_real_ports() {
 
     for id in [&owned, &orphan] {
         let record = CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             id: id.clone(),
@@ -478,6 +479,7 @@ async fn shared_db_namespaced_companies_do_not_conflict() {
 
     for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
         let record = CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             id: id.clone(),

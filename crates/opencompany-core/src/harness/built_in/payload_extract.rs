@@ -48,12 +48,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use openhuman_core as oh;
 
-use oh::agent::tinyagents::payload_summarizer::{
-    PayloadSummarizer, SummarizeOutcome, SummarizedPayload, UnavailableReason,
-};
+use oh::agent::tinyagents::payload_summarizer::PayloadSummarizer;
+use oh::inference::tokenjuice::generate::{GenerateRequest, PreparedGenerate};
 
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -70,13 +68,6 @@ const EXTRACT_TIMEOUT: Duration = Duration::from_secs(25);
 /// Ceiling on the extraction's own output, so a summarizer cannot answer a
 /// budget problem with a second one.
 const MAX_SUMMARY_TOKENS: u32 = 1_500;
-
-/// Below this, a payload is passed through untouched as `NotNeeded`.
-///
-/// Mirrors the reference summarizer's `summarizer_payload_threshold_tokens`
-/// (4 000 tokens, ~4 chars per token) so both implementations answer the same
-/// question the same way.
-const PASS_THROUGH_BYTES: usize = 16 * 1024;
 
 /// The most of an oversized payload that is worth sending to the extractor.
 ///
@@ -180,28 +171,32 @@ impl PayloadExtractor {
     }
 }
 
-impl PayloadExtractor {
-    /// Charge one extraction's tokens to the company that paid for them.
-    ///
-    /// Best-effort by design, on the same rule the titling and selector paths
-    /// follow: the call has already happened and the turn is already carrying
-    /// its result, so a ledger hiccup must cost the accounting row rather than
-    /// the turn.
-    async fn record_usage(&self, response: &tinyinference::model::ModelResponse) {
-        let Some(metering) = self.metering.as_ref() else {
-            return;
-        };
-        let usage = usage_from(response);
-        crate::metering::record_extraction_usage(
-            &usage,
-            &metering.provider_slug,
-            metering.model_slug,
-            &metering.company,
-            metering.store.as_ref(),
-            metering.meter.as_deref(),
-        )
-        .await;
-    }
+/// Charge one summary's tokens to the company that paid for them.
+///
+/// A free function rather than a method because the prepared call owns its
+/// handles: TinyJuice may run it after the extractor that built it has gone.
+///
+/// Best-effort by design, on the same rule the titling and selector paths
+/// follow: the call has already happened and the turn is already carrying its
+/// result, so a ledger hiccup must cost the accounting row rather than the
+/// turn.
+async fn record_usage(
+    metering: Option<&ExtractionMetering>,
+    response: &tinyinference::model::ModelResponse,
+) {
+    let Some(metering) = metering else {
+        return;
+    };
+    let usage = usage_from(response);
+    crate::metering::record_extraction_usage(
+        &usage,
+        &metering.provider_slug,
+        metering.model_slug,
+        &metering.company,
+        metering.store.as_ref(),
+        metering.meter.as_deref(),
+    )
+    .await;
 }
 
 /// The tokens and charged cost one response reports.
@@ -226,195 +221,88 @@ fn usage_from(response: &tinyinference::model::ModelResponse) -> crate::ports::t
     }
 }
 
-/// The instruction: OpenHuman's own summarizer archetype, verbatim.
-///
-/// Not a prompt of this crate's own. The first cut here was, and it was a
-/// weaker restatement of a prompt that already existed two directories away —
-/// it dropped the structural hints ("if the payload is a list, state how many
-/// items it had... what page boundaries exist"), the error-payload rule
-/// ("preserve the error message verbatim at the top"), the binary-payload rule,
-/// and the `Identifiers preserved` section that gives every kept record a line
-/// of its own. That last omission showed up immediately in testing: a task that
-/// asked for issue numbers got thirty numbers and no titles, because nothing
-/// told the model to keep an identifying line per record regardless of what was
-/// asked.
-///
-/// Referenced through the vendored const rather than copied, so the two cannot
-/// drift: an upstream edit to the extraction contract reaches this caller on
-/// the next vendor bump instead of leaving OpenCompany on a stale fork of it.
-///
-/// The archetype is written for a sub-agent invocation, and every line of that
-/// framing holds here — "you run exactly once per invocation, with no tools and
-/// no follow-up iterations" is precisely what this single tool-less call is.
-fn system_prompt() -> &'static str {
-    oh::agent::registry::agents::summarizer::prompt::ARCHETYPE
-}
-
-#[async_trait]
 impl PayloadSummarizer for PayloadExtractor {
-    async fn maybe_summarize_in_parent(
+    fn prepare(
         &self,
-        _parent_ctx: &tinyagents_harness::context::RunContext<()>,
-        tool_name: &str,
-        parent_task_hint: Option<&str>,
-        raw: &str,
-    ) -> anyhow::Result<SummarizeOutcome> {
-        let original_bytes = raw.len();
-        // Size first, hint second — the order the reference implementation uses,
-        // and the order that matters here.
-        //
-        // `ToolOutputMiddleware` calls this for **every** tool result, passing
-        // `None` for the hint, and turns any `Unavailable` into a notice
-        // prefixed onto the payload the model reads. Deciding on the hint first
-        // stamped "summarization unavailable" onto every small result of every
-        // turn without a hint — announcing the absence of a reduction nothing
-        // had asked for, on payloads that never needed one. It broke 15 turn
-        // tests, whose scripted models then never saw the results they were
-        // written to act on.
-        //
-        // A result under the threshold is not unavailable. It is fine as it is.
-        if original_bytes <= PASS_THROUGH_BYTES {
-            return Ok(SummarizeOutcome::NotNeeded);
-        }
-        // The task hint is the whole point of this over a mechanical cut. With
-        // none, an extraction has no way to tell an answering record from a
-        // filler one, and would be guessing exactly as blindly as the byte cut
-        // — so decline and let the bounded raw payload through, which at least
-        // says what it dropped.
-        // The upstream hint when a caller supplies one (the sub-agent path
-        // does), else this crate's own — set by `run_inner` around every turn,
-        // because OpenCompany does not take the sub-agent path that populates
-        // the parameter.
-        let own_hint = crate::runtime::delegation::current_task_hint();
-        let Some(task) = parent_task_hint
-            .map(str::to_string)
-            .or(own_hint)
-            .map(|hint| hint.trim().to_string())
-            .filter(|hint| !hint.is_empty())
-        else {
-            tracing::debug!(
-                tool = tool_name,
-                bytes = original_bytes,
-                "[payload-extract] no task hint on this turn; leaving the payload to the \
-                 downstream bound"
-            );
-            return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Disabled));
-        };
+        _parent_ctx: &tinyagents_harness::context::RunContext<
+            oh::agent::tinyagents::host::run_context::OpenHumanRunContext,
+        >,
+    ) -> anyhow::Result<PreparedGenerate> {
+        let model = Arc::clone(&self.model);
+        let model_name = self.model_name.clone();
+        let metering = self.metering.clone();
 
-        let (body, was_cut) = cap_input(raw);
-        let cut_note = if was_cut {
-            tracing::warn!(
-                tool = tool_name,
-                bytes = original_bytes,
-                sent_bytes = body.len(),
-                "[payload-extract] payload exceeded the extraction input ceiling; \
-                 the head was sent and the prompt says so"
-            );
-            " (truncated — this is the head of a larger payload)"
-        } else {
-            ""
-        };
-        let request = tinyinference::model::ModelRequest {
-            messages: vec![
-                tinyinference::message::Message::system(system_prompt()),
-                tinyinference::message::Message::user(format!(
-                    "The agent is trying to: {task}\n\nTool that ran: `{tool_name}`\n\n\
-                     Raw output{cut_note}:\n{body}"
-                )),
-            ],
-            model: Some(self.model_name.clone()),
-            max_tokens: Some(MAX_SUMMARY_TOKENS),
-            ..Default::default()
-        };
+        Ok(Box::new(move |request: GenerateRequest| {
+            Box::pin(async move {
+                // TinyJuice decides *whether* to summarise and writes *what* to
+                // ask; this decides *who answers and who pays*. The `purpose`
+                // is carried into the log so an operator can still tell which
+                // stage spent the call.
+                let body = cap_input(&request.prompt);
+                let (body, was_cut) = body;
+                let max_tokens = request.max_output_tokens.clamp(1, MAX_SUMMARY_TOKENS);
+                let model_request = tinyinference::model::ModelRequest {
+                    messages: vec![
+                        tinyinference::message::Message::system(request.system),
+                        tinyinference::message::Message::user(body),
+                    ],
+                    model: Some(model_name),
+                    max_tokens: Some(max_tokens),
+                    ..Default::default()
+                };
 
-        let response =
-            match tokio::time::timeout(EXTRACT_TIMEOUT, self.model.invoke(&(), request)).await {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        tool = tool_name,
-                        bytes = original_bytes,
-                        %error,
-                        "[payload-extract] extraction call failed; the raw payload stands"
-                    );
-                    return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
+                let response =
+                    match tokio::time::timeout(EXTRACT_TIMEOUT, model.invoke(&(), model_request))
+                        .await
+                    {
+                        Ok(Ok(response)) => response,
+                        Ok(Err(error)) => {
+                            // An `Err` here leaves the caller holding the raw
+                            // payload, which downstream truncation still bounds.
+                            // It must never take the turn down: the result is
+                            // large, not broken.
+                            tracing::warn!(
+                                purpose = %request.purpose,
+                                %error,
+                                "[payload-extract] summary call failed; the raw payload stands"
+                            );
+                            return Err(anyhow::anyhow!("payload summary failed: {error}"));
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                purpose = %request.purpose,
+                                timeout_s = EXTRACT_TIMEOUT.as_secs(),
+                                "[payload-extract] summary timed out; the raw payload stands"
+                            );
+                            return Err(anyhow::anyhow!("payload summary timed out"));
+                        }
+                    };
+
+                // Before anything is decided about the answer: the tokens are
+                // spent either way, and a summary the caller then discards cost
+                // exactly as much as one it used.
+                record_usage(metering.as_ref(), &response).await;
+
+                let summary = response.text();
+                if summary.trim().is_empty() {
+                    return Err(anyhow::anyhow!("payload summary returned nothing"));
                 }
-                Err(_) => {
-                    tracing::warn!(
-                        tool = tool_name,
-                        bytes = original_bytes,
-                        timeout_s = EXTRACT_TIMEOUT.as_secs(),
-                        "[payload-extract] extraction timed out; the raw payload stands"
-                    );
-                    return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
-                }
-            };
-
-        // Before anything is decided about the answer: the tokens are spent
-        // either way, and an extraction that is later rejected as `NotNeeded`
-        // cost exactly as much as one that is used.
-        self.record_usage(&response).await;
-
-        let summary = response.text();
-        if summary.trim().is_empty() {
-            tracing::warn!(
-                tool = tool_name,
-                bytes = original_bytes,
-                "[payload-extract] extraction returned nothing; the raw payload stands"
-            );
-            return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
-        }
-        // An "extraction" that grew the payload is not one. Rare, but a model
-        // handed a small-but-over-threshold body can pad; taking it anyway
-        // would spend a call to make the budget problem worse.
-        if summary.len() >= original_bytes {
-            tracing::debug!(
-                tool = tool_name,
-                original_bytes,
-                summary_bytes = summary.len(),
-                "[payload-extract] extraction did not shrink the payload; keeping the raw output"
-            );
-            return Ok(SummarizeOutcome::NotNeeded);
-        }
-
-        tracing::info!(
-            tool = tool_name,
-            from_bytes = original_bytes,
-            to_bytes = summary.len(),
-            ratio = format!(
-                "{:.1}x",
-                original_bytes as f64 / summary.len().max(1) as f64
-            ),
-            "[payload-extract] extracted the answering content from an oversized tool result"
-        );
-        // A summary built from a prefix must say so, in the host's words rather
-        // than the model's (codex on tinyhumansai/opencompany#2153).
-        //
-        // `summary` *replaces* the tool output. If the answering record sat past
-        // the input ceiling the model never saw it, and without this line the
-        // turn would hold a confident summary of a payload it only partly read
-        // — an incomplete list presented as a complete one, which is the precise
-        // failure this extractor exists to end. The full payload is on disk and
-        // pointed at by the artifact contents list, so the recovery is real and
-        // worth naming.
-        //
-        // Host-written because a disclosure the model has to remember is a
-        // disclosure that goes missing exactly when the payload is hardest.
-        let summary = if was_cut {
-            format!(
-                "_Read the first {sent} of {original} bytes of this result; later records were \
-                 not examined. The full output is on disk — see the stored-results list for its \
-                 path, and read it directly if the answer is not below._\n\n{summary}",
-                sent = body.len(),
-                original = original_bytes,
-            )
-        } else {
-            summary
-        };
-        Ok(SummarizeOutcome::Summarized(SummarizedPayload {
-            summary_bytes: summary.len(),
-            summary,
-            original_bytes,
+                // A summary built from a prefix must say so, in the host's
+                // words rather than the model's (codex on
+                // tinyhumansai/opencompany#2153). Without it the turn holds a
+                // confident summary of a payload it only partly read — an
+                // incomplete list presented as a complete one, which is the
+                // precise failure this exists to end.
+                Ok(match was_cut {
+                    true => format!(
+                        "_Read the first {sent} bytes of this result; later records were not \
+                         examined. The full output is on disk — see the stored-results list for \
+                         its path, and read it directly if the answer is not below._\n\n{summary}",
+                        sent = body.len(),
+                    ),
+                    false => summary,
+                })
+            })
         }))
     }
 }

@@ -1,7 +1,14 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
-import type { ChatMentionDto } from "@/api/types";
+import type {
+  ChatMentionDto,
+  EpisodeCompletionReason,
+  RoutingPlanDto,
+  RoutingRouter,
+  TurnStepFailure,
+  UtteranceKind,
+} from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import type {
   DeliveryReport,
@@ -31,6 +38,21 @@ export type CompanyStreamEvent =
       agentId: string;
       text: string;
       /**
+       * The episode this row belongs to, when it belongs to one.
+       *
+       * The episode fold drops a frame that names no episode, so without this
+       * a row in a pair channel — a line of an exchange two seats are having —
+       * never reaches it, and the indicator can only ever say that an
+       * exchange opened.
+       */
+      episodeId?: string;
+      /**
+       * What the row committed (`ask`, `complete_episode`, `dm`, ...), on an
+       * episode row. The fold skips a `dm`: it is the conductor concluding an
+       * exchange, threaded under the ask, and restates the askee's last line.
+       */
+      utteranceKind?: string;
+      /**
        * The body as the model wrote it — see {@link AgentReplyEvent.cueText}.
        * Declared here as well as on the callback payload because this arm
        * rebuilds that payload field by field: a field the host sends and this
@@ -58,6 +80,14 @@ export type CompanyStreamEvent =
        * available through `chat/history` (see {@link fromHistory}).
        */
       mentions?: ChatMentionDto[];
+      /**
+       * What this reply was inside the episode that produced it — see
+       * {@link AgentReplyEvent.episode}. Declared here as well because this
+       * arm rebuilds that payload field by field.
+       */
+      episode?: EpisodeReplyMeta;
+      /** Who may read this line, when the host narrowed it (a desk `dm`). */
+      audience?: string[];
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
   | {
@@ -194,6 +224,13 @@ export type CompanyStreamEvent =
       direct: boolean;
       /** A return is the leg that completes the exchange. */
       returning: boolean;
+      /**
+       * The episode on the asking desk that raised the crossing, and the
+       * episode opened on the far desk to answer it. Both optional: a host
+       * predating episodes says neither, and a pair DM opens no episode.
+       */
+      episodeId?: string;
+      toEpisodeId?: string;
     }
   | {
       type: "desk_task_completed";
@@ -385,7 +422,7 @@ export type CompanyStreamEvent =
   // `GET …/workflows`, so the picker's content keeps exactly one source.
   /**
    * The company's own shape changed: a teammate or desk was created, a seat
-   * moved, or a desk's move grammar was installed or restored.
+   * moved, or a desk's routing block was installed or restored.
    *
    * Thin on purpose, like the workflow frames beside them — ids and enough
    * identity to act on, never a configuration body. A consumer reacts by
@@ -423,12 +460,178 @@ export type CompanyStreamEvent =
       removed: string[];
     }
   | {
-      type: "desk_hive_configured";
+      type: "desk_routing_configured";
       seq: number;
       atMillis: number;
       deskId: string;
       /** True when the override was dropped and the manifest restored. */
       reset: boolean;
+    }
+  // ---- Hive episodes and rounds (`docs/spec/runtime/events.md`) ----
+  //
+  // A desk of two or more answers as an **episode**: the host opens one per
+  // operator message (or thread), routes it to seats, and runs the seats in
+  // concurrent **rounds** until one of them calls `complete_episode`. Every
+  // frame below is journaled, so a reload rebuilds the same shape from
+  // `chat/history`'s `episode` field; the frames are what make it live.
+  //
+  // `chatId` on every one is the desk the episode runs on, so a room can key
+  // its band on the same id its transcript is keyed on.
+  | {
+      type: "episode_opened";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      /** The journal sequence of the message that opened it. */
+      openedBySeq: number;
+      /** The thread root inside the desk, when the message was in one. */
+      parentId?: string;
+      participants: string[];
+      plan: RoutingPlanDto;
+    }
+  | {
+      type: "round_started";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      revision: number;
+      /** The seats running this round — concurrently, one turn each. */
+      agentIds: string[];
+    }
+  // The chat turn bracket (issue #983), now with the seat and round it runs
+  // for. `agentId` is absent on a host predating the seat attribution; the
+  // episode fields are absent on every turn outside an episode.
+  | {
+      type: "turn_started";
+      seq: number;
+      atMillis: number;
+      chatId?: string;
+      parentId?: string;
+      turnId?: string;
+      agentId?: string;
+      episodeId?: string;
+      roundRevision?: number;
+    }
+  | {
+      type: "turn_settled";
+      seq: number;
+      atMillis: number;
+      chatId?: string;
+      turnId?: string;
+      agentId?: string;
+      episodeId?: string;
+      roundRevision?: number;
+      /** Widened so a word from a newer host is not a type error. */
+      outcome?: TurnOutcome | string;
+    }
+  | {
+      type: "round_committed";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      revision: number;
+      utterances: RoundUtterance[];
+      /** The host actions the commit produced (`run_agents`, `deliver_dm`),
+       *  declared loosely: the console renders the typed frames that follow
+       *  them (`broadcast_routed`, `dm_delivered`) rather than these. */
+      actions?: unknown[];
+    }
+  | {
+      /** One seat opened a private conversation with another.
+       *
+       *  A **reference**: it carries no text. The question and the answer are
+       *  in `conversationId`, and this says two seats are talking and where,
+       *  so the indicator can be raised from the desk's own stream rather
+       *  than by watching every pair channel for one to start. */
+      type: "conversation_opened";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      /** The channel the exchange itself is written to. */
+      conversationId: string;
+      /** The `ask` row it is rooted at. */
+      root: number;
+      asker: string;
+      askee: string;
+    }
+  | {
+      /** The conversation ended — the other half of the reference. */
+      type: "conversation_concluded";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      conversationId: string;
+      root: number;
+      asker: string;
+      askee: string;
+      /** Ended without an answer: nothing was due, or it ran out of turns.
+       *  An indicator that only watched for an answer would hang here. */
+      forced: boolean;
+    }
+  | {
+      type: "broadcast_routed";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      revision: number;
+      agentId: string;
+      messageSeq: number;
+      plan: RoutingPlanDto;
+      /** Per-candidate probabilities when the System One router answered. */
+      probabilities?: Record<string, number>;
+      router: RoutingRouter;
+    }
+  | {
+      type: "dm_delivered";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      from: string;
+      to: string[];
+      messageSeq: number;
+    }
+  | {
+      type: "episode_completed";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      revision: number;
+      completedBy?: string;
+      rounds: number;
+      /** Widened so a word from a newer host is not a type error. */
+      reason: EpisodeCompletionReason | string;
+      /** The reply that closed it, when `complete_episode` carried one. */
+      summarySeq?: number;
+    }
+  | {
+      /** A seat parked on an approval: it asked the operator, or made a gated
+       *  call, and the episode waits for the decision. */
+      type: "episode_seat_parked";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      seat: string;
+      /** The conversation root the seat was in; absent on the desk itself. */
+      thread?: number;
+      approvalIds: string[];
+    }
+  | {
+      /** The parked seat was released and its turn goes on. */
+      type: "episode_seat_resumed";
+      seq: number;
+      atMillis: number;
+      chatId: string;
+      episodeId: string;
+      seat: string;
     }
   | {
       type:
@@ -491,6 +694,9 @@ export type CompanyStreamEvent =
        * card, a workflow node), where a consumer falls back to keying by thread.
        */
       messageSeq?: number;
+      /** The episode and round this turn runs for, when it runs in one. */
+      episodeId?: string;
+      roundRevision?: number;
     }
   | {
       type: "tool_result";
@@ -513,10 +719,29 @@ export type CompanyStreamEvent =
        * only this.
        */
       result?: string;
+      /**
+       * The typed reason the call did not succeed (issue #411). On the wire
+       * since #411 (`TurnStreamEvent.failure`) and undeclared here until now,
+       * so the live row could not wear the chip the folded step does.
+       */
+      failure?: TurnStepFailure;
+      /**
+       * The result was cut before the agent could read all of it (issue #410).
+       * Carried for the same reason `failure` is.
+       */
+      truncated?: boolean;
+      /**
+       * `"ok"`, `"error"` or `"awaiting_approval"` — the host's own
+       * `TurnStepStatus::wire_word`, so the live word and the persisted one
+       * cannot drift. A parked call reports the third, which is why a reader
+       * must not treat this as a two-way `error`/`ok` flag.
+       */
       status?: string;
       elapsedMs?: number;
       /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
       messageSeq?: number;
+      episodeId?: string;
+      roundRevision?: number;
     }
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
@@ -528,6 +753,8 @@ export type CompanyStreamEvent =
       chatId?: string;
       /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
       messageSeq?: number;
+      episodeId?: string;
+      roundRevision?: number;
     }
   // Somebody arrived, went idle, or left. Published on a CHANGE only — a
   // console heartbeats every minute whether or not anything moved, and
@@ -561,6 +788,68 @@ export type CompanyStreamEvent =
       message: string;
       atMillis: number;
     };
+
+/** How a seat's turn ended, as `turn_settled` reports it. */
+export type TurnOutcome = "committed" | "failed" | "timed_out" | "no_utterance";
+
+/** One seat's committed utterance inside a `round_committed` frame. */
+export interface RoundUtterance {
+  agentId: string;
+  /** The journal sequence the driver committed it at. */
+  sequence: number;
+  kind: UtteranceKind;
+  /** The `agent_reply` row it produced, when it produced one. */
+  messageSeq?: number;
+  /** A `dm`'s recipients. */
+  to?: string[];
+}
+
+/**
+ * The episode metadata an `agent_reply` carries — the same shape
+ * `ChatHistoryMessageDto.episode` rehydrates, so a live row and its reloaded
+ * twin fold into the same round.
+ */
+export interface EpisodeReplyMeta {
+  id: string;
+  revision: number;
+  kind: UtteranceKind;
+  to?: string[];
+  routedBy?: { plan: RoutingPlanDto; router: RoutingRouter };
+}
+
+/**
+ * The frames that build and drive an episode — everything `reduceEpisodeFrame`
+ * (`src/lib/episode-frames.ts`) folds. `referral` is here because a crossing
+ * raised from inside an episode carries `episodeId`, and the band shows it.
+ */
+export type EpisodeFrame = Extract<
+  CompanyStreamEvent,
+  {
+    type:
+      | "episode_opened"
+      | "round_started"
+      | "round_committed"
+      | "broadcast_routed"
+      | "dm_delivered"
+      | "conversation_opened"
+      | "conversation_concluded"
+      | "episode_completed"
+      | "episode_seat_parked"
+      | "episode_seat_resumed"
+      // Not an episode frame as such -- it is the transcript's own row, and
+      // the fold ignores every one on a desk. It is here for the pair
+      // channels: an a2a exchange is written there, the desk never shows it,
+      // and this is the only way its lines reach the indicator while it runs.
+      | "agent_reply"
+      | "referral";
+  }
+>;
+
+/** The chat turn bracket, with or without an episode behind it. */
+export type TurnBracketFrame = Extract<
+  CompanyStreamEvent,
+  { type: "turn_started" | "turn_settled" }
+>;
 
 /**
  * The stable prefix a budget-paused system notice starts with (issue #1846),
@@ -787,6 +1076,14 @@ export interface AgentReplyEvent {
    * available through  (see {@link fromHistory}).
    */
   mentions?: ChatMentionDto[];
+  /**
+   * What this reply was inside the episode that produced it — its round, its
+   * speech act, a `dm`'s recipients. Carried so a live row folds into the same
+   * round band the reloaded one does. Absent outside an episode.
+   */
+  episode?: EpisodeReplyMeta;
+  /** Who may read this line, when the host narrowed it. */
+  audience?: string[];
 }
 
 interface Options {
@@ -853,6 +1150,39 @@ interface Options {
    * instead of at settle.
    */
   onReferral?: (event: Extract<CompanyStreamEvent, { type: "referral" }>) => void;
+  /**
+   * Called for each episode frame — `episode_opened`, `round_started`,
+   * `round_committed`, `broadcast_routed`, `dm_delivered`, `episode_completed`
+   * — and for `referral`, which also reaches {@link Options.onReferral}.
+   *
+   * Takes the **payload**: the band is a fold over the frames, not a re-read.
+   * The frames are journaled, so a dropped one costs a seat shown as still
+   * working until the next hydration, never wrong state — the transcript's
+   * `episode` field is the durable record and the fold prefers it.
+   */
+  onEpisodeEvent?: (event: EpisodeFrame) => void;
+  /**
+   * Called for each `turn_started` / `turn_settled` frame — the chat turn
+   * bracket (issue #983). A seat's bracket inside an episode drives its live
+   * lane; a bracket outside one still counts for concurrency.
+   */
+  onTurnBracket?: (event: TurnBracketFrame) => void;
+  /**
+   * Called for each `desk_routing_configured` frame, so a routing editor on
+   * screen re-reads the block another session just installed or reset. A
+   * counter, like the board's: the block's content has one source.
+   */
+  onDeskRoutingConfigured?: (
+    event: Extract<CompanyStreamEvent, { type: "desk_routing_configured" }>,
+  ) => void;
+  /**
+   * Called for each `teammate_added` and `desk_members_changed` frame, so a
+   * surface showing desk membership — `#general`'s is the whole roster —
+   * re-reads it. Silent, like the routing tick.
+   */
+  onRosterChanged?: (
+    event: Extract<CompanyStreamEvent, { type: "teammate_added" | "desk_members_changed" }>,
+  ) => void;
   /**
    * Called for each `desk_task_completed` frame (issue #377) so the shell can
    * post a card-linked system marker into the channel the card was raised in.
@@ -1000,6 +1330,10 @@ export function useEvents(
     onTaskEvent,
     onRunEvent,
     onReferral,
+    onEpisodeEvent,
+    onTurnBracket,
+    onDeskRoutingConfigured,
+    onRosterChanged,
     onDispatchTerminal,
     isViewingTaskOrigin,
     onWorkspaceEvent,
@@ -1032,6 +1366,22 @@ export function useEvents(
   useEffect(() => {
     onRunEventRef.current = onRunEvent;
   }, [onRunEvent]);
+  const onEpisodeEventRef = useRef(onEpisodeEvent);
+  useEffect(() => {
+    onEpisodeEventRef.current = onEpisodeEvent;
+  }, [onEpisodeEvent]);
+  const onTurnBracketRef = useRef(onTurnBracket);
+  useEffect(() => {
+    onTurnBracketRef.current = onTurnBracket;
+  }, [onTurnBracket]);
+  const onDeskRoutingConfiguredRef = useRef(onDeskRoutingConfigured);
+  useEffect(() => {
+    onDeskRoutingConfiguredRef.current = onDeskRoutingConfigured;
+  }, [onDeskRoutingConfigured]);
+  const onRosterChangedRef = useRef(onRosterChanged);
+  useEffect(() => {
+    onRosterChangedRef.current = onRosterChanged;
+  }, [onRosterChanged]);
   const onDispatchTerminalRef = useRef(onDispatchTerminal);
   useEffect(() => {
     onDispatchTerminalRef.current = onDispatchTerminal;
@@ -1161,6 +1511,10 @@ export function useEvents(
             onTaskEvent: onTaskEventRef.current,
             onRunEvent: onRunEventRef.current,
             onReferral: onReferralRef.current,
+            onEpisodeEvent: onEpisodeEventRef.current,
+            onTurnBracket: onTurnBracketRef.current,
+            onDeskRoutingConfigured: onDeskRoutingConfiguredRef.current,
+            onRosterChanged: onRosterChangedRef.current,
             onDispatchTerminal: onDispatchTerminalRef.current,
             isViewingTaskOrigin: isViewingTaskOriginRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
@@ -1218,6 +1572,10 @@ export function handleEvent(
     onTaskEvent,
     onRunEvent,
     onReferral,
+    onEpisodeEvent,
+    onTurnBracket,
+    onDeskRoutingConfigured,
+    onRosterChanged,
     onDispatchTerminal,
     isViewingTaskOrigin,
     onWorkspaceEvent,
@@ -1307,6 +1665,47 @@ export function handleEvent(
     // background turn cannot finish silently while the operator works elsewhere.
     case "referral":
       onReferral?.(event);
+      // A crossing raised from inside an episode is part of that episode's
+      // story too — the band shows the far desk being asked.
+      onEpisodeEvent?.(event);
+      break;
+    // The episode frames. **No toast**, for the reason the turn frames raise
+    // none: a desk of two answering a question fires a handful of these per
+    // round, and they render inline as the round band. Journaled, so a
+    // reload rebuilds the same band from `chat/history`.
+    case "episode_opened":
+    case "round_started":
+    case "round_committed":
+    case "broadcast_routed":
+    case "dm_delivered":
+    // The a2a pair. Easy to miss because the conversation's own rows are in
+    // the pair channel and never reach this desk's stream: these two
+    // references are the ONLY thing that tells the desk an exchange happened,
+    // so without an arm here the indicator has no input at all and the fold
+    // sees an episode that never talked to itself.
+    case "conversation_opened":
+    case "conversation_concluded":
+    case "episode_completed":
+    case "episode_seat_parked":
+    case "episode_seat_resumed":
+      onEpisodeEvent?.(event);
+      break;
+    // The chat turn bracket (issue #983). Silent, and routed to its own
+    // subscriber rather than `onTurnEvent`: that one folds tool rows into a
+    // message's timeline, and a bracket is not a row — it is when a seat
+    // started and stopped, which the band and the concurrency count read.
+    case "turn_started":
+    case "turn_settled":
+      onTurnBracket?.(event);
+      break;
+    // Structural and silent: the editor that shows the block re-reads it. No
+    // toast — an operator who just pressed Save already saw the result land.
+    case "desk_routing_configured":
+      onDeskRoutingConfigured?.(event);
+      break;
+    case "teammate_added":
+    case "desk_members_changed":
+      onRosterChanged?.(event);
       break;
     case "desk_task_completed":
       onTaskEvent?.(event);
@@ -1333,14 +1732,17 @@ export function handleEvent(
       onWorkspaceEvent?.(event);
       break;
     case "agent_reply":
+      // Also to the episode fold: a row in a pair channel is a line of an
+      // exchange two seats are having, and nothing else on this stream
+      // carries one. The fold drops every desk row it sees.
+      onEpisodeEvent?.(event);
       onAgentReply?.({
         chatId: event.chatId,
         agentId: event.agentId,
         text: event.text,
-        // The room's own grammar, which the episode fold counts. `text` has
-        // been rewritten into operator-facing prose by the time it reaches
-        // here, so dropping this would leave a live deliberation undetectable
-        // — the fold would see no moves and render no episode at all.
+        // The body as the model wrote it, when the host still rewrites one
+        // (a referral's cue line). Carried untouched so the raw view can show
+        // what the model received.
         cueText: event.cueText,
         // Issue #483: the host's own id for this message. Carried so the
         // injected line and its later rehydrated twin share an identity.
@@ -1357,6 +1759,11 @@ export function handleEvent(
         // Absent when the host's projection omits it; the same mentions are
         // always available through `chat/history` (see {@link fromHistory}).
         mentions: event.mentions,
+        // The episode this reply was committed into, and who may read it.
+        // Carried so a live row lands in the same round band a reload would
+        // put it in.
+        episode: event.episode,
+        audience: event.audience,
       });
       break;
     // Issue #379. No toast: the rising-edge "needs a sign-off" toast off the

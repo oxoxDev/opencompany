@@ -101,7 +101,10 @@ async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
     // destination and author stay separate.
     assert_eq!(result.channel_responses.len(), 1);
     let bubble = &result.channel_responses[0];
-    assert_eq!(bubble.channel, crate::server::ops::language::DEFAULT_DESK);
+    assert_eq!(
+        bubble.channel,
+        crate::server::ops::language::GENERAL_CHANNEL_ID
+    );
     assert_eq!(bubble.agent.as_deref(), Some("ceo"));
 
     // The journal holds one AgentReply, on the General desk, attributed to
@@ -121,7 +124,7 @@ async fn schedule_fired_journals_an_agent_reply_on_the_general_desk() {
             text,
             ..
         } => {
-            assert_eq!(chat_id, crate::server::ops::language::DEFAULT_DESK);
+            assert_eq!(chat_id, crate::server::ops::language::GENERAL_CHANNEL_ID);
             assert_eq!(agent_id, "ceo");
             assert!(text.contains("daily standup"), "{text}");
         }

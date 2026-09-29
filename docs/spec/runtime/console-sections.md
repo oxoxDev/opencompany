@@ -131,8 +131,8 @@ content-rail rows now, where they keep their labels at every width.
 `views/chat/ChannelRail.tsx` is not reimplemented in the sidebar. It is
 **portalled** into a slot the sidebar owns (`components/room-rail.tsx`), so
 every behaviour it already had comes with it: collapsible sections, per-kind row
-icons, unread and mention badges, the pinned Operator feed, the compact
-collapsed variant, and the "New message" door.
+icons, unread and mention badges, the compact collapsed variant, and the "New
+message" door.
 
 A portal rather than a state lift, deliberately. `ChatView` stays the one owner
 of the chat model, the rail renders from that state on the same pass, and the

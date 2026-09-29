@@ -48,7 +48,7 @@ use crate::server::chat_history::{
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
-use crate::server::ops::language::{self, DEFAULT_DESK};
+use crate::server::ops::language::{self, GENERAL_CHANNEL_ID};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::platform_auth::{CompanyAuth, authorize_address, refuse_until_password_changed};
 use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
@@ -115,21 +115,21 @@ pub fn router() -> Router<AppState> {
             "/desks/{desk_id}/members/{agent_id}",
             delete(remove_desk_member),
         ))
-        // A desk's move grammar: read the table in force, install or replace it,
-        // or drop the override and fall back to the manifest's own block.
-        // Registered under both scope forms.
+        // A desk's routing block (`[group_chat.routing]`): read the block in
+        // force, install or replace it, or drop the override and fall back to
+        // the manifest's own. Registered under both scope forms.
         .merge(scoped(
-            "/desks/{desk_id}/hive",
-            get(desk_hive).put(set_desk_hive).delete(reset_desk_hive),
+            "/desks/{desk_id}/routing",
+            get(desk_routing)
+                .put(set_desk_routing)
+                .delete(reset_desk_routing),
         ))
+        // The episodes a desk ran or is running (plan hive-desks, Phase 4),
+        // newest first, folded from the journal's episode record.
+        .merge(scoped("/episodes", get(list_episodes)))
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
         .merge(scoped("/desks/{desk_id}/order", put(set_desk_order)))
-        // The always-present, durable Operator feed — its own surface, not a
-        // desk (issue #1757 rework). Read-only identity lookup: the console
-        // pins it below a divider in the chat rail rather than folding it
-        // into `GET {scope}/desks`.
-        .merge(scoped("/operator-channel", get(operator_channel)))
         // The company → operator attention feed (issue #66): a live SSE stream of
         // the attention-worthy events already on the company's event log, under
         // both scope forms.
@@ -162,6 +162,11 @@ fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
 struct DeskDto {
     /// The desk id (the group-chat id; used as the chat thread id).
     id: String,
+    /// `"general"` for the company-wide #general channel, `"desk"` otherwise.
+    kind: DeskKind,
+    /// Whether the console may edit this channel's membership, order or
+    /// existence. False only for #general, whose membership is the roster.
+    mutable: bool,
     /// The desk's display name.
     name: String,
     /// An optional description.
@@ -193,6 +198,35 @@ struct DeskDto {
     /// (defaults false) for manifest desks.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     overlay_created: bool,
+    /// How this desk paces the episodes it opens — the numbers in force, not
+    /// the editable block (plan hive-desks, Phase 4; the full payload is
+    /// `GET {scope}/desks/{id}/routing`). Omitted for a desk that runs no
+    /// rounds: one with fewer than two roster seats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing: Option<crate::hive::routing::DeskRoutingSummaryDto>,
+}
+
+/// Which kind of channel a [`DeskDto`] describes.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DeskKind {
+    General,
+    Desk,
+}
+
+/// The compact routing summary a desk carries on the list, or `None` for a
+/// desk of one, which opens no episode.
+fn desk_routing_summary(
+    record: &CompanyRecord,
+    desk_id: &str,
+    router: crate::hive::routing::Router,
+) -> Option<crate::hive::routing::DeskRoutingSummaryDto> {
+    let seats = record
+        .effective_desk_members(desk_id)
+        .into_iter()
+        .filter(|id| record.is_roster_agent(id))
+        .count();
+    (seats >= 2).then(|| crate::hive::routing::desk_routing_summary(record, desk_id, router))
 }
 
 /// `GET {scope}/desks` — the company's desks, built from its manifest group
@@ -203,21 +237,15 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
     let record = scope.runtime.store().load(scope.id()).await?;
     let desks = record
         .map(|record| {
-            // Manifest (blueprint) desks first, then operator-created overlay
-            // desks — the same order the harness `desk_lead` resolver searches.
-            // The general desk is not listed beside General — it IS General.
-            // `[company].general_desk` names the desk the company's own line
-            // resolves to, so projecting it as its own channel puts the same
-            // room in the sidebar twice: once as the main thread everybody
-            // already has, once under whatever id the manifest gave it. Same
-            // reasoning, and same `is_general_chat` shape, as the overlay-desk
-            // exclusion below.
-            let general_desk = record.manifest.company.general_desk.clone();
+            // #general first, then manifest (blueprint) desks, then
+            // operator-created overlay desks — the same order the harness
+            // `desk_lead` resolver searches.
+            let router = crate::hive::routing::host_router();
             let manifest_desks = record
                 .manifest
                 .group_chats
                 .iter()
-                .filter(move |chat| general_desk.as_deref() != Some(chat.id.as_str()))
+                .filter(|chat| !crate::ports::general_channel::is_general_spelling(&chat.id))
                 .map(|chat| {
                     let members = record.effective_desk_members(&chat.id);
                     // The overlay subset: effective members not declared in the
@@ -229,6 +257,8 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                         .collect();
                     DeskDto {
                         id: chat.id.clone(),
+                        kind: DeskKind::Desk,
+                        mutable: true,
                         name: chat.name.clone(),
                         description: chat.description.clone(),
                         members,
@@ -237,26 +267,15 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                         // syntax carries no responder field (issue #1835).
                         responder: ResponderMode::Lead,
                         overlay_created: false,
+                        routing: desk_routing_summary(&record, &chat.id, router),
                     }
                 });
-            // An overlay desk whose own **id** is a General spelling is not
-            // projected (issue #1781 review, Codex P2) — the grandfathered
-            // shape `POST .../desks` accepted `general` / `main` ids under
-            // before issue #1743 reserved them. `CompanyRecord::resolve_desk_id`
-            // already excludes exactly this desk from routing (see its own
-            // filter, same `is_general_chat(Some(&d.id))` check), so listing it
-            // here would show the console a desk `buildChannels` treats as the
-            // company-wide line — offering edit/delete controls and a member
-            // list that has nothing to do with where a message to it actually
-            // routes (the built-in `#general`, per `resolve_desk_id`'s
-            // fallback). Nothing is lost by hiding it: its transcript is
-            // already folded into `#general` by `is_general_chat`, and that
-            // channel's membership is the whole roster, a superset of whatever
-            // this desk held.
+            // An overlay desk whose id is a legacy General spelling predates
+            // the reserved-id guard and routes to #general, so it is hidden.
             let overlay_desks = record
                 .overlay_desks
                 .iter()
-                .filter(|desk| !crate::server::chat_history::is_general_chat(Some(&desk.id)))
+                .filter(|desk| !crate::ports::general_channel::is_general_spelling(&desk.id))
                 .map(|desk| {
                     let members = record.effective_desk_members(&desk.id);
                     // For an overlay desk the founding members are `desk.members`;
@@ -268,109 +287,45 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                         .collect();
                     DeskDto {
                         id: desk.id.clone(),
+                        kind: DeskKind::Desk,
+                        mutable: true,
                         name: desk.name.clone(),
                         description: desk.description.clone(),
                         members,
                         overlay_members,
                         responder: desk.responder,
                         overlay_created: true,
+                        routing: desk_routing_summary(&record, &desk.id, router),
                     }
                 });
-            manifest_desks.chain(overlay_desks).collect()
+            let general = &record.general_channel;
+            let general = DeskDto {
+                id: general.id.clone(),
+                kind: DeskKind::General,
+                mutable: false,
+                name: general.name.clone(),
+                description: None,
+                members: general.members.clone(),
+                overlay_members: Vec::new(),
+                responder: ResponderMode::Lead,
+                overlay_created: false,
+                routing: None,
+            };
+            std::iter::once(general)
+                .chain(manifest_desks)
+                .chain(overlay_desks)
+                .collect()
         })
         // A company that failed to load surfaces no desks — the console falls
-        // back to its static default threads (issue #1757 rework: the Operator
-        // feed is its own surface now, fetched through `GET
-        // {scope}/operator-channel` rather than injected here).
+        // back to its static default threads.
         .unwrap_or_default();
     Ok(Json(desks))
 }
 
-/// The identity of the company's always-present, durable Operator feed
-/// (issue #1757 rework). Mirrors `OperatorChannelDto` in
-/// `frontend/src/api/types.ts`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OperatorChannelDto {
-    /// The channel id — the `desk` query param `GET
-    /// {scope}/chat/history?desk=<id>` reads its transcript through.
-    id: String,
-    /// Always "Operator" — the console's pinned-row label.
-    name: String,
-    /// The channel's purpose line, shown under the name in the pinned row.
-    description: String,
-}
-
-/// `GET {scope}/operator-channel` — the identity of the company's dedicated,
-/// durable Operator feed: where "what happened and what needs you" workflow
-/// reports and the owner/no-mailbox fallback land. A pinned surface, not a
-/// desk — the console renders it as its own row below a divider rather than
-/// folding it into `GET {scope}/desks`, and it carries no member or mutation
-/// routes.
-///
-/// `id` resolves through
-/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel)
-/// — ordinarily [`OPERATOR_CHANNEL`](crate::runtime::OPERATOR_CHANNEL), or
-/// [`OPERATOR_CHANNEL_COLLISION_FALLBACK`](crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK)
-/// for the one grandfathered company shape where a roster teammate already
-/// owns that id — so this and delivery
-/// (`workflows::delivery::send_to_channel_adapter`) always agree on where the
-/// feed lives. A company with no record yet still gets the default id, so the
-/// console always has a channel to point its history read at — but a store
-/// read failure is propagated as an error rather than silently answered with
-/// the default id: for the grandfathered collision-fallback company, treating
-/// a transient failure as "no record" would label the operator's real
-/// `operator-feed` transcript as `operator` while delivery keeps targeting the
-/// collision-aware address once the store recovers.
-async fn operator_channel(
-    scope: ScopedCompany,
-) -> Result<Json<OperatorChannelDto>, crate::server::Rejection> {
-    let id = scope
-        .runtime
-        .store()
-        .load(scope.id())
-        .await?
-        .map(|record| record.operator_feed_channel().to_string())
-        .unwrap_or_else(|| crate::runtime::OPERATOR_CHANNEL.to_string());
-    Ok(Json(OperatorChannelDto {
-        id,
-        name: "Operator".to_string(),
-        description: "Workflow reports and notifications — what happened and what needs you"
-            .to_string(),
-    }))
-}
-
-/// Whether `desk_id` names the built-in `#general` channel rather than a desk
-/// (issue #1743; restored PR #1781 review, CodeRabbit P2 — see below).
-///
-/// `#general` is the company-wide conversation this host has always folded
-/// every General spelling into — `general`, `General`, `main`, and the empty
-/// string all name it, which is exactly what
-/// [`is_general_chat`](crate::server::chat_history::is_general_chat) decides.
-/// It is deliberately **not** a desk: it has no lead, no hierarchy, and its
-/// membership is the whole roster derived at read time, so there is nothing
-/// for a desk mutation to change.
-///
-/// Guarded on **manifest** desks only, not `desk_exists` (id in manifest *or*
-/// overlay) as this predicate's original `da98130c1` shape checked: a company
-/// whose blueprint really does declare a `[[group_chat]]` with one of those
-/// ids keeps behaving exactly as it did, but an *overlay* desk can only ever
-/// hold a reserved id by predating the id/name guards `create_desk` has
-/// carried since `da98130c1` and `16dcce235` — the exact grandfathered shape
-/// `list_desks` and [`CompanyRecord::resolve_desk_id`] already keep out of the
-/// desk list and out of routing (`0c07873db`). Treating it as a real,
-/// mutable desk here would contradict that: every other surface already
-/// agrees it shadows General, not that it is a desk.
-///
-/// That read/list-side exclusion (`0c07873db`) is where the gap actually
-/// starts: this mutation-side guard (originally `da98130c1`) was dropped by
-/// an unrelated refactor (`3cbdb7a5f`) and never restored alongside it — a
-/// direct `POST`/`DELETE`/`PUT` to `.../desks/{id}` could still staff,
-/// reorder, or delete a desk no read surface exposes, and a write against a
-/// bare General spelling with no legacy overlay row regressed from this 409
-/// to a misleading 404.
+/// Whether `desk_id` names #general, whose membership, order and existence
+/// are not editable. Legacy General spellings name it too.
 fn is_general_channel(record: &CompanyRecord, desk_id: &str) -> bool {
-    crate::server::chat_history::is_general_chat(Some(desk_id))
+    crate::ports::general_channel::is_general_spelling(desk_id)
         && !record.manifest.group_chats.iter().any(|c| c.id == desk_id)
 }
 
@@ -501,154 +456,12 @@ async fn journal_structural(scope: &ScopedCompany, event: CompanyEvent) {
     }
 }
 
-/// One desk's move grammar, as the console renders and edits it.
-///
-/// Two shapes in one payload, and the split is the point:
-///
-/// - `declared` is the block **as authored** — every field an `Option` whose
-///   `None` means "not said". It is what a `PUT` round-trips.
-/// - `effective` is what the runtime will actually use, with every default
-///   resolved against the current membership.
-///
-/// One number could not carry both. `turn_budget = 9` on a three-seat desk is
-/// either an operator's decision or the derived `3 x members`, and the two
-/// behave differently the moment somebody joins — so a console showing a single
-/// figure cannot say whether adding a seat will change it.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeskHiveDto {
-    desk_id: String,
-    /// `"overlay"` when an operator installed this, `"manifest"` when the
-    /// blueprint declares it, `"default"` when neither does.
-    source: &'static str,
-    /// Whether an episode would actually open right now.
-    ///
-    /// A one-member desk with `enabled = true` is still `false`: the flag says
-    /// what the operator wants, not what the desk is able to do, and a console
-    /// that showed "deliberates" for a desk of one would be describing a room
-    /// that cannot exist.
-    deliberates: bool,
-    /// The block as authored. Snake_case, deliberately: this field **is** the
-    /// manifest block, the console's editor edits it directly, and a camelCase
-    /// twin would be a second shape to keep in step with the TOML.
-    declared: crate::hivemind::HiveConfig,
-    effective: EffectiveHiveDto,
-    /// Every move a table may name, and the three no table can take away.
-    move_kinds: &'static [&'static str],
-    ungated_kinds: &'static [&'static str],
-    seats: Vec<HiveSeatDto>,
-    /// How many seats may deposit a distinct supporter, and whether that clears
-    /// the effective quorum.
-    ///
-    /// `!propose` counts here, because in the fold a proposal is already its own
-    /// author's support. When `reaches_quorum` is false the desk answers with a
-    /// single responder however much the room agrees — `desk_episode` declines —
-    /// and the console has to be able to say so.
-    eligible_supporters: u32,
-    reaches_quorum: bool,
-}
-
-/// What the runtime will use, with every default resolved.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EffectiveHiveDto {
-    turn_budget: u32,
-    quorum: u32,
-    blind_round: bool,
-    dominance_cap: u32,
-    repetition_cap: u32,
-    require_grounded: bool,
-    require_evidential: bool,
-    refutation_cap: Option<u32>,
-}
-
-/// One seat, and the moves it may open a line with.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HiveSeatDto {
-    agent_id: String,
-    label: String,
-    role: String,
-    /// Already in `MOVE_KINDS` order and already unioned with the ungated three,
-    /// so the console renders this verbatim rather than re-deriving it.
-    moves: Vec<&'static str>,
-    /// Whether the table governs this seat at all.
-    ///
-    /// Invisible from `moves` alone — "named with every kind" and "not named"
-    /// produce the same list, and only one of them is a decision somebody made.
-    governed: bool,
-}
-
-/// Build the payload for one desk.
-fn desk_hive_dto(record: &crate::ports::CompanyRecord, desk_id: &str) -> DeskHiveDto {
-    let config = record.effective_desk_hive(desk_id);
-    let members: Vec<String> = record
-        .effective_desk_members(desk_id)
-        .into_iter()
-        .filter(|id| record.is_roster_agent(id))
-        .collect();
-    let policy = crate::hivemind::HivePolicy::from_config(&config, members.len()).episode;
-    let eligible = members
-        .iter()
-        .filter(|id| config.may(id, "support") || config.may(id, "propose"))
-        .count();
-    let seats = members
-        .iter()
-        .map(|id| {
-            let agent = record.effective_agents().into_iter().find(|a| &a.id == id);
-            HiveSeatDto {
-                agent_id: id.clone(),
-                label: agent
-                    .as_ref()
-                    .and_then(|a| a.name.clone())
-                    .unwrap_or_else(|| id.clone()),
-                role: agent.map(|a| a.role.clone()).unwrap_or_default(),
-                moves: config.moves_for(id),
-                governed: config.moves.get(id).is_some_and(|kinds| !kinds.is_empty()),
-            }
-        })
-        .collect();
-    let source = if record.desk_hive_is_installed(desk_id) {
-        "overlay"
-    } else if record
-        .manifest
-        .group_chats
-        .iter()
-        .any(|group| group.id == desk_id)
-    {
-        "manifest"
-    } else {
-        "default"
-    };
-    DeskHiveDto {
-        desk_id: desk_id.to_string(),
-        source,
-        deliberates: config.deliberates(members.len()),
-        effective: EffectiveHiveDto {
-            turn_budget: policy.turn_budget,
-            quorum: policy.quorum.threshold,
-            blind_round: policy.blind_round,
-            dominance_cap: policy.dominance_cap,
-            repetition_cap: policy.repetition_cap,
-            require_grounded: policy.quorum.require_grounded,
-            require_evidential: policy.quorum.require_evidential,
-            refutation_cap: policy.quorum.refutation_cap,
-        },
-        declared: config,
-        move_kinds: crate::hivemind::MOVE_KINDS,
-        ungated_kinds: crate::hivemind::UNGATED_KINDS,
-        eligible_supporters: u32::try_from(eligible).unwrap_or(u32::MAX),
-        reaches_quorum: u32::try_from(eligible)
-            .is_ok_and(|eligible| eligible >= policy.quorum.threshold),
-        seats,
-    }
-}
-
-/// `GET {scope}/desks/{desk_id}/hive` — the move grammar in force on a desk.
-async fn desk_hive(
+/// `GET {scope}/desks/{desk_id}/routing` — the routing block in force on a
+/// desk, the resolved numbers, and the seats the router may pick.
+async fn desk_routing(
     scope: ScopedCompany,
     Path(DeskPath { desk_id }): Path<DeskPath>,
-) -> Result<Json<DeskHiveDto>, ApiError> {
+) -> Result<Json<crate::hive::routing::DeskRoutingDto>, ApiError> {
     let record = scope
         .runtime
         .store()
@@ -660,31 +473,31 @@ async fn desk_hive(
             "desk {desk_id}"
         ))));
     }
-    Ok(Json(desk_hive_dto(&record, &desk_id)))
+    Ok(Json(crate::hive::routing::desk_routing_dto(
+        &record,
+        &desk_id,
+        crate::hive::routing::host_router(),
+    )))
 }
 
-/// `PUT {scope}/desks/{desk_id}/hive` — install or replace a desk's move
-/// grammar, without rewriting the version-controlled `[[group_chat]]` block.
+/// `PUT {scope}/desks/{desk_id}/routing` — install or replace a desk's
+/// routing block, without rewriting the version-controlled `[[group_chat]]`
+/// block.
 ///
-/// The body is a bare `HiveConfig` — the manifest block verbatim. Unknown fields
-/// are ignored rather than refused, so a newer console against an older server
-/// degrades instead of 400-ing.
+/// The body is a bare `RoutingConfig` — the manifest block verbatim. Unknown
+/// fields are ignored rather than refused, so a newer console against an
+/// older server degrades instead of 400-ing. The same checks the manifest
+/// loader applies (`RoutingConfig::problems`) apply here, so the runtime
+/// cannot accept a block `company.toml` would refuse.
 ///
-/// **Validated against the desk's *effective* roster**, not its declared one, so
-/// overlay additions and Team-API retirements are what the table is judged by.
-/// That can legitimately refuse a config the manifest would have accepted — a
-/// table valid when `company.toml` was written stops being valid once a seat
-/// retires — which is why the message names the desk.
-///
-/// An episode already running is unaffected: `EpisodeDriver` holds its
-/// `HiveDesk` as a snapshot for the episode's life, so a room cannot have its
-/// quorum moved underneath it mid-argument. The change takes effect on the next
-/// message that opens one.
-async fn set_desk_hive(
+/// An episode already running is unaffected: the driver froze its policy when
+/// it opened, so a room cannot have its round width moved underneath it
+/// mid-round. The change takes effect on the next message that opens one.
+async fn set_desk_routing(
     scope: ScopedCompany,
     Path(DeskPath { desk_id }): Path<DeskPath>,
-    Json(body): Json<crate::hivemind::HiveConfig>,
-) -> Result<Json<DeskHiveDto>, ApiError> {
+    Json(body): Json<crate::hive::routing::RoutingConfig>,
+) -> Result<Json<crate::hive::routing::DeskRoutingDto>, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
     // The same load-modify-save serialization every desk write takes; see
     // `add_desk_member` for why `serial` alone is not enough.
@@ -706,28 +519,20 @@ async fn set_desk_hive(
             "desk {desk_id}"
         ))));
     }
-    let members: Vec<String> = record
-        .effective_desk_members(&desk_id)
-        .into_iter()
-        .filter(|id| record.is_roster_agent(id))
-        .collect();
-    // The manifest's own checks, on the manifest's own words — one
-    // implementation, so the runtime cannot accept what a `company.toml` with
-    // the same block would be refused for.
-    let problems = crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
+    let problems = body.problems(&format!("desk `{desk_id}`"));
     if !problems.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             problems.join(" "),
         )));
     }
-    record.upsert_desk_hive(crate::ports::types::DeskHiveOverride {
+    record.upsert_desk_hive(crate::ports::types::DeskRoutingOverride {
         desk_id: desk_id.clone(),
         hive: body,
     });
     scope.runtime.store().save(&record).await?;
     journal_structural(
         &scope,
-        CompanyEvent::DeskHiveConfigured {
+        CompanyEvent::DeskRoutingConfigured {
             desk_id: desk_id.clone(),
             reset: false,
             by: scope.actor.clone(),
@@ -736,18 +541,22 @@ async fn set_desk_hive(
     .await;
     // The derived result of what was just installed, so the console renders the
     // effective numbers without a second round trip.
-    Ok(Json(desk_hive_dto(&record, &desk_id)))
+    Ok(Json(crate::hive::routing::desk_routing_dto(
+        &record,
+        &desk_id,
+        crate::hive::routing::host_router(),
+    )))
 }
 
-/// `DELETE {scope}/desks/{desk_id}/hive` — drop the installed grammar and fall
-/// back to whatever the manifest declares.
+/// `DELETE {scope}/desks/{desk_id}/routing` — drop the installed block and
+/// fall back to whatever the manifest declares.
 ///
 /// Because the override is a sibling collection rather than a merged field,
 /// "restore the blueprint's version" is a `retain` and nothing else.
-async fn reset_desk_hive(
+async fn reset_desk_routing(
     scope: ScopedCompany,
     Path(DeskPath { desk_id }): Path<DeskPath>,
-) -> Result<Json<DeskHiveDto>, ApiError> {
+) -> Result<Json<crate::hive::routing::DeskRoutingDto>, ApiError> {
     let _guard = scope.runtime.serial.lock().await;
     let write_lock = company_write_lock(scope.id());
     let _write_guard = write_lock.lock().await;
@@ -762,13 +571,11 @@ async fn reset_desk_hive(
             "desk {desk_id}"
         ))));
     }
-    // A reset with nothing installed is not an error: the caller asked for the
-    // manifest's grammar and the manifest's grammar is what they now have.
     if record.clear_desk_hive(&desk_id) {
         scope.runtime.store().save(&record).await?;
         journal_structural(
             &scope,
-            CompanyEvent::DeskHiveConfigured {
+            CompanyEvent::DeskRoutingConfigured {
                 desk_id: desk_id.clone(),
                 reset: true,
                 by: scope.actor.clone(),
@@ -776,7 +583,75 @@ async fn reset_desk_hive(
         )
         .await;
     }
-    Ok(Json(desk_hive_dto(&record, &desk_id)))
+    Ok(Json(crate::hive::routing::desk_routing_dto(
+        &record,
+        &desk_id,
+        crate::hive::routing::host_router(),
+    )))
+}
+
+/// `GET {scope}/episodes?desk&status&limit` — the episodes a company ran or
+/// is running, newest first (plan hive-desks, Phase 4).
+///
+/// Folded from the journal's episode record on every call; the room does not
+/// read this (it folds episodes out of the transcript and the live frames),
+/// the measurement script and a reloaded Observatory do.
+async fn list_episodes(
+    scope: ScopedCompany,
+    Query(query): Query<EpisodesQuery>,
+) -> Result<Json<Vec<crate::hive::episode_store::EpisodeDto>>, ApiError> {
+    let status = match query.status.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some("open") => Some(crate::hive::episode_store::EpisodeStatus::Open),
+        Some("completed") => Some(crate::hive::episode_store::EpisodeStatus::Completed),
+        Some(other) => {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`status` must be `open` or `completed`, not `{other}`"
+            ))));
+        }
+    };
+    let desk = match query.desk.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(key) => {
+            let record = scope
+                .runtime
+                .store()
+                .load(scope.id())
+                .await?
+                .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+            Some(
+                record
+                    .resolve_desk_id(key)
+                    .unwrap_or_else(|| key.to_string()),
+            )
+        }
+    };
+    let limit = query
+        .limit
+        .unwrap_or(EPISODES_DEFAULT_LIMIT)
+        .clamp(1, EPISODES_MAX_LIMIT);
+    let episodes = crate::hive::episode_store::list_episodes(
+        scope.runtime.events().as_ref(),
+        scope.id(),
+        desk.as_deref(),
+        status,
+        limit,
+    )
+    .await?;
+    Ok(Json(episodes))
+}
+
+/// Episodes returned when `limit` is not given.
+const EPISODES_DEFAULT_LIMIT: usize = 50;
+/// The most episodes one call returns.
+const EPISODES_MAX_LIMIT: usize = 500;
+
+/// `GET {scope}/episodes` query.
+#[derive(Debug, Deserialize)]
+struct EpisodesQuery {
+    desk: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
 }
 
 /// `PUT {scope}/desks/{desk_id}/order` — set the operator's explicit member
@@ -1068,11 +943,9 @@ async fn create_desk(
     // The **display name** is reserved for the same reason and not a weaker
     // one: `resolve_desk_id` matches a desk by id *or* by case-insensitive
     // name, so `{"id": "ops", "name": "General"}` shadows the channel just as
-    // thoroughly — `everyone_desk` folds the built-in `main` thread to
-    // `General`, that lookup then selects this desk, and `@everyone` on the
-    // company-wide line expands to its members instead of the roster.
-    if crate::server::chat_history::is_general_chat(Some(&id))
-        || crate::server::chat_history::is_general_chat(Some(&name))
+    // thoroughly.
+    if crate::ports::general_channel::is_general_spelling(&id)
+        || crate::ports::general_channel::is_general_spelling(&name)
     {
         return Err(ApiError(OpenCompanyError::Conflict(
             language::GENERAL_CHANNEL_RESERVED.to_string(),
@@ -1106,24 +979,12 @@ async fn create_desk(
     // straight through. Fixed (issue #1781 review, Codex P1 follow-up):
     // `ensure_desk_writable` now resolves the raw selector through
     // `resolve_desk_id` first, so it agrees with the read path on which desk
-    // a caller meant. The fallback address
-    // (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
-    // is reserved by name for the identical reason `316bc9229` reserved it on
-    // the manifest side — `resolve_desk` folds a `?desk=` selector against it
-    // the same way — but not by id: `is_valid_desk_id` above already rejects
-    // any hyphen, so no `id` can ever equal the hyphenated fallback constant.
+    // a caller meant.
     if id == crate::runtime::OPERATOR_CHANNEL
         || name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL)
     {
         return Err(ApiError(OpenCompanyError::Conflict(
             "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
-                .to_string(),
-        )));
-    }
-    if name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            "the name \"operator-feed\" is reserved for the built-in Operator channel's \
-             fallback feed — choose a different name"
                 .to_string(),
         )));
     }
@@ -1167,9 +1028,9 @@ async fn create_desk(
         description: description.clone(),
         members: members.clone(),
         responder: body.responder,
-        // A desk created here starts with no hive block of its own and takes
-        // the defaults, exactly as a manifest desk that declares none does.
-        hive: crate::hivemind::HiveConfig::default(),
+        // A desk created here starts with no routing block of its own and
+        // takes the defaults, exactly as a manifest desk that declares none.
+        hive: crate::hive::routing::RoutingConfig::default(),
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -1185,16 +1046,20 @@ async fn create_desk(
     .await;
 
     let effective = record.effective_desk_members(&id);
+    let routing = desk_routing_summary(&record, &id, crate::hive::routing::host_router());
     Ok((
         StatusCode::CREATED,
         Json(DeskDto {
             id,
+            kind: DeskKind::Desk,
+            mutable: true,
             name,
             description,
             members: effective,
             overlay_members: Vec::new(),
             responder: body.responder,
             overlay_created: true,
+            routing,
         }),
     ))
 }
@@ -1240,18 +1105,6 @@ async fn delete_desk(
         return Err(ApiError(OpenCompanyError::Conflict(
             language::MANIFEST_DESK_DELETE.to_string(),
         )));
-    }
-    // Tombstone the operator-feed divert before it can be lost (issue #1781
-    // review, Codex P2): `operator_feed_channel` currently diverts only while
-    // *something* live holds the id or display name `operator`, and the desk
-    // this call is about to remove may be that something. Recorded here,
-    // before the removal, while the live check can still see it — see
-    // `CompanyRecord::divert_operator_feed_permanently`'s doc for why this
-    // has to survive the desk being gone.
-    if record.operator_feed_channel()
-        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
-    {
-        record.divert_operator_feed_permanently();
     }
     let before = record.overlay_desks.len();
     record.overlay_desks.retain(|d| d.id != desk_id);
@@ -1402,10 +1255,14 @@ async fn company_events(
     let authors: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> = Arc::new(
         std::sync::RwLock::new(author_labels(&scope.runtime).await.unwrap_or_default()),
     );
+    let names = Arc::new(std::sync::RwLock::new(
+        crate::server::readable::DisplayNames::load(&scope.runtime).await,
+    ));
     let (cancel, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     let label_refresh = {
         let runtime = scope.runtime.clone();
         let shared = Arc::clone(&authors);
+        let shared_names = Arc::clone(&names);
         let is_admin_cell = Arc::clone(&is_admin);
         let actor = scope.actor.clone();
         tokio::spawn(async move {
@@ -1422,6 +1279,13 @@ async fn company_events(
                     *shared
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+                }
+                if let Some(fresh_names) =
+                    crate::server::readable::DisplayNames::try_load(&runtime).await
+                {
+                    *shared_names
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh_names;
                 }
                 let previous = is_admin_cell.load(std::sync::atomic::Ordering::Relaxed);
                 let refreshed = refreshed_is_admin(&runtime, actor.as_ref(), previous).await;
@@ -1443,6 +1307,7 @@ async fn company_events(
         // Keep the teardown guard alive for the life of the stream.
         let _ = &guard;
         let authors = Arc::clone(&authors);
+        let names = Arc::clone(&names);
         let is_admin_cell = Arc::clone(&is_admin);
         let runtime = runtime.clone();
         let actor = actor.clone();
@@ -1453,7 +1318,10 @@ async fn company_events(
             let authors = authors
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            project_stream_item_for_viewer(&item, &authors, &viewer, is_admin)
+            let names = names
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            project_stream_item_for_viewer(&item, &authors, &names, &viewer, is_admin)
                 .map(|value| Ok(Event::default().data(value.to_string())))
         }
     });
@@ -1554,12 +1422,13 @@ async fn is_admin_for_item(
 fn project_stream_item_for_viewer(
     item: &EventStreamItem,
     authors: &std::collections::HashMap<String, String>,
+    names: &crate::server::readable::DisplayNames,
     viewer: &Viewer,
     is_admin: bool,
 ) -> Option<serde_json::Value> {
     match item {
         EventStreamItem::Event(stored) => {
-            project_event_for_viewer(stored, authors, viewer, is_admin)
+            project_event_for_viewer(stored, authors, names, viewer, is_admin)
         }
         EventStreamItem::Gap { missed } => Some(serde_json::json!({
             "type": "stream_gap",
@@ -1594,6 +1463,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
     project_event_for_viewer(
         stored,
         &std::collections::HashMap::new(),
+        &crate::server::readable::DisplayNames::default(),
         &Viewer::Operator,
         true,
     )
@@ -1611,6 +1481,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
 fn project_event_for_viewer(
     stored: &StoredEvent,
     authors: &std::collections::HashMap<String, String>,
+    names: &crate::server::readable::DisplayNames,
     viewer: &Viewer,
     is_admin: bool,
 ) -> Option<serde_json::Value> {
@@ -1634,6 +1505,8 @@ fn project_event_for_viewer(
             task_id,
             parent,
             mentions,
+            audience,
+            episode,
             ..
         } => {
             // See this fn's doc: an owner-fallback report is admin-only, live
@@ -1644,29 +1517,12 @@ fn project_event_for_viewer(
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            // The same pair `MessageView` ships on reload: the operator-facing
-            // body, and the body as the model wrote it. They differ only on a
-            // desk that deliberates, where `readable_moves` turns
-            // `!support #topic ^3` into prose — see `MessageView::cue_text`.
-            //
-            // Order matters here, and cost a PR to learn: the grammar has to
-            // reach `cueText` before `text` may lose it. The fold reads the
-            // room's moves to know an episode happened at all, so cleaning
-            // `text` while it was the only body on this frame took the
-            // deliberation panel with it.
+            // The same pair `MessageView` ships on reload: the body as the
+            // model wrote it, and the body a person reads. The journal and
+            // every agent-facing reader keep the first.
             o["cueText"] = json!(text);
-            // What the operator reads, rewritten exactly as the reload already
-            // rewrites it. A room's grammar is addressed to the fold, and the
-            // journal keeps it — a room whose own transcript had been cleaned
-            // could not count itself — so this lives at the display edge and
-            // nowhere earlier. Every agent-facing path (`EpisodePrompt`,
-            // `elsewhere_for`, `referral_prompt`, `chat_seed`) still reads the
-            // stored line, which is how a seat can cite `^16` against a row it
-            // can identify.
-            //
-            // A reply carrying no move is returned unchanged, which is every
-            // reply on every desk that does not deliberate.
-            o["text"] = json!(crate::server::chat_history::readable_moves(text.clone()));
+            let body = crate::server::readable::project_reply(text, mentions, names);
+            o["text"] = json!(body.text);
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -1690,6 +1546,22 @@ fn project_event_for_viewer(
             if let Some(parent) = parent {
                 o["parentId"] = json!(parent.value().to_string());
             }
+            // **The episode this row belongs to**, when it belongs to one.
+            //
+            // The episode fold drops any frame that does not name an episode.
+            // That is right for an ordinary chat reply and wrong for this
+            // one: a row in a pair channel is a line of an exchange two seats
+            // are having inside an episode, and this frame is the only
+            // carrier those lines have -- the desk never shows them, so a
+            // reload was the only way to see what had been said. Without it
+            // the indicator can say an exchange opened and never that
+            // anything was said in it.
+            if let Some(episode) = episode.as_ref() {
+                o["episodeId"] = json!(episode.id);
+                // What the row committed, for the fold to tell a line of an
+                // exchange from the conclusion that restates its last one.
+                o["utteranceKind"] = json!(episode.kind);
+            }
             // Scrubbed timeline (same shape the POST body carries); omitted
             // when empty so a tool-less reply's wire form is unchanged.
             if !steps.is_empty() {
@@ -1706,7 +1578,10 @@ fn project_event_for_viewer(
             // Project the same viewer-relative metadata as chat/history. The
             // stream must carry complete ChatMentionDto values because the live
             // row is already durable and hydration intentionally skips it.
-            let projected = project_mentions(mentions, authors, viewer);
+            let mut projected = project_mentions(mentions, authors, viewer);
+            for mention in &mut projected {
+                mention.offset = body.offset(mention.offset);
+            }
             if !projected.is_empty() {
                 o["mentions"] = json!(
                     projected
@@ -1714,6 +1589,16 @@ fn project_event_for_viewer(
                         .map(ChatMentionDto::from)
                         .collect::<Vec<_>>()
                 );
+            }
+            // Plan hive-desks, Phase 4: the same `episode` and `audience` the
+            // reload projects, so a live row and its rehydrated twin fold into
+            // the same round. Omitted outside an episode, so the legacy frame
+            // is unchanged for every other reply.
+            if let Some(episode) = episode {
+                o["episode"] = episode_json(episode);
+            }
+            if !audience.is_empty() {
+                o["audience"] = json!(audience);
             }
             o
         }
@@ -1826,7 +1711,12 @@ fn project_event_for_viewer(
             from_desk,
             trigger_sequence,
             to_desk,
+            target,
+            asker,
+            conversation,
             returning,
+            episode_id,
+            to_episode_id,
             ..
         } => {
             let mut o = envelope("referral");
@@ -1849,10 +1739,24 @@ fn project_event_for_viewer(
             // to find what changed.
             o["sequence"] = json!(trigger_sequence);
             o["toDesk"] = json!(to_desk);
+            o["target"] = json!(target);
+            o["asker"] = json!(asker);
+            // A pair thread exists only for a person-to-person crossing; on a
+            // desk crossing `target` is merely the room's first eligible seat.
+            o["direct"] = json!(conversation.is_some());
             // Which leg this is, read the same way `ReferredFrom::returning`
             // is: a return is the one that completes the exchange, so a console
             // that only wants to re-read once can wait for it.
             o["returning"] = json!(returning);
+            // The episode on the asking desk that raised the crossing, and
+            // the one opened on the far desk to answer it (plan hive-desks,
+            // Phase 6). Omitted on a pair DM and on older markers.
+            if let Some(episode_id) = episode_id {
+                o["episodeId"] = json!(episode_id);
+            }
+            if let Some(to_episode_id) = to_episode_id {
+                o["toEpisodeId"] = json!(to_episode_id);
+            }
             o
         }
         CompanyEvent::DeskTaskCompleted {
@@ -2044,10 +1948,212 @@ fn project_event_for_viewer(
             o["removed"] = json!(removed);
             o
         }
-        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
-            let mut o = envelope("desk_hive_configured");
+        CompanyEvent::DeskRoutingConfigured { desk_id, reset, .. } => {
+            let mut o = envelope("desk_routing_configured");
             o["deskId"] = json!(desk_id);
             o["reset"] = json!(reset);
+            o
+        }
+        // Plan hive-desks, Phase 4: the episode record, projected one frame
+        // per journal row so a console draws the round band live and rebuilds
+        // the same shape from `chat/history`'s `episode` field on reload.
+        // Every frame carries `chatId` (the desk) and `episodeId`.
+        CompanyEvent::EpisodeOpened {
+            chat_id,
+            episode_id,
+            opened_by_seq,
+            parent,
+            participants,
+            plan,
+            ..
+        } => {
+            let mut o = envelope("episode_opened");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["openedBySeq"] = json!(opened_by_seq);
+            if let Some(parent) = parent {
+                o["parentId"] = json!(parent.value().to_string());
+            }
+            o["participants"] = json!(participants);
+            o["plan"] = json!(plan);
+            o
+        }
+        CompanyEvent::RoundStarted {
+            chat_id,
+            episode_id,
+            revision,
+            agent_ids,
+        } => {
+            let mut o = envelope("round_started");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["revision"] = json!(revision);
+            o["agentIds"] = json!(agent_ids);
+            o
+        }
+        CompanyEvent::RoundCommitted {
+            chat_id,
+            episode_id,
+            revision,
+            utterances,
+            actions,
+        } => {
+            let mut o = envelope("round_committed");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["revision"] = json!(revision);
+            o["utterances"] = json!(
+                utterances
+                    .iter()
+                    .map(|utterance| {
+                        let mut u = json!({
+                            "agentId": utterance.agent_id,
+                            "sequence": utterance.sequence,
+                            "kind": utterance.kind,
+                        });
+                        if let Some(message_seq) = utterance.message_seq {
+                            u["messageSeq"] = json!(message_seq);
+                        }
+                        if !utterance.to.is_empty() {
+                            u["to"] = json!(utterance.to);
+                        }
+                        u
+                    })
+                    .collect::<Vec<_>>()
+            );
+            o["actions"] = json!(actions);
+            o
+        }
+        CompanyEvent::BroadcastRouted {
+            chat_id,
+            episode_id,
+            revision,
+            agent_id,
+            message_seq,
+            plan,
+            probabilities,
+            router,
+        } => {
+            let mut o = envelope("broadcast_routed");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["revision"] = json!(revision);
+            o["agentId"] = json!(agent_id);
+            o["messageSeq"] = json!(message_seq);
+            o["plan"] = json!(plan);
+            if let Some(probabilities) = probabilities {
+                o["probabilities"] = json!(probabilities);
+            }
+            o["router"] = json!(router);
+            o
+        }
+        CompanyEvent::DmDelivered {
+            chat_id,
+            episode_id,
+            from,
+            to,
+            message_seq,
+        } => {
+            let mut o = envelope("dm_delivered");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["from"] = json!(from);
+            o["to"] = json!(to);
+            o["messageSeq"] = json!(message_seq);
+            o
+        }
+        // The desk's reference to a private exchange. Deliberately carries
+        // no text: the question and the answer live in the pair channel, and
+        // this row exists so the desk can say two seats are talking and
+        // where, not so it can quote them.
+        CompanyEvent::ConversationOpened {
+            chat_id,
+            episode_id,
+            conversation_id,
+            root,
+            asker,
+            askee,
+        } => {
+            let mut o = envelope("conversation_opened");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["conversationId"] = json!(conversation_id);
+            o["root"] = json!(root);
+            o["asker"] = json!(asker);
+            o["askee"] = json!(askee);
+            o
+        }
+        CompanyEvent::ConversationConcluded {
+            chat_id,
+            episode_id,
+            conversation_id,
+            root,
+            asker,
+            askee,
+            forced,
+        } => {
+            let mut o = envelope("conversation_concluded");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["conversationId"] = json!(conversation_id);
+            o["root"] = json!(root);
+            o["asker"] = json!(asker);
+            o["askee"] = json!(askee);
+            // A conversation that ran out of turns concluded without an
+            // answer. An indicator that only watched for one would hang on
+            // exactly this case.
+            o["forced"] = json!(forced);
+            o
+        }
+        CompanyEvent::EpisodeCompleted {
+            chat_id,
+            episode_id,
+            revision,
+            completed_by,
+            rounds,
+            reason,
+            summary_seq,
+        } => {
+            let mut o = envelope("episode_completed");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["revision"] = json!(revision);
+            if let Some(completed_by) = completed_by {
+                o["completedBy"] = json!(completed_by);
+            }
+            o["rounds"] = json!(rounds);
+            o["reason"] = json!(reason);
+            if let Some(summary_seq) = summary_seq {
+                o["summarySeq"] = json!(summary_seq);
+            }
+            o
+        }
+        CompanyEvent::EpisodeSeatParked {
+            chat_id,
+            episode_id,
+            seat,
+            thread,
+            approval_ids,
+        } => {
+            let mut o = envelope("episode_seat_parked");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["seat"] = json!(seat);
+            if let Some(thread) = thread {
+                o["thread"] = json!(thread);
+            }
+            o["approvalIds"] = json!(approval_ids);
+            o
+        }
+        CompanyEvent::EpisodeSeatResumed {
+            chat_id,
+            episode_id,
+            seat,
+        } => {
+            let mut o = envelope("episode_seat_resumed");
+            o["chatId"] = json!(chat_id);
+            o["episodeId"] = json!(episode_id);
+            o["seat"] = json!(seat);
             o
         }
         // Issue #276: a workflow armed or paused, so a console holding the
@@ -2258,6 +2364,9 @@ fn project_event_for_viewer(
             turn_id,
             chat_id,
             parent,
+            agent_id,
+            episode_id,
+            round_revision,
             ..
         } => {
             let mut o = envelope("turn_started");
@@ -2269,6 +2378,17 @@ fn project_event_for_viewer(
             if let Some(parent) = parent {
                 o["parentId"] = json!(parent.value().to_string());
             }
+            // The seat and the round, on a hive seat turn (plan hive-desks,
+            // Phase 4); omitted on the chat route's own bracket.
+            if let Some(agent_id) = agent_id {
+                o["agentId"] = json!(agent_id);
+            }
+            if let Some(episode_id) = episode_id {
+                o["episodeId"] = json!(episode_id);
+            }
+            if let Some(round_revision) = round_revision {
+                o["roundRevision"] = json!(round_revision);
+            }
             o
         }
         // The closing bracket. Structural for a sharper reason than its
@@ -2276,9 +2396,61 @@ fn project_event_for_viewer(
         // that can name internals, and this stream is the one place it must
         // not be forwarded to. A console learns *that* the turn is over here
         // and reads *why* from the run row, which is tenant-scoped.
-        CompanyEvent::TurnFailed { turn_id, .. } => {
+        CompanyEvent::TurnFailed {
+            turn_id,
+            agent_id,
+            chat_id,
+            episode_id,
+            round_revision,
+            outcome,
+            ..
+        } => {
             let mut o = envelope("turn_settled");
             o["turnId"] = json!(turn_id);
+            o["outcome"] = json!(
+                outcome
+                    .unwrap_or(crate::ports::types::TurnOutcome::Failed)
+                    .as_str()
+            );
+            if let Some(agent_id) = agent_id {
+                o["agentId"] = json!(agent_id);
+            }
+            if let Some(chat_id) = chat_id {
+                o["chatId"] = json!(chat_id);
+            }
+            if let Some(episode_id) = episode_id {
+                o["episodeId"] = json!(episode_id);
+            }
+            if let Some(round_revision) = round_revision {
+                o["roundRevision"] = json!(round_revision);
+            }
+            o
+        }
+        // The same bracket on success (plan hive-desks, Phase 2): `agentId`
+        // is what lets a console draw one seat's lane in a hive round.
+        CompanyEvent::TurnSettled {
+            turn_id,
+            agent_id,
+            chat_id,
+            episode_id,
+            round_revision,
+            outcome,
+        } => {
+            let mut o = envelope("turn_settled");
+            o["turnId"] = json!(turn_id);
+            o["outcome"] = json!(outcome.as_str());
+            if let Some(agent_id) = agent_id {
+                o["agentId"] = json!(agent_id);
+            }
+            if let Some(chat_id) = chat_id {
+                o["chatId"] = json!(chat_id);
+            }
+            if let Some(episode_id) = episode_id {
+                o["episodeId"] = json!(episode_id);
+            }
+            if let Some(round_revision) = round_revision {
+                o["roundRevision"] = json!(round_revision);
+            }
             o
         }
         // Issue #1015: the push half of attempt status. Structural, and for the
@@ -2382,7 +2554,8 @@ struct ChatMessage {
     /// The operator's message text.
     #[serde(alias = "message")]
     text: String,
-    /// The desk the message is addressed to. Defaults to the "General" desk.
+    /// The desk the message is addressed to. Absent, empty, or any spelling
+    /// of `#general` is normalized to `"general"` by `chat_and_emit`.
     #[serde(default)]
     chat: Option<String>,
     /// The message this one replies to, by its id (issue #364) — a thread reply
@@ -2695,86 +2868,36 @@ async fn run_chat(
     } else {
         None
     };
-    // Deterministic task card, opened only for a message the triage calls
-    // `Track`: an actionable operator request ("build the landing page", "can
-    // you set up the newsletter") opens a `todo` card so "do X" always leaves a
-    // visible work item on the dashboard — independent of whether the
-    // orchestrator model also calls `spawn_task` (it may open sub-tasks on top).
-    // Best-effort: a card write failure must never sink the chat reply.
+    // A card from the composer is opened on ONE signal only: the operator
+    // pressed the control named "Build me the workflow" (issue #845). That is a
+    // positive statement of intent about this message, made by the person who
+    // wrote it.
     //
-    // Issue #267 turned the boolean this used to read into a positive three-way
-    // classification. `Answer` (a question about state, a read request) and
-    // `Chatter` (greetings, acknowledgements, anything ambiguous) both open
-    // nothing here — but they are NOT the same answer, and the difference
-    // matters one layer down: `Answer` additionally takes the model's own
-    // board-writing tools away for the turn, in
-    // `DelegationRunner::handle_operator_message`, because a question was the
-    // other door dead cards came through. This site is Layer A of that pair: it
-    // is compiled into every build and fronts both cognition brains, whereas the
-    // gate is on the harness path only.
+    // There used to be a second, lexical signal here: `task_intent::triage_message`
+    // read the message's words and opened a `todo`/`planning` card whenever it
+    // led with an action verb ("build the landing page", "can you set up the
+    // newsletter"). It is gone, along with its twin on the runtime side
+    // (`DelegationRunner::open_direct_work_card`, which carded anything
+    // "substantial" said to a desk or a teammate). Between them, nearly every
+    // message typed into a desk became a board card that nobody had asked for,
+    // and the agent answering it had no say in the matter. Tracking is now the
+    // agent's own decision, made with a tool call — `spawn_task` opens a card,
+    // and a hand-off through `delegate_to_desk` / `delegate_to_teammate` opens
+    // the card that tracks the hand-off — so a card on the board means an agent
+    // (or the operator, through the console or this control) put it there.
     //
-    // NOT on a workflow copilot thread (issue #416). A copilot question is
-    // phrased at the workflow — "add a node that emails the report", "why does
-    // this fail on Mondays" — and the triage reads the first of those as a
-    // request to the company, which would put a card on the board from a
-    // conversation the operator was having *about a graph*. The confinement in
-    // the harness stops the turn from acting; this stops the route from acting
-    // on its behalf, and it holds in every build because it is here rather than
-    // behind the `openhuman` feature.
+    // The triage itself still runs, one layer down: `handle_operator_message`
+    // reads it to narrow the model's board tools on a question and to take the
+    // cheap chat-only path on a greeting. It just never mints anything.
     //
-    // Issue #845: an explicit `workflow` deliverable opens a card whatever the
-    // triage said. The operator reached for a control **named** "Build me the
-    // workflow" and pressed it — that is a positive statement of intent about
-    // this message, and it is better evidence than a lexical classifier's guess.
-    // Where the two disagreed, the classifier won and the choice was dropped on
-    // the floor: no card, so no builder pass, so nothing built, and no error
-    // either — the operator got a conversational reply to a request they had
-    // asked to be turned into a workflow.
-    //
-    // Deliberately narrow. It does not change what the card *is* (the title
-    // still comes from the triage, or from the message when the triage declined
-    // to name one), it does not touch `Track`'s existing behaviour, and it stays
-    // inside the `!confined` guard — a copilot thread still opens nothing,
-    // because a message *about* a graph is not a request to build one.
+    // NOT on a workflow copilot thread (issue #416): a copilot conversation is
+    // ABOUT one graph, so a message there is never a request to the company to
+    // build one — the confinement in the harness stops the turn from acting,
+    // and this stops the route from acting on its behalf.
     let workflow_requested =
         !confined && message.deliverable == Some(crate::ports::types::MessageIntent::Workflow);
-    // Issue #1152: and the other direction — the operator said this message is
-    // NOT a request for work ("Just chatting"), so no deterministic path may
-    // card it whatever the triage read in the words.
-    //
-    // The operator could already *mint* a card the classifier declined
-    // (`workflow_requested`, above) and could never *withhold* one. That
-    // asymmetry is the bug: a message the triage happens to read as `Track` —
-    // "we should probably rewrite the pricing page some day" — opened a card,
-    // assigned it to a desk, and there was no control anywhere that said
-    // otherwise. This is that control, and it is the same kind of evidence the
-    // override above is: a positive statement by the person who wrote the
-    // message, which is better than a lexical guess about it.
-    //
-    // **No `!confined` term, deliberately.** `workflow_requested` needs one
-    // because it *mints* a card, and minting one on a workflow copilot thread —
-    // a conversation ABOUT one graph — is exactly what #416 suppresses. This
-    // only ever *subtracts*, and on a copilot thread the branch below is already
-    // suppressed, so a `!confined` term here would be inert at best and would
-    // read as though the two were symmetrical.
-    let not_work = message
-        .deliverable
-        .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    // The lexical layer answers two questions at once, and only the first is a
-    // decision: whether this message becomes a card, and — for a host with no
-    // model wired — what to call it. The second is now a fallback. Keeping it
-    // matters: the classifier returns a *tidied* title, so discarding it would
-    // make an offline company's cards worse than before rather than no better.
-    let lexical = (!confined && !not_work)
-        .then(|| crate::company::task_intent::triage_message(&message.text))
-        .and_then(|triage| match triage {
-            crate::company::task_intent::MessageTriage::Track(title) => Some(title),
-            crate::company::task_intent::MessageTriage::Answer
-            | crate::company::task_intent::MessageTriage::Chatter => None,
-        })
-        .or_else(|| {
-            workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
-        })
+    let lexical = workflow_requested
+        .then(|| crate::company::task_intent::to_title(message.text.trim()))
         .filter(|title| !title.trim().is_empty());
     if let Some(lexical) = lexical {
         let title = crate::ports::tasks::mint_task_title(
@@ -2915,11 +3038,11 @@ async fn run_chat(
             // through history like any other reply.
             let notice = CompanyEvent::AgentReply {
                 audience: Vec::new(),
+                episode: None,
                 parent: reply_thread(accepted.thread_root(), accepted.message_seq),
-                chat_id: message
-                    .chat
-                    .clone()
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                chat_id: message.chat.clone().unwrap_or_else(|| {
+                    crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                }),
                 agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
                 text: "This should have opened a task card, but the card could not be saved. \
                        Nothing else was lost — send the message again, or open the card by hand."
@@ -3456,6 +3579,9 @@ async fn accept_chat_turn(
                     chat_id: desk.to_string(),
                     parent,
                     by: by.cloned(),
+                    agent_id: None,
+                    episode_id: None,
+                    round_revision: None,
                 },
             )
             .await
@@ -3487,6 +3613,18 @@ async fn settle_chat_turn(
     turn_id: Option<&str>,
     failure: Option<&ApiError>,
 ) {
+    settle_chat_turn_by(runtime, id, turn_id, None, failure).await;
+}
+
+/// [`settle_chat_turn`] naming the agent that answered, for the success
+/// bracket (`TurnSettled`) the console draws a seat's lane from.
+async fn settle_chat_turn_by(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    turn_id: Option<&str>,
+    agent_id: Option<&str>,
+    failure: Option<&ApiError>,
+) {
     let Some(turn_id) = turn_id else { return };
     let outcome = match failure {
         None => crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Succeeded),
@@ -3512,6 +3650,11 @@ async fn settle_chat_turn(
                 CompanyEvent::TurnFailed {
                     turn_id: turn_id.to_string(),
                     error: failure.0.to_string(),
+                    agent_id: agent_id.map(str::to_string),
+                    chat_id: None,
+                    episode_id: None,
+                    round_revision: None,
+                    outcome: None,
                 },
             )
             .await
@@ -3523,6 +3666,29 @@ async fn settle_chat_turn(
             "could not journal a turn's failure; its row still records it"
         );
     }
+    if failure.is_none()
+        && let Err(err) = runtime
+            .events()
+            .append(
+                id,
+                CompanyEvent::TurnSettled {
+                    turn_id: turn_id.to_string(),
+                    agent_id: agent_id.map(str::to_string),
+                    chat_id: None,
+                    episode_id: None,
+                    round_revision: None,
+                    outcome: crate::ports::types::TurnOutcome::Committed,
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %id,
+            turn = %turn_id,
+            error = %err,
+            "could not journal a turn's settlement; its row still records it"
+        );
+    }
 }
 
 /// Runs a chat cycle and emits any implied webhooks, rendering the responses.
@@ -3530,14 +3696,14 @@ async fn chat_and_emit(
     state: &AppState,
     id: &CompanyId,
     runtime: Arc<CompanyRuntime>,
-    message: ChatMessage,
+    mut message: ChatMessage,
     by: Option<Actor>,
 ) -> Result<ChatOk, ApiError> {
-    // The default desk for an unaddressed message.
-    let desk = message
-        .chat
-        .clone()
-        .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string());
+    let desk = crate::ports::general_channel::decode_general_chat_id(
+        message.chat.take().unwrap_or_default(),
+    );
+    tracing::debug!(company = %id, chat = %desk, "[chat] accepted chat address");
+    message.chat = Some(desk.clone());
     // Issue #1757: the Operator channel is a **read-only** aggregation surface —
     // a "what happened" feed of workflow reports, not a conversation. Refuse a
     // send addressed to it rather than journaling an `OperatorMessage` under the
@@ -3690,6 +3856,7 @@ async fn chat_and_emit(
     let turn_id = accepted.turn_id.clone();
     let message_id = accepted.message_seq.value().to_string();
     let detach = message.detach;
+    let reader = Arc::clone(&runtime);
     let turn = spawn_chat_turn(ChatTurn {
         runtime,
         company: id.clone(),
@@ -3745,7 +3912,8 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = readable_responses(report.responses.clone());
+    let names = crate::server::readable::DisplayNames::load(&reader).await;
+    let responses = readable_responses(report.responses.clone(), &names);
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -3858,10 +4026,10 @@ fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
 /// transient and which mean an account needs topping up, and a second
 /// classifier here would drift from the one that decides whether to retry.
 ///
-/// [`classify_provider_failure`]: tinyagents_harness::retry::classify_provider_failure
+/// [`classify_provider_failure`]: tinyinference::failure::classify_provider_failure
 #[cfg(feature = "openhuman")]
 fn classified_provider_sentence(status: Option<u16>, detail: &str) -> Option<&'static str> {
-    use tinyagents_harness::retry::{
+    use tinyinference::failure::{
         ProviderFailureClass, classify_provider_failure, structured_http_status,
     };
 
@@ -3968,6 +4136,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 };
                 let notice = CompanyEvent::AgentReply {
                     audience: Vec::new(),
+                    episode: None,
                     // Issue #1890 D: threaded on exactly the terms a successful
                     // reply is. This notice IS the answer when there is no
                     // other one, and `reply_thread`'s whole argument is that
@@ -4015,160 +4184,43 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         };
         let reply_parent = reply_thread(parent, accepted.message_seq);
         journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
-        // SPIKE (tinyhivemind P15): a committed reply may refer work to another
-        // desk. AFTER journaling, never before — the referral is keyed on the
-        // reply's own sequence, so it has to exist first.
-        #[cfg(feature = "hivemind")]
-        refer_committed_replies(&runtime, &company, &desk, &report, None, None, 0).await;
-        settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
+        // Cross-desk referral of a committed reply is re-homed in the hive
+        // driver (plan hive-desks, Phase 6: `hive::referral`); the P15 spike
+        // that ran here read `runtime::hivemind`, which is gone.
+        let answered_by: Option<String> = report
+            .responses
+            .iter()
+            .find_map(|response| response.agent.clone());
+        settle_chat_turn_by(
+            &runtime,
+            &company,
+            turn_id.as_deref(),
+            answered_by.as_deref(),
+            None,
+        )
+        .await;
         Ok((report, feedback_note))
     })
-}
-
-/// Offer each committed agent reply to the referral decision (tinyhivemind P15).
-///
-/// The decision is pure and the queue is the only thing that acts, so this is
-/// safe to run over every reply: a message that refers nobody costs one
-/// in-memory decision and calls the queue zero times.
-///
-/// Policy is deliberately hard-coded here for the spike. In production it is an
-/// operator setting — `ReferralPolicy::DEFAULT` has every knob off, and that is
-// the shipping default the library intends.
-#[cfg(feature = "hivemind")]
-pub(crate) async fn refer_committed_replies(
-    runtime: &Arc<CompanyRuntime>,
-    company: &CompanyId,
-    desk: &str,
-    report: &CycleReport,
-    // The referral these replies are ANSWERING, when they are answering one.
-    //
-    // This is the back edge, and it is the host's to carry: "when a host runs
-    // a child turn that carried a `ReferralOrigin`, it must pass that origin
-    // back in the next `ReferralInput`, or the answer has no way home. Nothing
-    // in the library remembers it."
-    origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
-    // The forward these replies are answering, by its marker's journal
-    // sequence. Recorded on the return so the console pairs the two legs by
-    // identity rather than by looking for the nearest similar marker — two
-    // crossings between the same desks to the same agent are indistinguishable
-    // by shape.
-    answers: Option<u64>,
-    // Depth of the reply being offered — NOT of the child it might spawn.
-    //
-    // A reply to an operator message is 0, so every operator message starts a
-    // fresh chain. Otherwise it is the depth of the turn that produced this
-    // reply, which is what makes the count accumulate: the policy compares it
-    // against `max_hops` and hands the child `hop + 1`, and that child's own
-    // replies come back here at that number. Passing a constant here — as this
-    // did — makes every generation claim the same depth, and a bound that never
-    // advances bounds nothing.
-    hop: u32,
-) {
-    use tinyhivemind::referral::dispatch_referral;
-
-    let Ok(Some(record)) = runtime.store().load(company).await else {
-        return;
-    };
-    let members = crate::runtime::hivemind::roster_members(&record);
-    let people: Vec<tinyhivemind_core::roster::Person> = Vec::new();
-    let retired: Vec<String> = Vec::new();
-    let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
-    let desks = crate::runtime::hivemind::desk_snapshots(&record);
-    let gate = runtime.referral_gate();
-
-    // **The desk's own `[[group_chat]].hive.referral` block, not a constant.**
-    //
-    // Referral is opt-in per desk and off by default: crossing costs a full
-    // model turn on somebody else's desk, and tinyhivemind's own benchmark
-    // measured it changing no answer and costing twice the turns on desks that
-    // are individually unbiased. A company that says nothing therefore behaves
-    // exactly as it did before this existed, which is the direction a mechanism
-    // that spends other people's turns should fail in.
-    //
-    // This replaces a hardcoded `enabled: true` with `max_hops` fixed in the
-    // source — a policy no operator could see, let alone change.
-    let config = crate::runtime::hivemind::referral_config(&record, desk);
-    let policy = config.policy();
-    if !policy.enabled {
-        return;
-    }
-
-    // ONE queue for the whole report, which is what makes `peer_cap` mean
-    // anything: the cap counts crossing questions across every reply this turn
-    // produced, and a queue rebuilt per reply would start each count at zero.
-    let queue = crate::runtime::hivemind::JournalReferralQueue::new(
-        runtime.clone(),
-        gate.clone(),
-        config.peer_cap(),
-        policy.max_hops,
-        answers,
-    );
-
-    for response in &report.responses {
-        let (Some(agent), Some(id)) = (response.agent.as_deref(), response.message_id.as_deref())
-        else {
-            continue;
-        };
-        let Ok(sequence) = id.parse::<u64>() else {
-            continue;
-        };
-        let mentions = tinyhivemind_core::mention::resolve(
-            &response.text,
-            None,
-            &tinyhivemind_core::mention::MentionAuthor::Agent {
-                id: agent.to_string(),
-            },
-            &roster,
-            &desks.set(),
-        );
-        let input = tinyhivemind_core::referral::ReferralInput {
-            key: tinyhivemind_core::dispatch::DispatchKey {
-                trigger_sequence: sequence,
-            },
-            conversation: tinyhivemind_core::dispatch::DispatchConversation {
-                desk_id: desk.to_string(),
-                thread_root: None,
-            },
-            author_id: agent.to_string(),
-            content: response.text.clone(),
-            mentions,
-            hop,
-            origin: origin.clone(),
-        };
-        match dispatch_referral(&queue, policy, &input, &roster, &desks.set()).await {
-            Ok(outcome) => tracing::info!(
-                company = %company,
-                desk = %desk,
-                author = %agent,
-                ?outcome,
-                "[referral] decided"
-            ),
-            Err(err) => tracing::warn!(error = %err, "[referral] decision failed"),
-        }
-    }
 }
 
 #[cfg(test)]
 #[path = "operator_readable_responses_test.rs"]
 mod readable_responses_test;
 
-/// The same rendering `chat_history` applies, for replies going out on the POST
-/// rather than being read back.
-///
-/// A deliberation turn is journaled with its grammar and cleaned when the
-/// history is projected — but a reply returned to the caller never passes
-/// through that projection, so the console showed `!support #lazy-load ^3` on
-/// a row that arrived live and plain prose on the same row after a reload.
-/// Two readers of one message, disagreeing, with a page refresh between them.
-///
-/// The stored row keeps its markers either way; the fold reads them off the
-/// journal, not off this.
+/// The display projection `chat_history` applies, for replies going out on
+/// the POST rather than being read back, so a row reads the same live as it
+/// does after a reload. The stored row keeps what the model wrote.
 fn readable_responses(
     mut responses: Vec<crate::ports::types::OutboundMessage>,
+    names: &crate::server::readable::DisplayNames,
 ) -> Vec<crate::ports::types::OutboundMessage> {
     for response in &mut responses {
-        response.text =
-            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+        let body =
+            crate::server::readable::project_reply(&response.text, &response.mentions, names);
+        for mention in &mut response.mentions {
+            mention.offset = body.offset(mention.offset);
+        }
+        response.text = body.text;
     }
     responses
 }
@@ -4245,6 +4297,14 @@ pub(crate) async fn journal_chat_replies(
         if response.message_id.is_some() {
             continue;
         }
+        let response_desk = if response.channel == crate::runtime::OPERATOR_CHANNEL {
+            desk.to_string()
+        } else {
+            response.channel.clone()
+        };
+        let response_parent = (response.channel == crate::runtime::OPERATOR_CHANNEL)
+            .then_some(parent)
+            .flatten();
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -4268,6 +4328,7 @@ pub(crate) async fn journal_chat_replies(
                 id,
                 CompanyEvent::AgentReply {
                     audience: Vec::new(),
+                    episode: None,
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
@@ -4276,7 +4337,7 @@ pub(crate) async fn journal_chat_replies(
                     mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
-                    parent,
+                    parent: response_parent,
                     // Issue #246: carry the card this turn opened onto the
                     // durable record, so the console's "card opened" chip
                     // survives a transcript reload instead of living only on
@@ -4287,7 +4348,7 @@ pub(crate) async fn journal_chat_replies(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: desk.to_string(),
+                    chat_id: response_desk.clone(),
                     // Issue #885: the author, falling back to the channel only
                     // when the producer did not name one. `agent_id`'s contract
                     // is "the agent that produced the reply"; `channel` is the
@@ -4322,7 +4383,7 @@ pub(crate) async fn journal_chat_replies(
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
                     runtime
-                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .notify_mentions(id, &reply_mentions, &seq, None, &response_desk)
                         .await;
                 }
             }
@@ -4469,6 +4530,26 @@ pub(crate) struct ReferralLineDto {
     outbound: bool,
 }
 
+/// One agent-to-agent exchange, as the console renders it.
+///
+/// Mirrors [`ReferralConversationDto`] below, and carries the same
+/// `ReferralLineDto` rows: to a reader the two are the same thing — an
+/// exchange somebody on this desk had that the desk itself cannot show — and
+/// a second line shape would be a second thing to keep in step.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentConversationDto {
+    /// The `ask` row it is rooted at: its identity, and the only thing that
+    /// tells two exchanges between the same pair apart.
+    root: u64,
+    asker_id: String,
+    askee_id: String,
+    conversation_id: String,
+    concluded: bool,
+    forced: bool,
+    lines: Vec<ReferralLineDto>,
+}
+
 /// A crossing folded onto the report that brought it home, so the console can
 /// render it as one collapsed line naming both parties and counting the
 /// messages.
@@ -4492,22 +4573,52 @@ pub(crate) struct ReferralConversationDto {
     lines: Vec<ReferralLineDto>,
 }
 
+/// What a journaled reply was inside the episode that produced it. Mirrors
+/// `MessageEpisodeDto` in `frontend/src/api/types.ts`; the same shape rides
+/// on the `agent_reply` SSE frame as `episode`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AsideLineDto {
-    /// The agent that wrote it.
-    author_id: String,
-    /// What they said, with the `!aside @peer` head already stripped.
-    text: String,
+pub(crate) struct MessageEpisodeDto {
+    /// The episode.
+    id: String,
+    /// The round it was committed in (raw revision).
+    revision: u64,
+    /// The speech act.
+    kind: crate::ports::types::UtteranceKind,
+    /// A `dm`'s recipients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<Vec<String>>,
+    /// How a `broadcast` was routed on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routed_by: Option<RoutedByDto>,
 }
 
+/// `MessageEpisodeDto.routedBy`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AsideConversationDto {
-    /// Everyone in it — the author first, then who they addressed.
-    members: Vec<String>,
-    /// The exchange, oldest first. Its length is the count in the label.
-    lines: Vec<AsideLineDto>,
+pub(crate) struct RoutedByDto {
+    plan: crate::hive::routing::RoutingPlanDto,
+    router: crate::hive::routing::Router,
+}
+
+impl From<crate::ports::types::ReplyEpisode> for MessageEpisodeDto {
+    fn from(episode: crate::ports::types::ReplyEpisode) -> Self {
+        Self {
+            id: episode.id,
+            revision: episode.revision,
+            kind: episode.kind,
+            to: (!episode.to.is_empty()).then_some(episode.to),
+            routed_by: episode.routed_by.map(|routed| RoutedByDto {
+                plan: routed.plan,
+                router: routed.router,
+            }),
+        }
+    }
+}
+
+/// The `episode` object an `agent_reply` frame carries, as JSON.
+pub(crate) fn episode_json(episode: &crate::ports::types::ReplyEpisode) -> serde_json::Value {
+    serde_json::to_value(MessageEpisodeDto::from(episode.clone())).unwrap_or_default()
 }
 
 #[derive(Debug, Serialize)]
@@ -4548,8 +4659,8 @@ struct ChatHistoryMessageDto {
     /// The message text.
     text: String,
     /// **The body as the model wrote it** — [`MessageView::cue_text`], which
-    /// is [`Self::text`] before `readable_moves` rewrote the room's grammar
-    /// into operator-facing prose.
+    /// is [`Self::text`] before the display projection
+    /// ([`readable_moves`](crate::server::readable::readable_moves)).
     ///
     /// `AgentSessionMessageDto` has carried this since the raw-turns view
     /// needed it; this shape did not, so a reader that needs the *moves*
@@ -4570,7 +4681,19 @@ struct ChatHistoryMessageDto {
     /// every ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     referral_conversation: Option<ReferralConversationDto>,
-    aside_conversation: Option<AsideConversationDto>,
+    /// The agent-to-agent exchanges this row reported, oldest first. Empty on
+    /// every ordinary message, and skipped then, so the wire shape is
+    /// unchanged for them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_conversations: Vec<AgentConversationDto>,
+    /// What this reply was inside the episode that produced it (plan
+    /// hive-desks, Phase 4). Absent for every reply outside an episode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    episode: Option<MessageEpisodeDto>,
+    /// Who may read this line, when the host narrowed it (a desk `dm`).
+    /// Absent means everyone on the desk.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    audience: Vec<String>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -4746,23 +4869,35 @@ impl From<MessageView> for ChatHistoryMessageDto {
         // text back). Cloned before `view.text` moves into the `text` field
         // below.
         let message = view.resolution_user_facing.then(|| view.text.clone());
-        // Only when the two differ, which is only on a desk that deliberates:
-        // `readable_moves` returns a body carrying no move untouched, so an
-        // ordinary reply adds nothing to the wire.
+        // Only when the display projection changed something, so an ordinary
+        // reply adds nothing to the wire.
         let cue_text = (view.cue_text != view.text).then(|| view.cue_text.clone());
         Self {
             cue_text,
-            aside_conversation: view.aside_conversation.map(|aside| AsideConversationDto {
-                members: aside.members,
-                lines: aside
-                    .lines
-                    .into_iter()
-                    .map(|line| AsideLineDto {
-                        author_id: line.author_id,
-                        text: line.text,
-                    })
-                    .collect(),
-            }),
+            episode: view.episode.map(MessageEpisodeDto::from),
+            audience: view.aside_audience,
+            agent_conversations: view
+                .agent_conversations
+                .into_iter()
+                .map(|exchange| AgentConversationDto {
+                    root: exchange.root,
+                    asker_id: exchange.asker_id,
+                    askee_id: exchange.askee_id,
+                    conversation_id: exchange.conversation_id,
+                    concluded: exchange.concluded,
+                    forced: exchange.forced,
+                    lines: exchange
+                        .lines
+                        .into_iter()
+                        .map(|line| ReferralLineDto {
+                            author_id: line.author_id,
+                            author_label: line.author_label,
+                            text: line.text,
+                            outbound: line.outbound,
+                        })
+                        .collect(),
+                })
+                .collect(),
             referral_conversation: view.referral_conversation.map(|crossing| {
                 ReferralConversationDto {
                     asker_id: crossing.asker_id,
@@ -4839,25 +4974,39 @@ impl From<MessageView> for ChatHistoryMessageDto {
 /// GraphQL `chat(id:)` lookup. An unmatched selector (an ad hoc thread id the
 /// console addresses with no backing manifest entry, e.g. a static default
 /// thread) passes through as both id and name, so history still finds
-/// whatever was journaled under that exact string. Omitted resolves to the
-/// synthetic General/operator desk.
+/// whatever was journaled under that exact string. Omitted, and every legacy
+/// General spelling, resolves to #general.
 async fn resolve_desk(
     runtime: &CompanyRuntime,
     desk: Option<&str>,
 ) -> Result<(String, String), OpenCompanyError> {
-    let Some(desk) = desk else {
-        return Ok((DEFAULT_DESK.to_string(), DEFAULT_DESK.to_string()));
-    };
+    let desk =
+        crate::ports::general_channel::decode_general_chat_id(desk.unwrap_or_default().to_string());
+    if desk == GENERAL_CHANNEL_ID {
+        return Ok((desk.clone(), desk));
+    }
+    let desk = desk.as_str();
     let record = runtime.store().load(runtime.id()).await?;
     let matched =
-        record.and_then(|record| {
-            record.manifest.group_chats.into_iter().find(|chat| {
+        record.as_ref().and_then(|record| {
+            record.manifest.group_chats.iter().find(|chat| {
                 chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk)
             })
         });
     Ok(match matched {
-        Some(chat) => (chat.id, chat.name),
-        None => (desk.to_string(), desk.to_string()),
+        Some(chat) => (chat.id.clone(), chat.name.clone()),
+        // Not a declared desk. A DM is journaled under two spellings and this
+        // reader may have been handed either, so the sibling rides in the name
+        // slot -- `owns` matches either and renders neither. Without it the
+        // console, which addresses an ordinary DM by the bare teammate id, read
+        // none of the rows its episode journaled under `dm:<id>`.
+        None => {
+            let sibling = record
+                .as_ref()
+                .and_then(|record| crate::server::chat_history::dm_sibling(record, desk))
+                .unwrap_or_else(|| desk.to_string());
+            (desk.to_string(), sibling)
+        }
     })
 }
 
@@ -4994,8 +5143,8 @@ struct AgentSessionMessageDto {
     /// agent never saw. See [`cue_author`](crate::server::chat_history::cue_author).
     cue_author: String,
     /// **The text half of the cue line the model was actually handed** —
-    /// before [`readable_moves`](crate::server::chat_history::readable_moves)
-    /// rewrote it into operator-facing prose (Codex P2: the raw-turns surface
+    /// before [`readable_moves`](crate::server::readable::readable_moves)
+    /// projected it for a person (Codex P2: the raw-turns surface
     /// must show `!support #topic ^3`, not the prose it becomes for a person).
     /// Same reasoning as `cue_author`, for the other half of the line. See
     /// [`MessageView::cue_text`](crate::server::chat_history::MessageView::cue_text).
@@ -6025,7 +6174,10 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: readable_responses(report.responses),
+        responses: readable_responses(
+            report.responses,
+            &crate::server::readable::DisplayNames::load(&runtime).await,
+        ),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
@@ -6127,8 +6279,8 @@ async fn extend_approval(
 }
 
 #[cfg(test)]
-#[path = "operator_aside_dto_tests.rs"]
-mod operator_aside_dto_tests;
+#[path = "operator_episode_dto_tests.rs"]
+mod operator_episode_dto_tests;
 #[cfg(test)]
 #[path = "operator_test_group_1.rs"]
 mod operator_test_group_1;

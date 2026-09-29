@@ -58,8 +58,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { consoleHref } from "@/lib/console-paths";
-import { MAIN_THREAD_ID } from "@/lib/chat";
-import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import type { Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -483,12 +482,7 @@ export function ApprovalMeta({
   status?: React.ReactNode;
 }) {
   const taskId = a.task?.link === "task" ? a.task.id : null;
-  // Resolved through `channelForThread`, not a bare `map[key]` index: the
-  // host compares General spellings case-insensitively and echoes back
-  // whichever one it was addressed with, so an approval raised in `#general`
-  // can carry a thread id the map's own literal keys miss (issue #1781
-  // review, Codex P2). A bare index breaks the "Asked in" link for exactly
-  // that case.
+  // Through `channelForThread` so a `dm:`-prefixed thread resolves too.
   const conversationChannelId =
     a.thread && chatChannelByThread ? channelForThread(chatChannelByThread, a.thread) : null;
   const workflowId = workflowIdForApproval(a);
@@ -803,38 +797,9 @@ export function approvalThreadLink(
   const channelId = channelIdForThread(approval.thread, known, members);
   if (!channelId) return null;
 
-  // Looked up by the **resolved channel**, not by the raw thread id. They are
-  // the same string for an ordinary desk, and deliberately different when a
-  // blueprint desk is grandfathered onto the company-wide line: an approval
-  // raised under `main` resolves to that desk's channel, and asking for a desk
-  // called `main` would find nothing and label it "Origin unavailable" — on a
-  // conversation whose transcript is right there on screen.
   const desk = known.find((candidate) => candidate.id === channelId);
   if (desk) return { channelId, label: `#${desk.channel}` };
 
-  // The built-in `#general` channel (issue #1743), which is deliberately in no
-  // desk list — so the scan above can never name it, and an approval raised on
-  // the company's main line resolved to a channel and then failed to find a
-  // label, leaving "Origin unavailable" on the one channel every company has.
-  // After the desk scan, deliberately: a blueprint desk that authored one of
-  // the General ids keeps its own name, exactly as `channelIdForThread` keeps
-  // it its own thread.
-  //
-  // Guarded on the topology being *known* rather than on the list being
-  // non-empty. A failed read must not be guessed at — `RoomView` surfaces the
-  // error and renders no rail, so a link into it would land nowhere — but a
-  // company that genuinely declares no desks still has `#general`, and that is
-  // the one channel every company has. While an empty answer was overwritten
-  // with `defaultDesks()` the two cases were the same value, and reading the
-  // length was the only test available; now the failure says `null`.
-  if (channelId === MAIN_THREAD_ID && desks !== null) {
-    return { channelId, label: `#${GENERAL_CHANNEL}` };
-  }
-
-  // Matched through `dmThreadId`, not against the bare id: a DM for a teammate
-  // whose id is a General spelling records its thread as `dm:<id>`, and a raw
-  // comparison returned `null` — so the Approvals page called the origin
-  // unavailable for a conversation it could perfectly well link to (#1743).
   const member = memberForThread(members, approval.thread);
   return member ? { channelId: dmChannelId(member), label: member.name } : null;
 }

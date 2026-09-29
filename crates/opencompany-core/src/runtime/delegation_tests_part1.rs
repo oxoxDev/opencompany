@@ -419,13 +419,14 @@ fn a_card_title_is_bounded_and_utf8_safe() {
 /// promised really executed. A test with only the second half would pass on
 /// a path that drains but never claims — which is not the invariant, because
 /// the next such path written would inherit nothing.
-/// A responder who cannot delegate (an ordinary manifest member with no
-/// `delegates_to`) must not be told to "hand work to them" — it has no
-/// tool to do that with. The orchestrator, who always can, keeps the
-/// original phrasing.
+/// A responder whose `delegates_to` narrows its reach past the mentioned
+/// teammate must not be told to "hand work to them" — the tool would refuse.
+/// One whose entry says nothing can reach anyone, and is told so.
 #[tokio::test]
 async fn also_mentioned_wording_matches_the_responders_own_delegation_reach() {
-    let fx = Fixture::new();
+    // `engineer` in the nested roster may reach `research_desk` only, so the
+    // orchestrator `chief` is out of its reach.
+    let fx = Fixture::nested();
     let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
 
     fx.runner(&turns)
@@ -440,9 +441,23 @@ async fn also_mentioned_wording_matches_the_responders_own_delegation_reach() {
     assert_eq!(agent, "engineer");
     assert!(
         message.contains("You have no way to hand this off"),
-        "a non-delegating responder must be told plainly, not asked to do the impossible: {message}"
+        "a narrowed responder must be told plainly, not asked to do the impossible: {message}"
     );
     assert!(!message.contains("Hand work to them only if it genuinely needs them"));
+
+    // The plain roster: `engineer` names no list, so it can reach `chief`.
+    let fx = Fixture::new();
+    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+    fx.runner(&turns)
+        .also_mentioned(vec!["chief".to_string()])
+        .handle_operator_message("engineer", "look into this", Some("eng_desk"))
+        .await
+        .expect("operator message handled");
+    let (_, message) = &turns.calls()[0];
+    assert!(
+        message.contains("Hand work to them only if it genuinely needs them"),
+        "an unrestricted responder is told it can hand work on: {message}"
+    );
 }
 
 /// The orchestrator always carries the hand-off tools, so it gets the

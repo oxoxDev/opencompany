@@ -89,26 +89,6 @@ function button(label: string): HTMLButtonElement {
   return match as HTMLButtonElement;
 }
 
-/**
- * Picks a provider from the model step's `Select`.
- *
- * The base-ui popup portals its items onto `document.body`, not into
- * `container` — they do not exist in the DOM at all until the trigger opens
- * the popup, unlike the button cards this replaced.
- */
-async function selectProvider(id: string) {
-  const trigger = container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement;
-  expect(trigger, "no provider select trigger").toBeTruthy();
-  await act(async () => {
-    trigger.click();
-  });
-  const item = document.body.querySelector(`[data-testid="setup-provider-${id}"]`) as HTMLElement;
-  expect(item, `no provider option ${id}`).toBeTruthy();
-  await act(async () => {
-    item.click();
-  });
-}
-
 /** Types into a step's field, so a required one can be left. */
 async function fill(testId: string, value: string) {
   const field = container.querySelector(`[data-testid="${testId}"]`) as
@@ -133,10 +113,10 @@ const next = async () =>
   });
 
 /**
- * Gets past step 0 onto the model step, and is a no-op once already there.
+ * Gets past step 0 onto step 1, and is a no-op once already there.
  *
- * The flow opens on the setup-way choice, and the provider picker sits behind
- * "Set it up yourself".
+ * The flow opens on the setup-way choice, and the add-provider sequence sits
+ * behind "Set it up yourself".
  */
 async function chooseSelfManaged() {
   const option = container.querySelector('[data-testid="setup-way-self-managed"]') as
@@ -150,21 +130,35 @@ async function chooseSelfManaged() {
 }
 
 /**
- * Skips the model step, which is a gate.
- *
- * The skip is the honest path for a test with no provider to reach: the step
- * refuses to advance on an untested credential, which is the whole reason it
- * sits in front of the questions.
+ * Onto the managed step 1, which is the branch a credential is typed and proved
+ * on — and the only one this file's gate assertions are about.
  */
-async function skipModel() {
+async function chooseManaged() {
+  const option = container.querySelector('[data-testid="setup-way-managed"]') as
+    | HTMLElement
+    | null;
+  if (!option) return;
+  await act(async () => {
+    option.click();
+  });
+  await next();
+}
+
+/**
+ * Leaves step 1 with nothing connected.
+ *
+ * The self-managed branch's two connections are both optional, so this is the
+ * whole of skipping it — and Next is not gated there, which is its own
+ * assertion below.
+ */
+async function skipConnect() {
   await chooseSelfManaged();
-  await selectProvider("none");
   await next(); // -> business
 }
 
-/** model -> business -> sign-in -> account -> review. */
+/** step 1 -> business -> sign-in -> account -> review. */
 async function goToReview() {
-  await skipModel();
+  await skipConnect();
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in
   // Left as it stands: the host default is email sign-in, which is the case
@@ -209,7 +203,7 @@ describe("finishing setup with no companies on the host", () => {
         }),
       ),
     );
-    await skipModel();
+    await skipConnect();
 
     const picker = container.querySelector(
       '[data-testid="setup-field-template"]',
@@ -249,7 +243,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("will not leave the first question empty", async () => {
     await show(clientWith(status()));
-    await skipModel();
+    await skipConnect();
 
     await act(async () => {
       button("Next").click();
@@ -269,7 +263,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("will not pass the email step on a host that asks people to sign in", async () => {
     await show(clientWith(status()));
-    await skipModel();
+    await skipConnect();
     await fill("setup-field-industry", "E-commerce — homeware");
     await next(); // -> sign-in
     await next(); // -> account, because the mode above asks people to sign in
@@ -304,9 +298,9 @@ describe("finishing setup with no companies on the host", () => {
    * rather than an error, and the operator finds out several screens later, if
    * at all. Untested therefore holds the flow here.
    */
-  it("will not pass the model step on an untested connection", async () => {
+  it("will not pass the managed step on an untested connection", async () => {
     await show(clientWith(status()));
-    await chooseSelfManaged();
+    await chooseManaged();
 
     await act(async () => {
       button("Next").click();
@@ -324,7 +318,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("lets an operator continue without a model, explicitly", async () => {
     await show(clientWith(status()));
-    await skipModel();
+    await skipConnect();
 
     expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
   });
@@ -345,7 +339,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
-    await chooseSelfManaged();
+    await chooseManaged();
     await fill("setup-field-key", "rejected-key");
     await act(async () => {
       (
@@ -376,7 +370,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
-    await chooseSelfManaged();
+    await chooseManaged();
     await fill("setup-field-key", "working-key");
     await act(async () => {
       (
@@ -394,7 +388,7 @@ describe("finishing setup with no companies on the host", () => {
     expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
   });
 
-  it("requires the selected provider's credential before testing", async () => {
+  it("requires a key before testing", async () => {
     let requests = 0;
     await show(
       clientWith(status(), {
@@ -405,7 +399,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
-    await chooseSelfManaged();
+    await chooseManaged();
     expect(button("Test connection").disabled).toBe(true);
     await act(async () => {
       button("Test connection").click();
@@ -419,17 +413,6 @@ describe("finishing setup with no companies on the host", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(requests).toBe(1);
-  });
-
-  it("requires an endpoint before testing Ollama", async () => {
-    await show(clientWith(status()));
-    await chooseSelfManaged();
-
-    await selectProvider("ollama");
-    expect(button("Test connection").disabled).toBe(true);
-
-    await fill("setup-field-base-url", "http://127.0.0.1:11434/v1");
-    expect(button("Test connection").disabled).toBe(false);
   });
 
 

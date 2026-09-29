@@ -33,9 +33,8 @@ interface Props {
    * Whether this conversation can be shown as the agent's raw turns.
    *
    * A DM has exactly one teammate on the other end, so "the raw turns" names
-   * something. A `#channel` has several and a system feed has none, so the
-   * control is absent there rather than present and ambiguous — the same rule
-   * the member pane follows for the Operator feed.
+   * something. A `#channel` has several, so the control is absent there
+   * rather than present and ambiguous.
    */
   rawAvailable?: boolean;
   /** Whether the raw view is the one currently on screen. */
@@ -152,24 +151,20 @@ export function ChatHeader({
         </Button>
       )}
 
-      {/* Issue #1757: the Operator system channel is a read-only report feed
-          with no members, so it offers no agent pane. */}
-      {!channel.system && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "h-7 gap-1.5 rounded-full border px-2.5 text-xs",
-            membersOpen ? "bg-accent" : "bg-muted/60",
-          )}
-          onClick={onToggleMembers}
-          aria-pressed={membersOpen}
-        >
-          <Users className="size-3.5" />
-          <span className="tabular-nums">{memberCount}</span>
-          <span className="sr-only">{membersOpen ? "Hide" : "Show"} agents</span>
-        </Button>
-      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        className={cn(
+          "h-7 gap-1.5 rounded-full border px-2.5 text-xs",
+          membersOpen ? "bg-accent" : "bg-muted/60",
+        )}
+        onClick={onToggleMembers}
+        aria-pressed={membersOpen}
+      >
+        <Users className="size-3.5" />
+        <span className="tabular-nums">{memberCount}</span>
+        <span className="sr-only">{membersOpen ? "Hide" : "Show"} agents</span>
+      </Button>
     </header>
   );
 }

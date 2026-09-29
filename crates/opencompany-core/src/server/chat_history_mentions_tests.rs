@@ -1,6 +1,22 @@
-use super::tests_moves::agent_reply;
 use super::tests_reactions::{at, labels};
 use super::*;
+
+/// A desk-visible reply by the CEO on `chat_id`.
+fn agent_reply(chat_id: &str) -> CompanyEvent {
+    CompanyEvent::AgentReply {
+        audience: Vec::new(),
+        mentions: Vec::new(),
+        mention_depth: 0,
+        parent: None,
+        task_id: None,
+        outputs: Vec::new(),
+        chat_id: chat_id.to_string(),
+        agent_id: "ceo".to_string(),
+        text: "hi".to_string(),
+        steps: Vec::new(),
+        episode: None,
+    }
+}
 
 fn mention(target: MentionTarget, text: &str, offset: usize) -> Mention {
     Mention {
@@ -83,6 +99,7 @@ fn only_a_persons_message_is_projected_as_by_person() {
                 agent_id: "operator".to_string(),
                 text: "You said: on it".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         ),
         &Viewer::User("u2".to_string()),
@@ -286,6 +303,7 @@ fn project_carries_the_thread_parent() {
                 agent_id: "ceo".to_string(),
                 text: "on it".to_string(),
                 steps: Vec::new(),
+                episode: None,
             },
         ),
         &Viewer::Operator,
@@ -310,6 +328,6 @@ fn legacy_operator_message_without_chat_stays_on_general() {
         deliverable: None,
         attachments: Vec::new(),
     };
-    assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
+    assert!(owns(GENERAL_CHANNEL_ID, GENERAL_CHANNEL_ID, &event));
     assert!(!owns("strategy", "Strategy desk", &event));
 }

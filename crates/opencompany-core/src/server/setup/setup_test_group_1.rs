@@ -122,6 +122,30 @@ async fn none_is_offered_only_on_a_loopback_host() {
     );
 }
 
+/// The packaged desktop boots with `none` already in force, and the wizard
+/// must preselect it rather than ask an operator to re-derive a fact about
+/// their own computer. Reported by the host so a browser tab against the
+/// desktop's host gets the same answer as the webview. A plain `serve` on
+/// loopback has no override and gets no default — `email` stays what it was.
+#[tokio::test]
+async fn the_desktop_host_reports_none_as_the_default_sign_in() {
+    let home_dir = home();
+    let (_, plain) = get_setup(fresh_state(home_dir.path())).await;
+    assert!(
+        plain.get("default_auth_mode").is_none(),
+        "a plain loopback serve names no default: {plain}"
+    );
+
+    let desktop = crate::AppState::new(crate::AppConfig {
+        bind: "127.0.0.1:8080".to_string(),
+        auth_mode_override: Some(crate::app::config::AuthMode::None),
+        ..crate::AppConfig::default()
+    })
+    .with_home(home_dir.path().to_path_buf());
+    let (_, dto) = get_setup(desktop).await;
+    assert_eq!(dto["default_auth_mode"], "none", "{dto}");
+}
+
 /// A laptop with no SMTP is not a broken host — it is the one shape where the
 /// honest hand-off is a link the operator opens themselves. The wizard has to
 /// be able to tell that apart from a host where a magic link simply goes
@@ -170,8 +194,8 @@ async fn mail_with_a_transport_wired_reports_a_real_send() {
 }
 
 /// `auth_modes` says which modes are *legal*, not which are convenient today.
-/// A host with no SMTP still runs `email` mode perfectly well over hub OAuth
-/// and passwords, so withholding the mode here would take away a working
+/// A host with no SMTP still runs `email` mode perfectly well over passwords,
+/// so withholding the mode here would take away a working
 /// sign-in on the strength of a transport it does not need. `mail` is the field
 /// that says what the mailbox path can do; this one must stay a policy answer.
 #[tokio::test]
@@ -284,8 +308,11 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             company: None,
             name: None,
             admin_email: None,
+            admin_password: None,
             tinyhumans_key: None,
             tinyhumans_model: None,
+            provider_draft: None,
+            composio_draft: None,
         },
         &env,
     )
@@ -484,6 +511,7 @@ async fn a_failed_rebuild_mid_list_does_not_stop_the_rest() {
         let id = CompanyId::new(name);
         store
             .save(&CompanyRecord {
+                general_channel: Default::default(),
                 overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),

@@ -17,6 +17,8 @@ import { describe, expect, it } from "vitest";
 const detail = readFileSync("src/views/team/AgentDetailView.tsx", "utf8");
 const session = readFileSync("src/views/team/AgentSession.tsx", "utf8");
 const client = readFileSync("src/api/client.ts", "utf8");
+const team = readFileSync("src/views/TeamView.tsx", "utf8");
+const shell = readFileSync("src/components/app-shell.tsx", "utf8");
 
 describe("the Session tab", () => {
   /**
@@ -54,7 +56,7 @@ describe("the Session tab", () => {
 
   /**
    * `fromHistory` is the room's mapping and is reused whole. It is what carries
-   * `referralConversation` and `asideConversation` through untouched; a
+   * `referralConversation` and `episode` through untouched; a
    * hand-rolled map here would be a second answer to "what is a chat line".
    *
    * Called once per row (`fromHistory([row])`), not once for the whole array
@@ -71,11 +73,11 @@ describe("the Session tab", () => {
   });
 
   /**
-   * The agent-to-agent collapses are imported from the room, not reimplemented.
-   * An exchange between two teammates has to read the same way here as it does
-   * in the channel it happened in.
+   * The agent-to-agent collapses and chips are imported from the room, not
+   * reimplemented. An exchange between two teammates has to read the same way
+   * here as it does in the channel it happened in.
    */
-  it("reuses the room's referral and aside collapses", () => {
+  it("reuses the room's referral collapse and utterance chip", () => {
     expect(session).toContain('from "@/views/room/StepTimeline"');
     // `rowId` rides along so the chip can tell a crossing still being had from
     // one that is over — the same distinction the channel draws, which is the
@@ -83,7 +85,11 @@ describe("the Session tab", () => {
     expect(session).toContain(
       "<ReferralConversation crossing={message.referralConversation} rowId={message.id} />",
     );
-    expect(session).toContain("<AsideConversation aside={message.asideConversation} />");
+    expect(session).toContain('from "@/components/episode/UtteranceChip"');
+    expect(session).toContain(
+      "<UtteranceChip episode={message.episode} audience={message.audience} agentNames={agentNames} />",
+    );
+    expect(session).not.toContain("asideConversation");
     expect(session).toContain("<StepTimeline steps={message.steps} />");
   });
 
@@ -92,6 +98,27 @@ describe("the Session tab", () => {
    * unreadable: two teammates answering in two desks interleave with nothing to
    * tell them apart, which is the one thing merging the channels costs.
    */
+  it("threads the roster's names from the shell down to the utterance chip", () => {
+    expect(shell).toMatch(/<TeamView[\s\S]*?agentNames=\{agentNames\}/);
+    // `TeamView` overlays the shell's roster snapshot with its own `members`
+    // state, so a rename saved on the detail page shows up immediately rather
+    // than waiting for the shell's next company-switch refetch.
+    expect(team).toMatch(/<AgentDetailView[\s\S]*?agentNames=\{currentAgentNames\}/);
+    expect(detail).toMatch(/<AgentSession[\s\S]*?agentNames=\{agentNames\}/);
+    expect(session).toContain("<SessionRow key={line.message.id} line={line} agentId={agentId} agentNames={agentNames} />");
+  });
+
+  /**
+   * A rename saved on the detail page must reach the chips this same view
+   * feeds, without waiting for the shell's roster refetch — the gap
+   * CodeRabbit flagged on PR #2469.
+   */
+  it("folds a saved rename back into TeamView's own roster map", () => {
+    expect(team).toContain("onAgentNameChange");
+    expect(team).toContain("member.id === agentId ? { ...member, name } : member");
+    expect(detail).toContain("onAgentNameChange?.(agentId, updated.name?.trim() || updated.role)");
+  });
+
   it("badges every row with the channel the host stamped", () => {
     expect(session).toContain("sessionChannel");
     expect(session).toContain('data-testid="agent-session-channel"');

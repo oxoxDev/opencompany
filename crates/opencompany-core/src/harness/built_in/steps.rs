@@ -93,7 +93,7 @@ use serde_json::Value;
 
 use oh::agent::progress::AgentProgress;
 use oh::tools::status::{ClassifiedFailure, ToolFailureClass};
-use oh::tools::traits::humanize_tool_name;
+use tinytools::humanize_tool_name;
 
 use crate::harness::policy::POLICY_NAME;
 use crate::ports::deep_trace::TurnStepDetail;
@@ -665,7 +665,7 @@ pub(crate) fn stream_event_from(
 /// # Why this exists
 ///
 /// A tool states its own operator-facing step label through
-/// [`Tool::display_label`](oh::tools::traits::Tool::display_label): the managed
+/// [`Tool::display_label`](tinytools::Tool::display_label): the managed
 /// web search calls itself "Exa web search", and a BYO belt names the provider
 /// actually wired behind it ("Brave web search", "SearXNG web search").
 /// **Nothing asks it.** The crate-level `ToolStarted` event carries a call id
@@ -699,7 +699,7 @@ pub struct StepLabels(Arc<HashMap<String, String>>);
 
 impl StepLabels {
     /// Capture the curated labels of `tools`.
-    pub fn from_tools(tools: &[Box<dyn oh::tools::traits::Tool>]) -> Self {
+    pub fn from_tools(tools: &[Box<dyn tinytools::Tool>]) -> Self {
         let curated = tools
             .iter()
             .filter_map(|tool| {
@@ -930,12 +930,18 @@ const APPROVAL_REQUIRED_NEEDLE: &str = "requires approval under policy";
 const AWAITING_APPROVAL_RESULT: &str = "Parked — waiting on your approval before it can run.";
 
 /// Markers the OpenHuman tool pipeline stamps into a result it **cut**, from
-/// the three places that can cut one:
+/// the places that cut one and say so:
 ///
-/// * the per-tool char cap (`middleware.rs`),
 /// * the shared byte budget (`tool_result_artifacts/mod.rs`),
 /// * the artifact envelope that replaces an oversized result with a preview
 ///   plus a pointer (same file).
+///
+/// `truncated by tool cap:` is kept though the vendored source no longer
+/// produces it — upstream dropped that wording moving to uncapped tool
+/// summaries (`6865c81eb`). It stays because this classifies **results**, not
+/// source: a persisted trace or a reply captured before that change still
+/// carries the phrase, and a classifier that forgets it would silently
+/// re-label old cut output as whole. It costs one `contains` per result.
 ///
 /// Same string-classifier caveat, same mitigation:
 /// `truncation_markers_still_appear_in_the_vendored_tool_pipeline` reads both

@@ -6,80 +6,6 @@ use std::sync::Mutex as StdMutex;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
-/// A `FixedOutcomeTurn` whose single turn reports a budget pause — the
-/// account itself is out of inference credits, so `outcome.reply` is
-/// host-authored pause copy, not an answer.
-pub(super) fn budget_paused_outcome(agent: &str) -> crate::harness::built_in::TurnOutcome {
-    crate::harness::built_in::TurnOutcome {
-        reply: BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string(),
-        steps: Vec::new(),
-        hit_iteration_cap: false,
-        abnormal_stop: None,
-        halted_for_spend: None,
-        budget_paused: Some(crate::harness::BudgetPause {
-            agent: agent.to_string(),
-            summary: "add credits and try again".to_string(),
-        }),
-    }
-}
-
-/// A `FixedOutcomeTurn` whose single turn halted for spend — the
-/// teammate's own declared cap was reached mid-turn.
-pub(super) fn spend_halted_outcome(agent: &str) -> crate::harness::built_in::TurnOutcome {
-    crate::harness::built_in::TurnOutcome {
-        reply: "partial answer before the brake fired".to_string(),
-        steps: Vec::new(),
-        hit_iteration_cap: false,
-        abnormal_stop: None,
-        halted_for_spend: Some(crate::harness::SpendHalt {
-            agent: agent.to_string(),
-            spent_usd: 5.5,
-            cap_usd: 5.0,
-        }),
-        budget_paused: None,
-    }
-}
-
-/// A `FixedOutcomeTurn` whose single turn is a pre-dispatch spend
-/// refusal — the meter that a declared cap needs could not be read, so
-/// no model call ran and `outcome.reply` is host-authored refusal copy.
-pub(super) fn abnormal_stop_outcome(reply: &str) -> crate::harness::built_in::TurnOutcome {
-    crate::harness::built_in::TurnOutcome {
-        reply: reply.to_string(),
-        steps: Vec::new(),
-        hit_iteration_cap: false,
-        abnormal_stop: Some("[stopped: dispatch refused]".to_string()),
-        halted_for_spend: None,
-        budget_paused: None,
-    }
-}
-
-/// A bare brain over a fresh temp-dir store, for tests that only need
-/// `HiveDeskRunner`'s `brain`/`host` fields satisfied and are not
-/// exercising the approval-parking path itself.
-pub(super) fn hive_test_brain(dir: &std::path::Path) -> HarnessBrain {
-    brain_with_approval_queue(dir, crate::harness::policy::ApprovalRequestQueue::default())
-}
-
-pub(super) fn hive_desk_runner<'a>(
-    brain: &'a HarnessBrain,
-    host: &'a dyn CycleHost,
-    outcome: crate::harness::built_in::TurnOutcome,
-) -> HiveDeskRunner<'a> {
-    HiveDeskRunner {
-        run_turn: Arc::new(FixedOutcomeTurn {
-            outcome,
-            approval_requests: None,
-        }),
-        company: CompanyId::new("acme"),
-        chat_id: Some("lab".to_string()),
-        thread_root: None,
-        trigger_seq: None,
-        brain,
-        host,
-    }
-}
-
 /// A brain whose provider steers the dispatched card `key` with `actions`
 /// (one per turn). Returns the brain + its task store so a test can seed the
 /// card and read the disposition back.
@@ -98,6 +24,7 @@ pub(super) fn brain_that_steers_itself(
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -133,6 +60,7 @@ pub(super) fn brain_that_steers_itself(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -235,16 +163,6 @@ impl HarnessModel for SelectingProvider {
     }
 }
 
-/// A brain whose provider answers every selection request with `reply`.
-/// The record is [`record_with_desk`] — `engineer` + `chief`, a lead
-/// `eng_desk` — plus an `auto` overlay channel `launch` holding both.
-pub(super) fn brain_that_selects(
-    dir: &std::path::Path,
-    reply: &str,
-) -> (HarnessBrain, Arc<SelectingProvider>) {
-    brain_that_selects_with(dir, reply, None, None)
-}
-
 /// [`brain_that_selects`], plus an optional plan and usage meter, so a
 /// test can place the company past its plan-level total-token ceiling.
 pub(super) fn brain_that_selects_with(
@@ -258,6 +176,7 @@ pub(super) fn brain_that_selects_with(
         selector_calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -291,6 +210,7 @@ pub(super) fn brain_that_selects_with(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -521,6 +441,7 @@ pub(super) fn brain_that_delegates_with(
         steer: steer.clone(),
     });
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -554,6 +475,7 @@ pub(super) fn brain_that_delegates_with(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

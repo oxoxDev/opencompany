@@ -25,10 +25,9 @@ export type OriginConversation =
   | { kind: "channel"; channelId: string; threadId?: string };
 
 /**
- * Resolved through {@link channelForThread}, not a bare `map[originChatId]`:
- * the host compares the General spellings case-insensitively and echoes back
- * whichever one it was addressed with, so a direct index misses a card opened
- * from `MAIN`.
+ * Resolved through {@link channelForThread}, not a bare `map[originChatId]`,
+ * so a `dm:`-prefixed origin resolves too. A card raised in `#general` has the
+ * origin `general`.
  */
 export function originConversation(
   originChatId: string | undefined | null,

@@ -34,12 +34,20 @@ const { toast } = await import("sonner");
 let container: HTMLDivElement;
 let root: Root;
 
+/** The hub this host is on, as the host reports it — staging, deliberately,
+ * so a production constant leaking into a link would be caught. */
+const STAGING_KEYS_URL = "https://staging.tinyhumans.ai/dashboard?tab=api-keys";
+
 function credential(overrides: Partial<CompanyCredentialStatus> = {}): CompanyCredentialStatus {
   return {
     configured: true,
     source: "company",
     notice: "notice",
     hubLink: false,
+    account: {
+      manageKeysUrl: STAGING_KEYS_URL,
+      topUpUrl: "https://staging.tinyhumans.ai/dashboard?tab=billing",
+    },
     ...overrides,
   };
 }
@@ -369,14 +377,69 @@ describe("ApiKeyView's Connect to TinyHumans dialog", () => {
     expect(input).not.toBeNull();
     // Write-only: never echoed.
     expect(input.type).toBe("password");
-    expect(document.body.textContent ?? "").toContain("Add your API key");
+    // With a hub the grant leads and the field is the "or"; the label says so.
+    expect(document.body.textContent ?? "").toContain("Paste an API key");
     expect(document.body.textContent ?? "").toContain("Don't have an API key?");
 
     const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
     expect(link.textContent).toContain("Get an API key");
-    // The same page the setup wizard's Managed field sends an operator to.
-    expect(link.getAttribute("href")).toBe("https://tinyhumans.ai/dashboard?tab=api-keys");
+    // The hub THIS host is on, as the status reports it — never a production
+    // constant: a key minted there would be refused by a staging host.
+    expect(link.getAttribute("href")).toBe(STAGING_KEYS_URL);
     expect(link.getAttribute("target")).toBe("_blank");
+  });
+
+  it("offers no key link when the host derives no hub site", async () => {
+    await mount(
+      adminClient(async () =>
+        credential({ configured: false, source: "none", hubLink: false, account: undefined }),
+      ),
+    );
+    await press('[data-testid="account-add-key"]');
+    expect(document.querySelector('[data-testid="account-key-get-link"]')).toBeNull();
+    // The paste field is still the whole of the dialog.
+    expect(document.querySelector('[data-testid="account-key-input"]')).not.toBeNull();
+  });
+
+  it("offers the one-click grant ahead of the paste field where the host has a hub", async () => {
+    const posts: string[] = [];
+    const client = {
+      ...recordingClient([]),
+      post: async (path: string) => {
+        posts.push(path);
+        return { authorizeUrl: "https://staging.tinyhumans.ai/connect?x=1" };
+      },
+    } as unknown as OpenCompanyClient;
+    const assign = vi.fn();
+    const original = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...original, assign },
+    });
+    try {
+      await mount(client);
+      await press('[data-testid="account-add-key"]');
+
+      const connect = document.querySelector('[data-testid="connect-tinyhumans"]');
+      expect(connect?.textContent).toContain("Connect with TinyHumans");
+      // Still there for the person who would rather paste.
+      expect(document.querySelector('[data-testid="account-key-input"]')).not.toBeNull();
+
+      await press('[data-testid="connect-tinyhumans"]');
+      expect(posts).toEqual(["/api/v1/companies/acme/credential/link/start"]);
+      // A browser: the hub is a top-level navigation.
+      expect(assign).toHaveBeenCalledWith("https://staging.tinyhumans.ai/connect?x=1");
+    } finally {
+      Object.defineProperty(window, "location", { configurable: true, value: original });
+    }
+  });
+
+  it("offers no grant button on a host with no hub", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
+    );
+    await press('[data-testid="account-add-key"]');
+    expect(document.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
   });
 
   it("writes the typed key to the company credential route and closes", async () => {

@@ -41,7 +41,7 @@ fn a_terminal_belongs_to_the_channel_its_card_was_raised_in() {
     // …and nowhere else. A settle in one channel must not surface in
     // another, which is what would make the marker worse than no marker.
     assert!(!owns("strategy", "Strategy desk", &event));
-    assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
+    assert!(!owns(GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, &event));
     // The responder is not the channel — matching on it would file every
     // settle under a desk whose id happens to equal an agent's.
     assert!(!owns("engineer", "engineer", &event));
@@ -50,45 +50,30 @@ fn a_terminal_belongs_to_the_channel_its_card_was_raised_in() {
 /// **The most bug-prone line in `owns`.** A card no conversation raised
 /// belongs to no conversation's history — General emphatically included.
 ///
-/// Everywhere else in this module a missing chat id means "unaddressed,
-/// therefore General". On a terminal it means the opposite: the card was
-/// created on the board, by a scheduler, or before the origin was recorded.
-/// Folding it would post markers about board-only work into the operator's
-/// main line, which is a *new* bug rather than the one #377 fixes.
 #[test]
 fn a_terminal_with_no_origin_belongs_to_nobody_not_to_general() {
     let event = desk_task_completed(None, COLUMN_IN_REVIEW);
     assert!(
-        !owns(GENERAL_DESK, GENERAL_DESK, &event),
-        "an origin-less terminal must not fold into the General desk",
-    );
-    assert!(
-        !owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
-        "nor into the console's main line, which is General's other spelling",
+        !owns(GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, &event),
+        "an origin-less terminal must not land in #general",
     );
     assert!(!owns("", "", &event));
     assert!(!owns("engineering", "Engineering desk", &event));
 }
 
-/// A terminal whose origin *is* one of General's four spellings still folds
-/// like every other event does — the exception above is about `None`, not
-/// about loosening [`same_conversation`].
+/// A terminal journaled under a legacy General spelling decodes to #general
+/// on read, so #general owns it and no named desk does.
 #[test]
-fn a_terminal_raised_on_the_main_line_folds_like_any_other_event() {
-    for origin in [GENERAL_DESK, MAIN_THREAD_ID, ""] {
-        let event = desk_task_completed(Some(origin), COLUMN_PAUSED);
+fn a_legacy_general_terminal_decodes_to_general() {
+    for origin in ["General", "main", ""] {
+        let journaled = serde_json::to_value(desk_task_completed(Some(origin), COLUMN_PAUSED))
+            .expect("serialize");
+        let event: CompanyEvent = serde_json::from_value(journaled).expect("decode");
         assert!(
-            owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
-            "a terminal stored as `{origin}` belongs to the main line",
+            owns(GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, &event),
+            "a terminal stored as `{origin}` belongs to #general",
         );
-        assert!(
-            owns(GENERAL_DESK, GENERAL_DESK, &event),
-            "…and to the General desk's own id/name",
-        );
-        assert!(
-            !owns("strategy", "Strategy desk", &event),
-            "…and to no named desk",
-        );
+        assert!(!owns("strategy", "Strategy desk", &event));
     }
 }
 

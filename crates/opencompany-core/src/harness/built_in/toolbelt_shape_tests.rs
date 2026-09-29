@@ -56,6 +56,25 @@ fn an_agent_with_no_sandbox_namespace_gets_no_section() {
     assert_eq!(sandbox_brief(false, false, false), "");
 }
 
+#[test]
+fn web_brief_distinguishes_fetching_from_discovery() {
+    let fetch_only = web_brief(true, false);
+    assert!(fetch_only.contains("Use `web_fetch`"));
+    assert!(fetch_only.contains("No `web_search` provider is connected"));
+    assert!(fetch_only.contains("Do not substitute repeated workspace or ledger reads"));
+
+    let with_search = web_brief(true, true);
+    assert!(with_search.contains("Use `web_search` to discover"));
+    assert!(!with_search.contains("No `web_search` provider is connected"));
+    assert!(with_search.contains("stop after that one call"));
+
+    let search_only = web_brief(false, true);
+    assert!(search_only.contains("URL fetching is not granted"));
+    assert!(!search_only.contains("with `web_fetch`"));
+
+    assert_eq!(web_brief(false, false), "");
+}
+
 /// The two things the sandbox brief exists to say, both of which the belt
 /// enforces whether or not the agent knows them: file/code paths are
 /// confined (`exec_security` sets `workspace_only`), and producing the

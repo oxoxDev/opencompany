@@ -400,9 +400,9 @@ passer-by could not have asked the host for themselves. Three surfaces apply it:
   before contacting it, so the row says what is wrong instead of blaming the
   network.
 
-The webview also runs under a CSP (`crates/opencompany-app/tauri.conf.json`) whose
-`connect-src` allows the IPC origin only. All host traffic goes through Rust and
-needs nothing else.
+The webview also runs under a CSP (`crates/opencompany-app/tauri.conf.json`).
+Tauri does not load or post to OpenPanel: the browser loader exits for Tauri,
+and OpenPanel is available only in an explicitly opted-in, non-Tauri browser.
 
 ## The embedded host
 

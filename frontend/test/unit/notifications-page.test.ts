@@ -35,11 +35,6 @@ import { byNewestFirst, notificationHref } from "@/lib/notification-links";
 import { VIEWS } from "@/lib/console-routes";
 import { NotificationsView } from "@/views/NotificationsView";
 
-const CHANNELS = {
-  rendered: new Set(["desk-design", "desk-ops"]),
-  mainChannelId: "desk-design",
-};
-
 function row(over: Partial<NotificationDto> = {}): NotificationDto {
   return {
     id: "n1",
@@ -103,7 +98,6 @@ function renderPage(over: { forceApprovalsTab?: boolean; sub?: string | null } =
         company: "acme",
         feed,
         notifications: [],
-        channels: CHANNELS,
         onNotificationsRead: () => undefined,
         onResolved: () => undefined,
         onGoToConversation: () => undefined,
@@ -190,13 +184,13 @@ describe("choosing a tab from the legacy approvals head", () => {
 
 describe("where a row sends you", () => {
   it("opens the card a task row is about, not the board", () => {
-    expect(notificationHref(row({ subjectKind: "task", subjectId: "t 1" }), CHANNELS)).toBe(
+    expect(notificationHref(row({ subjectKind: "task", subjectId: "t 1" }))).toBe(
       "#/tasks/t%201",
     );
   });
 
   it("opens the run a run row is about", () => {
-    expect(notificationHref(row({ subjectKind: "run", subjectId: "r1" }), CHANNELS)).toBe(
+    expect(notificationHref(row({ subjectKind: "run", subjectId: "r1" }))).toBe(
       "#/observatory/r1",
     );
   });
@@ -205,13 +199,13 @@ describe("where a row sends you", () => {
     // `#/approvals/<id>` narrows on a BOARD TASK id (#883). An approval id is
     // not one, so a narrowed queue would match nothing and render "this card is
     // clear" — a lie about the row that sent the operator there.
-    expect(notificationHref(row({ subjectKind: "approval", subjectId: "a1" }), CHANNELS)).toBe(
+    expect(notificationHref(row({ subjectKind: "approval", subjectId: "a1" }))).toBe(
       "#/approvals",
     );
   });
 
   it("resolves a message row through the channel the host recorded", () => {
-    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }), CHANNELS)).toBe(
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }))).toBe(
       "#/chat/desk-ops?m=h412",
     );
   });
@@ -223,13 +217,13 @@ describe("where a row sends you", () => {
     // nothing to scroll to, which is what `search/sources.ts` documents having
     // learned. Without the anchor at all, a mention above the fold in a busy
     // channel opens the room and leaves the operator to hunt (Codex).
-    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }), CHANNELS)).toContain(
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "412" }))).toContain(
       "?m=h412",
     );
     // A row carrying no subject is still a link to the room. `RoomView` gives
     // up quietly on an anchor it cannot find, so the degraded case here is the
     // behaviour this had before the anchor existed, not a broken link.
-    expect(notificationHref(row({ context: "desk-ops", subjectId: "" }), CHANNELS)).toBe(
+    expect(notificationHref(row({ context: "desk-ops", subjectId: "" }))).toBe(
       "#/chat/desk-ops",
     );
   });
@@ -247,18 +241,52 @@ describe("where a row sends you", () => {
     // segment reaches `readSegments`, which does not.
     const dm = "dm:ada-1f3k";
     expect(
-      notificationHref(row({ context: dm, subjectId: "9" }), {
-        rendered: new Set([dm]),
-        mainChannelId: "desk-design",
-      }),
+      notificationHref(row({ context: dm, subjectId: "9" })),
     ).toBe(`#/chat/${dm}?m=h9`);
   });
 
-  it("lands a legacy general-chat context on the rendered main channel", () => {
-    // The same resolution the mention badge and the shell's thread re-read
-    // share (issue #65) — not a second copy of the rule.
-    expect(notificationHref(row({ context: "general", subjectId: "7" }), CHANNELS)).toBe(
-      "#/chat/desk-design?m=h7",
+  it("opens an ordinary workflow row on the workflows list", () => {
+    expect(
+      notificationHref(
+        row({ kind: "workflow_failed", subjectKind: "workflow", subjectId: "wf1", context: "desk-ops" }),
+      ),
+    ).toBe("#/workflows");
+    expect(
+      notificationHref(
+        row({ kind: "workflow_report", subjectKind: "workflow", subjectId: "wf1", context: undefined }),
+      ),
+    ).toBe("#/workflows");
+  });
+
+  it("opens a workflow report on the DM it was journaled into", () => {
+    expect(
+      notificationHref(
+        row({
+          kind: "workflow_report",
+          subjectKind: "workflow",
+          subjectId: "wf1",
+          context: "dm:product_manager",
+        }),
+      ),
+    ).toBe("#/chat/dm:product_manager");
+  });
+
+  it("opens a workflow report named by the bare teammate id on that teammate's DM", () => {
+    expect(
+      notificationHref(
+        row({
+          kind: "workflow_report",
+          subjectKind: "workflow",
+          subjectId: "wf1",
+          context: "product_manager",
+        }),
+      ),
+    ).toBe("#/chat/dm:product_manager");
+  });
+
+  it("opens #general for a mention in #general", () => {
+    expect(notificationHref(row({ context: "general", subjectId: "7" }))).toBe(
+      "#/chat/general?m=h7",
     );
   });
 
@@ -266,9 +294,9 @@ describe("where a row sends you", () => {
     // The host has no kind allowlist on purpose, so a future producer can write
     // a subject this console has never seen. The row still shows its title; it
     // simply is not a link.
-    expect(notificationHref(row({ subjectKind: "moonbase" }), CHANNELS)).toBeNull();
-    expect(notificationHref(row({ subjectKind: "task", subjectId: "" }), CHANNELS)).toBeNull();
-    expect(notificationHref(row({ context: undefined }), CHANNELS)).toBeNull();
+    expect(notificationHref(row({ subjectKind: "moonbase" }))).toBeNull();
+    expect(notificationHref(row({ subjectKind: "task", subjectId: "" }))).toBeNull();
+    expect(notificationHref(row({ context: undefined }))).toBeNull();
   });
 });
 

@@ -35,14 +35,21 @@ fn walk_is_deterministic_and_markdown_only() {
     std::fs::write(dir.join("cover.png"), b"\x89PNG").unwrap();
 
     let nodes = walk_workspace(&dir).unwrap();
-    let paths: Vec<String> = nodes
-        .iter()
-        .map(|n| n.rel_path.display().to_string())
-        .collect();
+    // Compared as paths, not as rendered strings. `rel_path` carries the
+    // platform's separator, so `display()` yields `brand\brand-voice.md` on
+    // Windows and the literal below never matched there. `Path` equality is
+    // component-wise, which is the contract the walk actually owes: the same
+    // components in the same order, whatever the platform writes between them.
+    let paths: Vec<PathBuf> = nodes.iter().map(|n| n.rel_path.clone()).collect();
     // Sorted, folders + markdown only; the .txt and .png are skipped.
     assert_eq!(
         paths,
-        vec!["brand", "brand/brand-voice.md", "campaigns", "readme.md"]
+        vec![
+            PathBuf::from("brand"),
+            PathBuf::from("brand/brand-voice.md"),
+            PathBuf::from("campaigns"),
+            PathBuf::from("readme.md"),
+        ]
     );
 
     let readme = nodes

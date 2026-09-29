@@ -12,6 +12,8 @@
 // consistent with the file the whole surface exists to write.
 
 import type { OpenCompanyClient } from "./client";
+import type { ComposioApiKeyTest } from "./composio";
+import type { AddProviderInput, ProbeResult } from "./inference";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 
 /** Which precedence layer supplied a field's current value. */
@@ -88,6 +90,15 @@ export interface SetupStatus {
   templates: SetupTemplate[];
   /** Sign-in modes this host accepts. `none` is absent on a routable bind. */
   auth_modes: string[];
+  /**
+   * The mode the wizard should preselect when `config.toml` names none.
+   *
+   * `none` on the packaged desktop host, which already runs without a
+   * sign-in: one machine, one person, no mailbox. Reported by the host so a
+   * browser tab pointed at a desktop host gets the same answer as the webview.
+   * Absent everywhere else, and on a host too old to report it.
+   */
+  default_auth_mode?: string;
   /** Which optional surfaces this build has. */
   build: SetupBuild;
   /** Companies already registered. Non-empty means the seed step is skipped. */
@@ -102,9 +113,9 @@ export interface SetupStatus {
  * What this host can do with a mailbox.
  *
  * Separate from `auth_modes`, which says which modes are *legal*: `email` stays
- * on that list whatever mail the host has, because hub OAuth and passwords sign
- * people in without a transport. This says which sign-in can honestly be
- * offered today.
+ * on that list whatever mail the host has, because a password signs people in
+ * without a transport. This says whether a magic link can honestly be offered
+ * today.
  *
  * Required rather than optional, deliberately. An optional field would let a
  * host too old to report it fall through to whatever the UI treats `undefined`
@@ -136,6 +147,12 @@ export interface InferenceReady {
   provider: string | null;
   /** The endpoint it resolves to. Shown so a green tick is checkable. */
   base_url: string | null;
+  /**
+   * The API-keys page of the hub this host is on, for minting a key by hand.
+   * `null` when the host's `api_url` follows no known convention; older hosts
+   * omit it. Never a production default: a staging host links to staging.
+   */
+  keys_url?: string | null;
 }
 
 /** The providers this host can talk to (`INFERENCE_PROVIDERS`). */
@@ -210,6 +227,46 @@ export function testInference(
 }
 
 /**
+ * Read a drafted endpoint's model catalogue before a company exists.
+ *
+ * The same probe `POST {scope}/inference/probe` runs, reached through the
+ * first-run gate rather than through the company admin one — the add-provider
+ * sequence mounted in the wizard needs the endpoint's own list to offer, and
+ * there is no company to scope the read to yet.
+ *
+ * Not {@link testInference}: that answers with one model rather than the list
+ * the model step is made of, and it falls back to the host's own injected
+ * credential when the key is blank — which would report a pass for a key this
+ * operator never gave.
+ */
+export function probeSetupDraft(
+  client: OpenCompanyClient,
+  body: { baseUrl: string; key?: string; kind?: string },
+): Promise<ProbeResult> {
+  return client.post<ProbeResult>("/api/v1/setup/inference/probe", body);
+}
+
+/**
+ * Check a Composio API key before there is a company to store it against.
+ *
+ * Takes the key, where the company-scoped route deliberately takes no body —
+ * there is no store to read it from yet. The destination is not in the body
+ * either way: the host dials Composio's own compile-time URL, so no caller can
+ * point this anywhere.
+ *
+ * Without it an operator types a wrong key here and learns nothing until they
+ * open Connections and find an empty tool belt.
+ */
+export function testSetupComposioKey(
+  client: OpenCompanyClient,
+  apiKey: string,
+): Promise<ComposioApiKeyTest> {
+  return client.post<ComposioApiKeyTest>("/api/v1/setup/composio/api-key/test", {
+    apiKey,
+  });
+}
+
+/**
  * A completed wizard.
  *
  * A `null` field value clears the key, letting the next precedence layer supply
@@ -252,6 +309,12 @@ export interface SetupInput {
    */
   admin_email?: string | null;
   /**
+   * The first admin's password, set on the account the moment the company
+   * exists so the wizard can sign the operator straight in. Write-only.
+   * Ignored by a host with no sign-in, and by one too old to know the field.
+   */
+  admin_password?: string | null;
+  /**
    * The TinyHumans account key the managed branch collected, stored against
    * the company this call seeds and fanned out from there.
    *
@@ -276,6 +339,32 @@ export interface SetupInput {
    * unmade.
    */
   tinyhumans_model?: string | null;
+  /**
+   * The provider the self-managed branch connected, added to the company this
+   * call seeds.
+   *
+   * The **same body** `POST …/inference/providers` takes — so the wizard's
+   * provider is created by the same host function the LLM page's add runs,
+   * with its slot guard, its first-provider default, its rollback pair and its
+   * auto-route, rather than by a wizard-only write that would land the row
+   * without any of them.
+   *
+   * Carried on the apply rather than sent from the step that collected it,
+   * because that route is admin-scoped to an existing company and first run
+   * has neither.
+   */
+  provider_draft?: AddProviderInput | null;
+  /**
+   * The Composio credential the self-managed branch collected, stored against
+   * the company this call seeds.
+   *
+   * One field for two routes, because the Connections dialog is one form for
+   * both: a company's own Composio API key (which also selects BYOK), or a
+   * token for the TinyHumans-managed route. The values are the same two
+   * `ComposioForm.credential` carries, so the form's own answer travels
+   * unchanged.
+   */
+  composio_draft?: { credential: "composio-api-key" | "composio-token"; value: string } | null;
 }
 
 /** The company the wizard designed, as the review step hands it over. */
@@ -443,6 +532,21 @@ export interface SetupApplied {
    * would be the one thing this step exists to stop doing.
    */
   credential_note?: string | null;
+  /**
+   * What connecting the self-managed branch's provider did, in the host's own
+   * words — the same sentence the LLM page's add toast carries.
+   *
+   * Absent when no provider was drafted, and absent on a host predating the
+   * field. Carries the refusal too: the company is built by the time the add
+   * runs, so an endpoint that stopped answering is said rather than turned
+   * into a failed setup.
+   */
+  provider_note?: string | null;
+  /**
+   * What the Composio credential the wizard collected did. Absent when none was
+   * sent, and absent on a host predating the field.
+   */
+  composio_note?: string | null;
 }
 
 /** Read this instance's setup state. */

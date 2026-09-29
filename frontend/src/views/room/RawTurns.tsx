@@ -38,13 +38,15 @@
 // that names the live session — and is never re-derived in TypeScript, because
 // a second spelling of a session's name is one that can drift from the runtime's.
 //
-// Nothing collapses. The referral and aside collapses the chat views reuse from
-// `StepTimeline` are summaries, and a summary is the thing this exists to get
-// out from behind, so they render as their own lines, in full.
+// Nothing collapses. The referral collapse the chat views reuse from
+// `StepTimeline` is a summary, and a summary is the thing this exists to get
+// out from behind, so it renders as its own lines, in full. An utterance chip
+// becomes the episode and round it was committed in, spelled out.
 
 import type { AgentSessionMessageDto, TurnStep } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { useLayoutEffect, useRef } from "react";
 
 export function RawTurns({
   rows,
@@ -64,6 +66,18 @@ export function RawTurns({
    */
   showChannel?: boolean;
 }) {
+  const endRef = useRef<HTMLLIElement>(null);
+  const lastRowId = rows.at(-1)?.id;
+
+  // Raw turns are diagnostic history, so opening the view at row one makes the
+  // operator scroll through everything they already know before reaching the
+  // turn they came to inspect. Run after layout so the sentinel's final
+  // position includes unfolded tool results, and repeat only when a new last
+  // row arrives.
+  useLayoutEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [lastRowId]);
+
   // The session's own name, read off the rows and never rebuilt here.
   //
   // Every row of one response carries the same value — the host mints it once
@@ -100,6 +114,12 @@ export function RawTurns({
             showChannel={showChannel}
           />
         ))}
+        <li
+          ref={endRef}
+          className="h-px"
+          aria-hidden="true"
+          data-testid="agent-session-raw-end"
+        />
       </ol>
     </div>
   );
@@ -184,14 +204,19 @@ function RawTurn({
           )}
         </pre>
       ))}
-      {row.asideConversation?.lines.map((aside, index) => (
+      {row.episode && (
+        // The round and speech act, as the driver recorded them — the raw
+        // view's counterpart of the utterance chip. `to` is printed because a
+        // `dm`'s recipients are what narrowed its audience.
         <pre
-          key={`aside:${index}`}
           className="mt-1 font-mono text-2xs leading-relaxed whitespace-pre-wrap text-muted-foreground"
+          data-testid="agent-session-raw-episode"
         >
-          {cueLine("aside", aside.authorId, aside.text)}
+          {`[episode ${row.episode.id} · round ${row.episode.revision}] ${row.episode.kind}${
+            row.episode.to?.length ? ` → ${row.episode.to.join(", ")}` : ""
+          }`}
         </pre>
-      ))}
+      )}
     </li>
   );
 }
@@ -200,7 +225,7 @@ function RawTurn({
  * The host's own cue shape, reproduced.
  *
  * Kept as one function so the two places a turn renders an inbound line — the
- * turn body and the referral/aside lines under it — cannot disagree about what
+ * turn body and the referral lines under it — cannot disagree about what
  * a cue looks like. `render_cues` trims the text; so does this.
  */
 function cueLine(channel: string, author: string, text: string): string {

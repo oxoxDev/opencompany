@@ -15,13 +15,23 @@
 //! - **[`update`]** — replacing this application with a newer one, which is the
 //!   one thing a desktop build cannot get from the host it is talking to.
 //! - **[`commands`]** — the thin Tauri surface over all three.
+//! - **[`bundle_migration`]** — carrying state over from the pre-rename
+//!   bundle identifier, once.
+//! - **[`crash`]** — where the shell's crash reports go, including the
+//!   desktop project's compiled-in DSN and the hidden `sentry-test` check.
 //!
 //! The console itself is unchanged: it is the same `frontend/` bundle the web
 //! deployment serves, and it reaches all of the above through the `Transport`
 //! seam it already had.
 
 pub mod acp;
+/// State the OS filed under the pre-rename bundle identifier, carried over once
+/// before the webview starts. See the module docs.
+pub mod bundle_migration;
 pub mod commands;
+/// Where the shell's crash reports go: the operator's DSN, else the desktop
+/// project's compiled-in one. See the module docs.
+pub mod crash;
 pub mod embedded;
 /// Who is sitting at this machine, as the OS already knows — read once, to
 /// prefill a profile nobody has filled in yet. See the module docs for why it is
@@ -75,6 +85,18 @@ pub fn default_data_dir() -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    // The shell and every embedded host share the core's single process-wide
+    // client, scrubber, panic hook, release format, and tracing bridge. The
+    // DSN is the operator's `OPENCOMPANY_SENTRY_DSN` when set, else the
+    // desktop project's compiled-in one (`crash::DesktopEnv`);
+    // `OPENCOMPANY_SENTRY=off` silences both.
+    let (crash_reporting, crash_guard) = opencompany::observability::init(
+        opencompany::app::deployment::Deployment::Desktop,
+        &crash::DesktopEnv::new(opencompany::app::config::ProcessEnv),
+    );
     // The `tinyagents::observability` directive is the vendored durable-append
     // writer's reporting target, and it has to be named explicitly here for a
     // reason the host binary's filter does not share: this fallback carries no
@@ -86,14 +108,20 @@ pub fn run() {
     // `src/bin/opencompany.rs` for the full argument (issue #450). Latent while
     // this crate does not enable the `openhuman` feature; a landmine for
     // whoever does.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "opencompany_desktop_lib=info,opencompany=info,tinyagents::observability=warn"
-                    .into()
-            }),
-        )
+    let log_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "opencompany_desktop_lib=info,opencompany=info,tinyagents::observability=warn".into()
+    });
+    tracing_subscriber::registry()
+        .with(log_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(opencompany::observability::tracing_layer())
         .init();
+    tracing::info!("{}", crash_reporting.describe());
+
+    // Before anything creates the webview: its data store (the console's saved
+    // connections live in its `localStorage`) is filed under the bundle
+    // identifier, and a fresh one would be created empty under the new id.
+    bundle_migration::run();
 
     let data_dir = default_data_dir();
 
@@ -107,7 +135,7 @@ pub fn run() {
     // server tasks belong to a runtime nothing else holds a handle to.
     let local = tauri::async_runtime::block_on(LocalHosts::load(data_dir.clone()));
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // Replacing this application with a newer one. The endpoint and the
         // minisign public key the downloaded bundle is verified against live in
@@ -151,8 +179,12 @@ pub fn run() {
             commands::oc_app_update_download,
             commands::oc_app_update_install,
         ])
-        .run(tauri::generate_context!())
-        .expect("run the desktop shell");
+        .run(tauri::generate_context!());
+
+    if !crash_guard.flush(opencompany::observability::FLUSH_TIMEOUT) {
+        tracing::debug!("crash reporting: flush did not finish inside the shutdown budget");
+    }
+    result.expect("run the desktop shell");
 }
 
 #[cfg(test)]

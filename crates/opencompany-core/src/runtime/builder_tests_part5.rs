@@ -369,8 +369,7 @@ async fn a_console_tool_grant_survives_a_rebuild() {
 ///
 /// Asserted through `effective_grants` on the runtime's own manifest rather
 /// than by poking the provider, because that function IS the provider's
-/// input: `build` passes its result straight to `StubToolProvider::new` /
-/// `OpenHumanToolProvider::new`.
+/// input: `build` passes its result straight to `StubToolProvider::new`.
 #[tokio::test]
 async fn a_console_tool_grant_reaches_the_grant_list_the_provider_enforces() {
     let home_dir = tempfile::Builder::new()

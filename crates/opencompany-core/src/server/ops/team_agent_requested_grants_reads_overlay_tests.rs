@@ -15,6 +15,7 @@ fn requested_grants_reads_overlay_then_manifest_then_empty() {
     )
     .unwrap();
     let mut record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

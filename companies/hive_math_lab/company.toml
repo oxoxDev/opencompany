@@ -47,6 +47,7 @@ allow = ["files", "docs", "shell", "code", "workspace", "workspace.*", "mcp:*"]
 # no `tier` at all: the skeptic, the brute forcer and the archivist do work
 # that does not need the strongest model bought, so they fall through to
 # `chat-v1` / `flash` — cheap on purpose, not by oversight.
+
 [inference]
 models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "max-reasoning", "vision-v1" = "flash" }
 
@@ -81,90 +82,11 @@ members = [
     "archivist",
 ]
 
-[group_chat.hive]
-enabled = true
-# Six members x three turns each: enough for an opening position, a reply to
-# the room, and a commit — the shortest sequence that can actually reach a
-# quorum of three grounded, distinct supporters.
-turn_budget = 18
-quorum = 3
-blind_round = true
-# A `!support`/`!object` with no `^citation` does not count towards quorum.
-# Without this a room can converge on a proposal nobody actually checked —
-# exactly the failure the live run showed: two identical `!propose`s and no
-# `!evidence` behind either.
-require_evidential = true
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-# The following four keys are read by `tinyhivemind_hive` as it lands
-# (concurrent with this bundle); `check` on this manifest may not yet enforce
-# them. Left in deliberately rather than waiting: a manifest that already
-# says what it wants is how the fold's own tests know what "wants" means.
-#
-#   - `refutation_cap`: how many live `!object`s a single option can carry
-#     before the room is required to treat it as refuted rather than merely
-#     contested. Two: a lone objection is a disagreement, a second one from a
-#     different instrument is a pattern.
-#   - `dominance_cap`: how far ahead of the field a proposal's supporter count
-#     may run before the episode stops accepting *more* of the same kind of
-#     support (identical instruments piling on is not more evidence). Three.
-#   - `repetition_cap`: how many turns in a row a member may restate a
-#     position that added no new citation before the episode discounts it.
-#     One — the prompt already shows a member its own last line.
-refutation_cap = 2
-dominance_cap = 3
-repetition_cap = 1
-
-# Per-member move budget, enforced by the driver. This is the actual fix for
-# the live run's symptom: nobody but the programmer may ever `!propose`, so
-# two independent numbers on the floor is structurally impossible, and a
-# proposal only carries once instruments other than the programmer have
-# grounded it.
-#
-# `!support` is held by the four seats that actually compute or check a
-# candidate answer: the theorist (reduces it), the programmer (implements
-# it), the verifier (independently re-implements it) and the brute forcer
-# (independently re-derives it at a reduced bound — the same category of
-# check the verifier's own brief already treats as "no clever step to be
-# wrong about", just run by a dedicated seat). The skeptic and the archivist
-# never hold it: neither checks the *number* — the skeptic checks the
-# question being answered and the archivist only recalls prior work — and a
-# `!support` from either would satisfy `require_evidential`'s citation check
-# without actually grounding the claim it backs, which is the citation-chain
-# loophole `docs/spec/runtime/hivemind-deliberation.md` warns about under a
-# different name.
-#
-# A quorum of three against four eligible seats leaves one seat of slack
-# rather than none: `check` refuses a `hive.moves` table that permits
-# `!support` to fewer distinct seats than `hive.quorum` needs, because that
-# configuration can never carry anything, but three-of-three (this table's
-# previous shape) is the *reachable-yet-fragile* case that check accepts and
-# this comment used to ship unfixed. A live six-seat run hit exactly that:
-# with only the theorist, programmer and verifier able to `!support`, every
-# one of them had to spend a turn on every carried topic, and the desk spent
-# its last six turns with the other three seats deferring to the one member
-# who could still legally close it, on an answer four independent checks had
-# already confirmed. See `docs/spec/runtime/hivemind-deliberation.md`.
-#
-# The table gates the *deliberation* markers only. `commit`, `question` and
-# `defer` belong to every seat whatever a list says, so the `commit` entries
-# below describe nothing and the `defer` entries describe nothing — both are
-# kept for readability and ignored. That is deliberate: the fold hands the
-# Commit phase to whoever the attention market picks, and a live episode of
-# this desk reached quorum at the third evidential `!support` and then gave
-# the floor to three seats a restricted `commit` had left with nothing legal
-# to say, spending eight turns before reporting itself exhausted on an answer
-# it had already carried. Recording a topic the room has carried re-derives
-# nothing, so there is no seat too cheap to do it.
-[group_chat.hive.moves]
-theorist = ["support", "object", "evidence", "question", "pin", "defer"]
-programmer = ["propose", "evidence", "support", "commit", "defer"]
-verifier = ["support", "object", "evidence", "commit", "defer"]
-skeptic = ["question", "object", "evidence", "defer"]
-brute_forcer = ["support", "evidence", "object", "defer"]
-archivist = ["evidence", "question", "pin", "defer"]
-
-# The records desk is kept so an accepted answer still has somewhere to be
-# written down. One member, so it answers as it always did.
 [[group_chat]]
 id = "records"
 name = "Records desk"

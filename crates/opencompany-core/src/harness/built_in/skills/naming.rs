@@ -79,8 +79,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
 /// Tool name: enumerate the skills installed for this agent.
 pub const LIST_SKILLS_TOOL: &str = "list_skills";
@@ -258,7 +258,7 @@ impl Tool for SkillTool {
         &self,
         args: Value,
         options: ToolCallOptions,
-        context: Option<&dyn oh::tools::traits::ToolRunContext>,
+        context: Option<&dyn tinytools::ToolRunContext>,
     ) -> anyhow::Result<ToolResult> {
         self.rewrite_outcome(
             self.inner
@@ -280,11 +280,11 @@ impl Tool for SkillTool {
             .permission_level_with_args(&self.to_inner_args(args.clone()))
     }
 
-    fn scope(&self) -> oh::tools::traits::ToolScope {
+    fn scope(&self) -> tinytools::ToolScope {
         self.inner.scope()
     }
 
-    fn category(&self) -> oh::tools::traits::ToolCategory {
+    fn category(&self) -> tinytools::ToolCategory {
         self.inner.category()
     }
 
@@ -306,7 +306,7 @@ impl Tool for SkillTool {
         self.inner.max_result_size_chars()
     }
 
-    fn timeout_policy(&self, args: &Value) -> oh::tools::traits::ToolTimeout {
+    fn timeout_policy(&self, args: &Value) -> tinytools::ToolTimeout {
         self.inner.timeout_policy(&self.to_inner_args(args.clone()))
     }
 }
@@ -366,6 +366,8 @@ fn rewrite_result(mut result: ToolResult) -> ToolResult {
                 }
                 _ => *text = rewrite_prose(text),
             },
+            // Binary blocks carry no key to rename.
+            ToolContent::Image { .. } | ToolContent::File { .. } => {}
         }
     }
     if let Some(md) = result.markdown_formatted.as_mut() {

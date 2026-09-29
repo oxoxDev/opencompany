@@ -1,6 +1,6 @@
 use super::*;
 use crate::analytics::config::{
-    CLIENT_ID_ENV, CLIENT_SECRET_ENV, ClientCredentials, ENABLE_ENV, ENDPOINT_ENV, Silence,
+    CLIENT_ID_ENV, ClientCredentials, ENABLE_ENV, ENDPOINT_ENV, Silence,
 };
 use crate::app::config::MapEnv;
 use crate::app::deployment::DEPLOYMENT_ENV;
@@ -12,11 +12,10 @@ use crate::{AppConfig, AppState};
 /// reporting.
 const TEST_ENDPOINT: &str = "https://collector.invalid/track";
 
-/// The three variables a reporting deployment configures.
+/// The two variables a reporting deployment configures.
 fn credential_env(pairs: &[(&str, &str)]) -> MapEnv {
     let mut all = vec![
         (CLIENT_ID_ENV, "not-a-real-client-id"),
-        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
         (ENDPOINT_ENV, TEST_ENDPOINT),
     ];
     all.extend_from_slice(pairs);
@@ -27,7 +26,7 @@ fn credential_env(pairs: &[(&str, &str)]) -> MapEnv {
 fn reporting(endpoint: &str) -> Decision {
     Decision::Report {
         endpoint: endpoint.to_string(),
-        credentials: ClientCredentials::new("not-a-real-client-id", "not-a-real-client-secret"),
+        credentials: ClientCredentials::new("not-a-real-client-id"),
     }
 }
 
@@ -65,13 +64,11 @@ fn a_hosted_tenant_resolves_to_reporting() {
         &credential_env(&[(DEPLOYMENT_ENV, "hosted-tenant")]),
     );
     assert!(decision.reports(), "{decision:?}");
-    for half in ["not-a-real-client-id", "not-a-real-client-secret"] {
-        assert!(
-            !describe(&decision).contains(half),
-            "the boot line must not carry {half}: {}",
-            describe(&decision)
-        );
-    }
+    assert!(
+        !describe(&decision).contains("not-a-real-client-id"),
+        "the boot line must not carry the client id: {}",
+        describe(&decision)
+    );
 }
 
 /// **The boot line reports behaviour, not configuration.** A build with no
@@ -84,7 +81,7 @@ fn a_hosted_tenant_resolves_to_reporting() {
 fn the_boot_line_says_when_the_build_has_no_transport() {
     let decision = reporting(TEST_ENDPOINT);
     let line = describe(&decision);
-    assert!(!line.contains("not-a-real-client-secret"), "{line}");
+    assert!(!line.contains("not-a-real-client-id"), "{line}");
 
     if cfg!(feature = "analytics") {
         assert_eq!(

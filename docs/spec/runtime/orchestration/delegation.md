@@ -1,7 +1,7 @@
-# Delegation, direction, and the end of desks
+# Delegation, direction, and desks
 
-*Phase P4. Waiting for delegated work, steering a run in flight, and collapsing
-desks into workflows.*
+*Phase P4. Waiting for delegated work and steering a run in flight — and why
+the desk collapse this page used to end with is withdrawn.*
 
 Terms: [glossary](../../glossary.md).
 
@@ -11,16 +11,18 @@ Terms: [glossary](../../glossary.md).
 
 ### The gap
 
-Delegation today is fire-and-forget. `spawn_task` and `delegate_to_desk` push
-onto a `DelegationQueue` that is drained **after** the parent turn by the
-`DelegationRunner`. There is no handle a caller can hold, no future to block on,
-and **no way for a turn to wait for work it asked for**.
+Board delegation today is fire-and-forget. `spawn_task` (and the
+orchestrator's `assign_task`) push onto a `DelegationQueue` that is drained
+**after** the parent turn by the `DelegationRunner`. There is no handle a
+caller can hold, no future to block on, and **no way for a turn to wait for
+work it asked for**.
 
-That single absence is why several other things are shaped the way they are:
-`delegate_to_desk` has to run its child's turn *synchronously inside* the
-delegating turn to return a reply at all, and the workflow runner has to refuse
-`delegate_to_desk` outright because "a run has nowhere to land a synchronous
-reply".
+Conversation is the exception, by construction. A seat on a desk does not
+delegate to a colleague; it speaks (`post`, `dm`, `broadcast`), the round
+commits when every seat has spoken, and the next round is the reply
+([../hive.md](../hive.md)). The synchronous hand-offs that used to run a
+colleague's turn *inside* the caller's — `delegate_to_desk`,
+`delegate_to_teammate` — are gone with the relay they needed.
 
 ### What ships
 
@@ -140,76 +142,50 @@ system.
 
 ---
 
-## Desks are workflows
+## Desks are rooms
 
-### The claim
+### The claim this page used to make
 
-A desk is `{id, name, description, members}` plus three overlay types. Its
-entire runtime behaviour is: resolve the desk, take the first member who is a
-real roster teammate as the lead, run that member's turn, relay the reply.
+A desk was `{id, name, description, members}` plus three overlay types, and
+its entire runtime behaviour was: resolve the desk, take the first member who
+is a real roster teammate as the lead, run that member's turn, relay the
+reply. On that reading a desk was a workflow with one node, no error
+handling and a bespoke resolver, and the plan was to ship a `desk` workflow
+template, alias `delegate_to_desk` over `run_workflow` + `await_task`,
+migrate the four things a desk id means, and remove `GroupChat`.
 
-A workflow `agent` node already runs the same harness turn with the same
-toolbelt, the same persona, model, memory, approval policy and metering — and
-adds retries, `on_error` routing, `requires_approval` gating, conditions and
-switches, `sub_workflow` nesting, cron scheduling, cancellation, and supervised
-metered runs.
+### Why it is withdrawn
 
-The recursive-delegation feature is, in effect, a dynamic depth-capped
-cycle-checked graph. A workflow is the static, declarative, inspectable version
-of the same thing:
+The reading was true of the relay and false of the desk. What a desk is *for*
+is several people at one table, and the relay never gave it that: one lead
+answered, and a colleague was reached only by running their turn inside the
+lead's. [`hive.md`](../hive.md) gives the desk the thing the workflow engine
+does not have — a room whose seats run at the same time, read each other's
+committed rows, address each other directly, and end when the work is
+reported complete rather than when a graph runs out of nodes.
 
-| Delegation concept | Workflow equivalent |
-| --- | --- |
-| `MemberScope` — which desks a member may hand to | the allowed sub-graph |
-| `max_delegation_depth` | `sub_workflow` nesting depth |
-| scope-chain cycle rejection | the parser's self-reference rejection |
-| desk lead | the entry node |
+So the collapse runs the other way. The entity that went away is the relay:
+`delegate_to_desk`, `delegate_to_teammate`, the in-turn `ConversationDispatch`
+and the `TurnSpeech` fold. Desks stay, and the four things a desk id means —
+a chat thread, a channel adapter, an assignee, a workflow output destination
+— stay meaningful because every one of them is a way to reach the room.
 
-So the desk is not a weaker workflow. It is a workflow with one node, no error
-handling, and a bespoke resolver.
+### What a workflow is for
 
-### Why it lands in P4
-
-**The synchronous relay.** `delegate_to_desk` returns a reply into the caller's
-turn. Workflow runs are supervised, journalled, asynchronous and cancellable,
-which is exactly why the runner refuses `delegate_to_desk` from inside a run.
-
-[`await_task`](#the-join-primitive) is the missing landing place. Once a turn
-can wait for a run, a desk hand-off becomes "start the sub-workflow, await it,
-relay its result" — with the relay preserved rather than dropped.
-
-### The real obstacle: a desk id means four things
-
-A desk id is simultaneously:
-
-1. a **chat thread id** (with several legacy spellings for the default desk),
-2. a **channel adapter id**, one adapter per desk,
-3. a valid **assignee** value, resolved alongside roster teammates,
-4. a workflow **output destination**.
-
-Collapsing desks therefore means workflows become addressable as chat threads
-and as assignees, or those four consumers each get a migration. That — plus
-roughly 133 desk references in the operator surface alone, six REST routes,
-three overlay types with a legacy migration path, and a desk-completion event —
-is the actual cost. The delegation semantics are the easy part.
-
-### Sequence
-
-1. Ship a `desk` workflow template: one entry `agent` node, members as the
-   allowed sub-graph.
-2. Make `delegate_to_desk` a thin alias over `run_workflow` + `await_task`,
-   preserving the relay. Behaviour is unchanged from the caller's side.
-3. Migrate the four id consumers, one at a time, each behind its own change.
-4. Remove `GroupChat` from the manifest and the operator surface.
-
-Steps 1 and 2 are reversible and observable; step 3 is where the risk is; step 4
-is bookkeeping.
+A workflow is the static, inspectable graph for work that is a **pipeline**:
+retries, `on_error`, `requires_approval`, conditions, `sub_workflow` nesting,
+cron. A desk is for work that is a **conversation**. A workflow `agent` node
+still runs the same harness turn as a seat — same `AgentSpec`, same tools over
+the same MCP server, same metering — on a fresh session rather than the
+agent's standing one, and a workflow may deliver its output to a desk, which
+is how a pipeline's result reaches a room.
 
 ### Migration of shipped companies
 
-Four shipped companies declare desks. Their `[[group_chat]]` blocks become
-workflow files with an entry node per lead and the members as the permitted
-sub-graph. A company that declares no desks is unaffected.
+Every shipped company that declared `[group_chat.hive]` (the quorum, budget
+and move-grammar knobs) declares `[group_chat.routing]` instead; the old
+block is refused at load with a migration hint. A company that declares desks
+and no routing block gets the defaults.
 
 ---
 
@@ -233,5 +209,5 @@ sub-graph. A company that declares no desks is unaffected.
 - A directive cannot mark unverified work answered, force a restart, or end a
   run.
 - The role acting on a directive is not routed the claim ledger.
-- A desk-as-workflow hand-off returns the same relayed reply the desk did, for
-  each of the four shipped companies that declare desks.
+- Every shipped company that declares desks loads with `[group_chat.routing]`
+  or the defaults, and a `[group_chat.hive]` block is refused with the hint.

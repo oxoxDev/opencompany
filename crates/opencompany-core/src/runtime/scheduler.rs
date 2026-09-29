@@ -301,15 +301,34 @@ impl CompanyScheduler {
             self.last_fired.insert(idx, minute);
             match store.claim_fire(runtime.id(), &schedule.id, minute).await {
                 // Won the claim: this is the one process/replica that fires.
-                Ok(true) => {
-                    runtime
-                        .run_cycle(vec![CompanyEvent::ScheduleFired {
-                            cron: schedule.cron.clone(),
-                            prompt: schedule.prompt.clone(),
-                        }])
-                        .await?;
-                    fired += 1;
-                }
+                // One schedule's cycle failing must not end the tick: every
+                // schedule after it in this minute would go unfired, and a
+                // permanently broken one would hold them there.
+                //
+                // `Quiescing` is the exception, and it is not a special case
+                // so much as the same rule: the runtime has stopped accepting
+                // cycles altogether, so every schedule behind this one would
+                // be refused for that reason too. Carrying on would turn one
+                // retryable refusal into a whole minute of them, each logged
+                // as a failure of its own schedule.
+                Ok(true) => match runtime
+                    .run_cycle(vec![CompanyEvent::ScheduleFired {
+                        cron: schedule.cron.clone(),
+                        prompt: schedule.prompt.clone(),
+                    }])
+                    .await
+                {
+                    Ok(_) => fired += 1,
+                    Err(err @ crate::error::OpenCompanyError::Quiescing(_)) => return Err(err),
+                    Err(err) => {
+                        tracing::warn!(
+                            company = %runtime.id(),
+                            schedule = %schedule.id,
+                            %err,
+                            "scheduler: a fired schedule's cycle failed; the rest of this minute still fires"
+                        );
+                    }
+                },
                 // A peer — another replica, or this process before a restart —
                 // already claimed this minute. Skip with ZERO side effects.
                 Ok(false) => {}
@@ -433,27 +452,6 @@ impl CompanyScheduler {
             self.caught_up = true;
         }
         Ok(fired)
-    }
-
-    /// Runs one company's maintenance pass: sweep parked approvals past their
-    /// TTL to a default-deny, sweep single-use grants the agent never redeemed
-    /// (issue #243), and prune stale fire claims (issue #241).
-    ///
-    /// **No longer driven by this scheduler's loop** (issue #971). It delegates
-    /// to [`MaintenanceTicker`], the process-wide ticker that runs the same pass
-    /// for *every* registered company — including the ones with no manifest
-    /// `[[schedule]]`, which never spawned a scheduler and so were never swept
-    /// at all. Calling it from the cron loop too would sweep a scheduled company
-    /// twice a minute for no gain.
-    ///
-    /// Kept as a thin delegate rather than deleted so there is exactly one
-    /// implementation of "a company's maintenance pass". Its tests still hold
-    /// this scheduler to that behaviour, which is the point: the two callers
-    /// cannot drift, because there is only one thing to drift from.
-    pub async fn tick_maintenance(&self) -> Result<Vec<crate::ports::types::ApprovalId>> {
-        let runtime = self.runtime();
-        let minute = self.clock.now_millis() / MINUTE_MS;
-        Ok(crate::runtime::maintenance::sweep_company(runtime.id(), &runtime, minute).await)
     }
 
     /// Spawns a background task that ticks on every minute boundary until

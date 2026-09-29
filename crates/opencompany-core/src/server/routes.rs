@@ -118,6 +118,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/healthz/busy", get(busy))
+        .route("/opencompany-config.js", get(console_config))
         .route("/spec", get(spec))
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
@@ -213,6 +214,139 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
             }
         },
     ))
+}
+
+/// Supplies the console's optional, public-only runtime configuration.
+///
+/// The console bundle is shared by every tenant, while an OpenPanel collector
+/// is deployment configuration.  Baking its URL into Vite therefore left the
+/// browser tracker permanently off in hosted containers: no one populated the
+/// `window.OPENCOMPANY_CONFIG` object that its loader requires.  Serve this
+/// small script from the host instead.  It intentionally exposes no client
+/// secret; browser collection uses OpenPanel's public client id.
+async fn console_config() -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+
+    // Blank or unset falls back to the TinyHumans collector; the render below
+    // still requires a hosted tenant with `OPENCOMPANY_ANALYTICS=on`. Read
+    // through `var_os`, not `var`: the latter maps a non-Unicode configured
+    // value to the same `Err` as an unset one, which would silently publish
+    // the default collector for a value the operator did set but this
+    // process cannot read — the same failure `analytics::config::resolve`
+    // avoids by reading `ENDPOINT_ENV` through `get_os` and reporting
+    // `Silence::UnusableEndpoint` instead of falling back. Passing `None`
+    // here reaches the same silent branch in `render_console_config`.
+    let endpoint = match std::env::var_os(crate::analytics::config::ENDPOINT_ENV) {
+        None => Some(crate::analytics::config::DEFAULT_ENDPOINT.to_string()),
+        Some(raw) => match raw.into_string() {
+            Err(_) => None,
+            Ok(value) if value.trim().is_empty() => {
+                Some(crate::analytics::config::DEFAULT_ENDPOINT.to_string())
+            }
+            Ok(value) => Some(value),
+        },
+    };
+    let body = render_console_config(
+        endpoint.as_deref(),
+        hosted_deployment(),
+        browser_analytics_enabled(),
+    );
+    let mut response = (
+        [(CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        body,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn render_console_config(endpoint: Option<&str>, hosted: bool, analytics_enabled: bool) -> String {
+    match (
+        hosted && analytics_enabled,
+        endpoint.and_then(public_browser_endpoint),
+    ) {
+        (true, Some(endpoint)) => format!(
+            "window.OPENCOMPANY_CONFIG=Object.assign(window.OPENCOMPANY_CONFIG||{{}},{{analytics:true,analyticsEndpoint:{}}});\n",
+            serde_json::to_string(&endpoint).expect("endpoint serializes")
+        ),
+        _ => "window.OPENCOMPANY_CONFIG=window.OPENCOMPANY_CONFIG||{};\n".to_owned(),
+    }
+}
+
+/// Browser configuration must never turn a host-only credential URL into a
+/// public script.  OpenPanel credentials belong in headers, so a URL with
+/// userinfo, query parameters, or a fragment is neither needed nor safe here.
+fn public_browser_endpoint(endpoint: &str) -> Option<String> {
+    let Ok(mut url) = url::Url::parse(endpoint) else {
+        return None;
+    };
+    let safe = matches!(url.scheme(), "https" | "http")
+        && url.host().is_some()
+        && (url.scheme() == "https" || is_loopback_host(url.host_str()))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none();
+    if !safe {
+        return None;
+    }
+
+    // The host transport takes the exact ingestion URL (`…/track`), while the
+    // browser SDK takes the API *base* and appends `/track` itself. So a
+    // `…/track` endpoint hands the browser its parent path: a self-hosted
+    // collector behind its bundled Caddy lives at `https://<domain>/api/track`,
+    // and cutting that to the bare origin sent every browser event to the
+    // dashboard's `/track` instead of the API's. Any other path is not a shape
+    // this can reason about, so it is still never serialized into this
+    // unauthenticated response and the browser gets the origin alone.
+    let base = url
+        .path()
+        .strip_suffix("/track")
+        .or_else(|| url.path().strip_suffix("/track/"))
+        .unwrap_or("")
+        .to_owned();
+    url.set_path(&base);
+    Some(url.into())
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .is_some_and(|address| address.is_loopback())
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
+fn hosted_deployment() -> bool {
+    hosted_deployment_from_values(
+        std::env::var("OPENCOMPANY_DEPLOYMENT").ok().as_deref(),
+        std::env::var("OPENCOMPANY_TENANT_ID").ok().as_deref(),
+    )
+}
+
+fn hosted_deployment_from_values(deployment: Option<&str>, tenant_id: Option<&str>) -> bool {
+    deployment
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("hosted-tenant"))
+        || tenant_id.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn browser_analytics_enabled() -> bool {
+    browser_analytics_enabled_from_value(std::env::var("OPENCOMPANY_ANALYTICS").ok().as_deref())
+}
+
+fn browser_analytics_enabled_from_value(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("on"))
 }
 
 /// Serves the Axum application on the configured bind address.

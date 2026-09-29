@@ -150,6 +150,8 @@ export const NAMED_BY: Record<View, Names> = {
     { pageHeader: "company/ManageListsView.tsx" },
   ],
   workspace: [{ pageHeader: "WorkspaceView.tsx" }],
+  /** `#/artifacts/<id>` — one published deliverable, on its own page. */
+  artifacts: [{ pageHeader: "ArtifactRoute.tsx" }],
   /**
    * The page the title row's bell opens. `NotificationsView` draws the header
    * for both of its tabs, which is why `ApprovalsView.tsx` is NOT a leaf here

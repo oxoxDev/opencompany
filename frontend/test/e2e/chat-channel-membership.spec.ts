@@ -36,7 +36,17 @@ const ROSTER = Array.from({ length: 17 }, (_, i) => ({
 
 const DESKS = [
   {
+    // The host lists `#general` first: the whole roster, maintained server-side.
+    id: "general",
+    name: "General",
+    kind: "general",
+    mutable: false,
+    members: ROSTER.map((m) => m.id),
+  },
+  {
     id: "engineering",
+    kind: "desk",
+    mutable: true,
     name: "Engineering",
     description: "Ships the product",
     // Lead first, and NOT in roster order: `members[0]` is the lead, so a fix
@@ -46,6 +56,8 @@ const DESKS = [
   },
   {
     id: "content",
+    kind: "desk",
+    mutable: true,
     name: "Content",
     description: "Writes things",
     // `agent-99` is not on the roster — a teammate removed since the desks were
@@ -96,6 +108,27 @@ async function mockApi(page: Page, mode: () => DesksMode) {
         default:
           return json(DESKS);
       }
+    }
+
+    // GET .../desks/{id}/routing — the "Manage on the org chart" link lands on
+    // `#/company/<deskId>` (issue #485), which mounts `DeskRoutingPanel` under
+    // the focused desk. Unstubbed, that read fell through to the catch-all's
+    // `json([])`, so the panel destructured `effective` off an array and
+    // crashed the whole page — taking the org chart's tree down with it.
+    if (/\/desks\/[^/]+\/routing$/.test(path)) {
+      return json({
+        deskId: path.split("/").at(-2),
+        source: "default",
+        declared: {},
+        effective: {
+          roundWidth: 1,
+          choiceOptionLimit: 5,
+          maxRounds: 8,
+          turnTimeoutSecs: 120,
+          router: "fallback",
+        },
+        candidates: [],
+      });
     }
 
     if (path.endsWith("/team")) return json(ROSTER);
@@ -183,11 +216,8 @@ test("#369 a DM reads as two people, not as the whole company", async ({ page })
 
 test("#369 a host with no desks surface still shows the whole roster", async ({ page }) => {
   await mockApi(page, () => "404");
-  // `strategy`, not `general` (issue #1743): `#general` is no longer one of the
-  // static fallback desks — it is derived from the roster and every teammate is
-  // in it, which is what the test below this one pins. `strategy` is still a
-  // fallback desk with `members` absent, so it is the fixture this test is
-  // actually about: membership *unknown*, as distinct from membership empty.
+  // `strategy` is a fallback desk with `members` absent: membership *unknown*,
+  // as distinct from membership empty.
   await openChannel(page, "strategy");
 
   // The fallback desks have no membership to scope to, so this is unchanged
@@ -199,19 +229,44 @@ test("#369 a host with no desks surface still shows the whole roster", async ({ 
   await expect(pane(page).locator("ul").first().locator("li")).toHaveCount(17);
 });
 
-test("#1743 #general is everyone, even with no desks surface", async ({ page }) => {
-  // The other half of the case above, and the reason it had to move off
-  // `general`. `#general` is not a desk and never comes from `/desks` — it is
-  // built from the roster this render was handed — so its membership is known
-  // even when `/desks` 404s, and it is the whole company by construction.
-  await mockApi(page, () => "404");
+test("#general lists the whole roster and offers no membership controls", async ({ page }) => {
+  await mockApi(page, () => "ok");
   await openChannel(page, "general");
 
   await expect(membersToggle(page)).toHaveText(/17/);
   await openPane(page);
   await expect(pane(page)).toContainText("17 in this channel · 17 in the company");
-  await expect(pane(page).getByRole("heading", { name: "In this channel" })).toBeVisible();
   await expect(pane(page).locator("ul").first().locator("li")).toHaveCount(17);
+  // The host keeps its membership equal to the roster and refuses writes to it.
+  await expect(pane(page).getByRole("button", { name: /to this channel$/ })).toHaveCount(0);
+  await expect(manageLink(page)).toHaveCount(0);
+  await expect(pane(page).locator("ul").first()).not.toContainText("Lead");
+});
+
+test("#general is pinned first in the rail", async ({ page }) => {
+  await mockApi(page, () => "ok");
+  await openChannel(page, "engineering");
+
+  const rail = page.getByRole("complementary").first();
+  const rows = rail.getByRole("button", { name: /^(general|engineering|content)\b/ });
+  await expect(rows.first()).toHaveAccessibleName(/^general/);
+});
+
+test("#general is not fabricated for a host with no desks surface", async ({ page }) => {
+  await mockApi(page, () => "404");
+  await openChannel(page, "general");
+
+  const notice = page.getByRole("status").filter({ hasText: /isn't a channel here/ });
+  await expect(notice).toContainText("#general");
+});
+
+test("a legacy #/chat/main address is replaced with #/chat/general", async ({ page }) => {
+  await mockApi(page, () => "ok");
+  await page.goto("/#/chat/main");
+
+  await expect(page.getByPlaceholder("Message #general")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/chat/general");
+  await expect(page.getByRole("status").filter({ hasText: /isn't a channel here/ })).toHaveCount(0);
 });
 
 test("#370 a deep link never flashes a channel the company doesn't have", async ({ page }) => {
@@ -254,11 +309,7 @@ test("#370 an unknown channel opens the first one and says so", async ({ page })
   // (issue #934), and an unqualified `getByRole("status")` matches both.
   const notice = page.getByRole("status").filter({ hasText: /isn't a channel here/ });
   await expect(notice).toContainText("#does-not-exist");
-  // `#general` rather than `#engineering` since issue #1743: the built-in
-  // company-wide channel is prepended to every company's list, so "the first
-  // one" is now `#general` in every company rather than whichever desk the
-  // host happened to return first. The property under test is unchanged — the
-  // notice names the channel you actually landed in.
+  // The notice names the first channel, where the operator actually landed.
   await expect(notice).toContainText("#general");
   // The hash is left alone deliberately — rewriting it needs replace-semantics
   // the shell does not thread through yet, and a push would fight the back
@@ -335,9 +386,6 @@ test("#485 a DM has no desk to manage", async ({ page }) => {
 
 test("#485 a fallback desk offers no link to a desk the host doesn't have", async ({ page }) => {
   await mockApi(page, () => "404");
-  // `strategy`, not `general`, for the same reason as the #369 case above:
-  // since issue #1743 `#general` is derived from the roster rather than being
-  // one of the static fallback desks, so it is no longer an example of one.
   await openChannel(page, "strategy");
   await openPane(page);
 

@@ -159,28 +159,17 @@ async function pickTemplate(id: string) {
 const nameFields = () =>
   container.querySelectorAll('[data-testid="setup-company-name"]').length;
 
-/** Pick "No model", whose popup base-ui portals onto `document.body`. */
-async function skipTheModel() {
-  await act(async () => {
-    (container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement).click();
-  });
-  await act(async () => {
-    (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
-  });
-}
-
 /** Render, and walk as far as the business step without answering it. */
 async function walkToBusiness(client: OpenCompanyClient) {
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
   });
-  // Step 0 is the setup-way choice; the provider picker sits behind "Set it up
-  // yourself".
+  // Step 0 is the setup-way choice; the add-provider sequence sits behind "Set
+  // it up yourself", and connecting nothing is a first-class answer to it.
   await act(async () => {
     (container.querySelector('[data-testid="setup-way-self-managed"]') as HTMLElement).click();
   });
-  await next(); // -> model
-  await skipTheModel();
+  await next(); // -> step 1, where connecting nothing is a first-class answer
   await next(); // -> business
 }
 
@@ -360,8 +349,7 @@ describe("what a finished wizard says the company is", () => {
     await act(async () => {
       (container.querySelector('[data-testid="setup-way-self-managed"]') as HTMLElement).click();
     });
-    await next(); // -> model, whose verdict the switch cleared
-    await skipTheModel();
+    await next(); // -> step 1, whose answers the switch cleared
     await next(); // -> business
 
     const field = container.querySelector(

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { Fragment, act, createElement, createRef, useLayoutEffect } from "react";
+import {
+  Fragment,
+  act,
+  createElement,
+  createRef,
+  useLayoutEffect,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -54,11 +60,31 @@ function clientWith(
     if (cognition === "pending") {
       return new Promise<CapabilityStatusDto>(() => {});
     }
-    return Promise.resolve({ configured: false, cognition } as CapabilityStatusDto);
+    return Promise.resolve({
+      configured: false,
+      cognition,
+    } as CapabilityStatusDto);
   });
   const named: Record<string, unknown> = {
     capabilityStatus,
     scopeFor: () => "/api/v1/company",
+    // ONE desk, where the empty answer below used to do.
+    //
+    // The console no longer offers `#general` as somewhere to type (#2368), so
+    // a company with no desks renders no channel — and this view's banner hangs
+    // off the open channel, which made every assertion here read `null` for a
+    // reason that has nothing to do with cognition. A desk is also the state
+    // this test means: a company someone is actually talking to.
+    listDesks: () =>
+      Promise.resolve([
+        {
+          id: "engineering",
+          channel: "engineering",
+          name: "Engineering",
+          blurb: "",
+          members: [],
+        },
+      ]),
   };
   return new Proxy(named, {
     get: (target, prop: string) => target[prop] ?? (() => Promise.resolve([])),
@@ -68,13 +94,21 @@ function clientWith(
 // `createElement` rather than JSX because the unit suite's vitest `include` is
 // `*.test.ts` — a `.tsx` file is silently not collected, which reads as a
 // passing suite.
-async function render(cognition: CognitionState | undefined | "reject"): Promise<void> {
+async function render(
+  cognition: CognitionState | undefined | "reject",
+): Promise<void> {
   const client = clientWith(cognition);
   const scopeRef = createRef<{
     connection: string;
     company: string | null;
     client: OpenCompanyClient;
-  }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+  }>() as {
+    current: {
+      connection: string;
+      company: string | null;
+      client: OpenCompanyClient;
+    };
+  };
   scopeRef.current = { connection: "c1", company: "acme", client };
   await act(async () => {
     root.render(
@@ -126,7 +160,9 @@ function stubMatchMedia() {
 
 beforeEach(() => {
   stubMatchMedia();
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -213,7 +249,9 @@ describe("the chat cognition banner", () => {
     expect(notice!.textContent).not.toContain("has no model configured");
     // The link goes to the card that owns the restart — but the copy stops
     // short of promising a button, which is `canRebuildInPlace`'s to report.
-    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/connections/inference");
+    expect(notice!.querySelector("a")!.getAttribute("href")).toBe(
+      "#/connections/inference",
+    );
   });
 
   /**
@@ -230,21 +268,29 @@ describe("the chat cognition banner", () => {
   it("ignores a slow older read that lands after a newer one", async () => {
     const settles: Array<(dto: CapabilityStatusDto) => void> = [];
     const capabilityStatus = vi.fn(
-      () => new Promise<CapabilityStatusDto>((resolve) => settles.push(resolve)),
+      () =>
+        new Promise<CapabilityStatusDto>((resolve) => settles.push(resolve)),
     );
     const named: Record<string, unknown> = {
       capabilityStatus,
       scopeFor: () => "/api/v1/company",
     };
     const client = new Proxy(named, {
-      get: (target, prop: string) => target[prop] ?? (() => Promise.resolve([])),
+      get: (target, prop: string) =>
+        target[prop] ?? (() => Promise.resolve([])),
     }) as unknown as OpenCompanyClient;
 
     const scopeRef = createRef<{
       connection: string;
       company: string | null;
       client: OpenCompanyClient;
-    }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+    }>() as {
+      current: {
+        connection: string;
+        company: string | null;
+        client: OpenCompanyClient;
+      };
+    };
     scopeRef.current = { connection: "c1", company: "acme", client };
     await act(async () => {
       root.render(
@@ -278,7 +324,10 @@ describe("the chat cognition banner", () => {
 
     // The newer read answers first: somebody configured a provider.
     await act(async () => {
-      settles[1]({ configured: false, cognition: "configured" } as CapabilityStatusDto);
+      settles[1]({
+        configured: false,
+        cognition: "configured",
+      } as CapabilityStatusDto);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -286,7 +335,10 @@ describe("the chat cognition banner", () => {
 
     // And now the stale one lands with the answer from before that change.
     await act(async () => {
-      settles[0]({ configured: false, cognition: "unconfigured" } as CapabilityStatusDto);
+      settles[0]({
+        configured: false,
+        cognition: "unconfigured",
+      } as CapabilityStatusDto);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -325,21 +377,44 @@ describe("the chat cognition banner", () => {
   it("re-reads cognition when the tab comes back to the foreground", async () => {
     let answer: CognitionState = "unconfigured";
     const capabilityStatus = vi.fn(() =>
-      Promise.resolve({ configured: false, cognition: answer } as CapabilityStatusDto),
+      Promise.resolve({
+        configured: false,
+        cognition: answer,
+      } as CapabilityStatusDto),
     );
     const named: Record<string, unknown> = {
       capabilityStatus,
       scopeFor: () => "/api/v1/company",
+      // One desk, for the reason `clientWith` has one: with `#general` no
+      // longer offered, a company with no desks renders no channel and the
+      // banner has nothing to hang off (#2368).
+      listDesks: () =>
+        Promise.resolve([
+          {
+            id: "engineering",
+            channel: "engineering",
+            name: "Engineering",
+            blurb: "",
+            members: [],
+          },
+        ]),
     };
     const client = new Proxy(named, {
-      get: (target, prop: string) => target[prop] ?? (() => Promise.resolve([])),
+      get: (target, prop: string) =>
+        target[prop] ?? (() => Promise.resolve([])),
     }) as unknown as OpenCompanyClient;
 
     const scopeRef = createRef<{
       connection: string;
       company: string | null;
       client: OpenCompanyClient;
-    }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+    }>() as {
+      current: {
+        connection: string;
+        company: string | null;
+        client: OpenCompanyClient;
+      };
+    };
     scopeRef.current = { connection: "c1", company: "acme", client };
     await act(async () => {
       root.render(
@@ -402,7 +477,10 @@ describe("the chat cognition banner", () => {
     const committed: boolean[] = [];
     function Probe() {
       useLayoutEffect(() => {
-        committed.push(container.querySelector('[data-testid="chat-cognition-banner"]') !== null);
+        committed.push(
+          container.querySelector('[data-testid="chat-cognition-banner"]') !==
+            null,
+        );
       });
       return null;
     }
@@ -417,7 +495,13 @@ describe("the chat cognition banner", () => {
         connection: string;
         company: string | null;
         client: OpenCompanyClient;
-      }>() as { current: { connection: string; company: string | null; client: OpenCompanyClient } };
+      }>() as {
+        current: {
+          connection: string;
+          company: string | null;
+          client: OpenCompanyClient;
+        };
+      };
       scopeRef.current = { connection: "c1", company, client };
       root.render(
         createElement(ConnectionScopeProvider, {

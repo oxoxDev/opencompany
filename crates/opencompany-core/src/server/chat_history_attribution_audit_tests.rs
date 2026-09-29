@@ -22,6 +22,7 @@ fn reply(seq: u64, agent_id: &str) -> StoredEvent {
             task_id: None,
             outputs: Vec::new(),
             parent: None,
+            episode: None,
         },
     )
 }
@@ -48,6 +49,7 @@ fn record() -> CompanyRecord {
                \n[[agent]]\nid = \"product_manager\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n";
     let manifest: crate::company::CompanyManifest = toml::from_str(src).expect("manifest parses");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

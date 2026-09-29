@@ -33,6 +33,7 @@ pub mod platform_auth;
 /// See [`presence`].
 pub mod presence;
 pub mod provision;
+pub mod readable;
 mod routes;
 /// The first-run setup flow: one surface that configures an instance.
 pub mod setup;

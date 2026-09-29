@@ -56,7 +56,7 @@ use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{CompanyAgent, HarnessDeps};
 use crate::ports::types::CompanyId;
-use crate::runtime::delegation::{ChatTarget, with_chat_only_hint};
+use crate::runtime::delegation::ChatTarget;
 use crate::store::{FsCompanyStore, FsContextStore};
 
 /// The vendored `AgentConfig::default().max_tool_iterations` this crate used to
@@ -188,6 +188,7 @@ fn read_then_answer(n: usize, answer: &'static str) -> Vec<Turn> {
 /// control left standing, which is the condition #988 is about.
 fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -230,6 +231,7 @@ fn deps(model_url: String, dir: &std::path::Path) -> HarnessDeps {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -296,14 +298,13 @@ async fn company_agent(
         &company,
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &["docs".to_string()],
         &[],
         &[],
         None,
         false,
-        /* speech_enabled */ false,
     )
     .expect("agent builds");
 
@@ -317,36 +318,35 @@ async fn company_agent(
         .expect("seed note");
     }
 
-    CompanyAgent {
-        agent_id: "ceo".to_string(),
-        role: "Chief Executive".to_string(),
-        session_key: crate::harness::session_key::openhuman_session_key(
-            &crate::ports::CompanyId::new("test"),
-            "ceo",
-        ),
+    let runtime = crate::harness::openhuman_runtime::global(
+        crate::harness::openhuman_runtime::RuntimeBoot::ephemeral(),
+    )
+    .await
+    .expect("the OpenHuman runtime boots");
+    // A fresh id per fixture: one test binary registers this agent many
+    // times over, and a runtime id stays taken while a prior fixture's
+    // handle is alive.
+    let company = crate::ports::CompanyId::new(format!("test-{}", uuid::Uuid::new_v4().simple()));
+    CompanyAgent::register(
+        &runtime,
+        &company,
+        "ceo",
+        "Chief Executive",
         budget_usd_daily,
-        step_labels: crate::harness::steps::StepLabels::from_tools(agent.tools()),
-        agent: tokio::sync::Mutex::new(agent),
-        bound_chat: tokio::sync::Mutex::new(None),
-        session: tokio::sync::Mutex::new(
-            crate::harness::built_in::agent_session::AgentSessionState::default(),
-        ),
-        // This fixture's `manifest_agent` carries no `{provider, model}` pin
-        // (`provider: None, model: None` above), so `build_agent` (the
-        // model-discarding wrapper) built `agent` against `deps.provider`
-        // unpinned — the same instance this field must name.
-        chat_model: deps.provider.clone(),
-    }
+        agent,
+        None,
+    )
+    .expect("the agent registers")
 }
 
 /// Did the just-finished turn pause at the tool-iteration cap?
 ///
-/// openhuman's own answer, read off the same session the turn ran on. This is
-/// the distinction Part 1 of #926 surfaces to operators, and the reason the
-/// budget halt below has to be measured against it rather than against a
-/// substring of some reply.
-async fn hit_cap(agent: &CompanyAgent) -> bool {
-    agent.agent.lock().await.last_turn_hit_cap()
+/// Read off the outcome the turn returned: the embed facade has no
+/// `last_turn_hit_cap`, and the flag the pool derives from the progress
+/// stream (`progress_pump::hit_iteration_cap`) IS the distinction Part 1 of
+/// #926 surfaces to operators.
+fn hit_cap(outcome: &crate::harness::built_in::TurnOutcome) -> bool {
+    outcome.hit_iteration_cap
 }
 
 // ---------------------------------------------------------------------------

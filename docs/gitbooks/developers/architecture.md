@@ -15,7 +15,7 @@ L4  Surfaces        Axum HTTP (operator API, A2A, webhooks), CLI, console
 L3  Company Brain   cycle loop, approvals, effect routing, feedback loop
 L2  Kernel ports    Brain, CompanyStore, EventLog, MemoryStore, ContextStore,
                     ChannelAdapter, ToolProvider, AgentEconomy, ApprovalGate
-L1  Adapters        hosted-medulla | openhuman-rpc | tinyagents | tinycortex |
+L1  Adapters        hosted-medulla | openhuman (embedded) | tinyhivemind | tinycortex |
                     tinyplace | fs (default)
 L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 ```
@@ -47,7 +47,8 @@ src/feedback/           Feedback items, privacy scrubber, GitHub issue filing
 src/runtime/            CompanyRuntime, CycleRunner, cron scheduler, registry
 src/server/             Axum HTTP router and handlers
 src/server/users/       Human sign-in: magic link, passwords, sessions, invites
-src/openhuman/          OpenHuman launcher seams
+src/harness/            Execution engines: the embedded OpenHuman runtime and agents (feature `openhuman`)
+src/hive/               Hive desks: completion episodes, speech over MCP, Jev routing, referral
 src/tiny/               Tinyagents/OpenHuman status surface
 src/bin/opencompany.rs  CLI entrypoint
 companies/              Business definitions (a company.toml + docs each)

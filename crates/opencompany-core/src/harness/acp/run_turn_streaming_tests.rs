@@ -99,7 +99,7 @@ async fn an_unaddressed_chat_turn_streams_onto_the_default_desk() {
     assert_eq!(frames.len(), 1);
     assert_eq!(
         frames[0].chat_id.as_deref(),
-        Some(crate::server::ops::language::DEFAULT_DESK)
+        Some(crate::server::ops::language::GENERAL_CHANNEL_ID)
     );
 }
 

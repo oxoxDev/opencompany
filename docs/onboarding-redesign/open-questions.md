@@ -16,20 +16,34 @@ would need to either share `App.tsx`'s boot sequence or a relocated stash)
 is not this implementation's concern. Recorded here only so it isn't
 re-discovered from scratch if a login button is built later.
 
-## Does a freshly-registered company ever need `rebuild_if_pending`?
+## Resolved: does a freshly-registered company ever need `rebuild_if_pending`?
 
-[reuse-mapping.md](reuse-mapping.md) §4: once Managed step 1 calls the real
-fan-out, `set_key`/`set_model`/`finish_link` already trigger
-`rebuild_if_pending` on their own. But the wizard's final submit
-(`apply_inner` → `seed_generated_company` → `register()`) boots the company's
-runtime **fresh**, not in-place — it's not clear whether a fresh boot can
-ever be in the "resolved but stale" state `rebuild_if_pending` exists to fix,
-or whether `register()` always resolves inference correctly on a first boot
-by construction. If a fresh boot can race the key-save (key saved in step 1,
-runtime registered later in submit, without re-reading the just-saved
-key), that's a real bug this redesign could introduce. Verify the ordering
-at implementation time; do not assume `register()` is unaffected just because
-it's a different code path.
+Yes on the managed branch, no on the self-managed one, and slice 4a already
+made the call on both. The two differ in what the manifest says at the moment
+the company is registered, which is the only moment brain selection happens.
+
+**Managed.** The wizard sends no `company.inference` — it sends an account key
+and a model instead. So the seeded company boots with nothing to resolve and
+gets the offline echo brain. The fan-out that follows fills the LLM copy, the
+`tinyhumans` row and the default, at which point a tenant config resolves,
+`restart_pending` flips true, and `rebuild_if_pending` moves the company onto
+the harness. Without that call the operator's first chat echoes behind a
+"restart required" notice they have no reason to look for.
+
+**Self-managed / BYOK.** The apply writes `manifest.inference.provider` (and
+its base URL and models) *before* `seed_generated_company`, so the company is
+already configured when its runtime is built and boots straight onto
+`HARNESS_PATH`. `restart_pending` is false, and no rebuild is owed there — not
+by this slice, and not by 4b.
+
+There is no race either way: `register()` resolves inference fresh at boot from
+the record it just wrote, and the managed key-save happens after the company
+exists rather than before it. What was missing was not a call but a test — the
+rebuild is unreachable at default features, where `harness_reachable` is a
+`false` stub, so the whole capability sat unproven. The gated
+`the_wizards_account_key_rebuilds_the_company_it_just_seeded`
+(`server/setup/test.rs`) is the proof; its self-managed sibling pins the
+ordering the "no rebuild owed" half depends on.
 
 ## The security-boundary shift for search's managed credential
 
@@ -47,16 +61,32 @@ specifically asking: does making this the *default* path (via onboarding)
 change the risk calculus versus it being an opt-in a company reaches later
 via Connections → Account?
 
-## Composio's skip-for-later state, self-managed branch
+## Answered: Composio's skip-for-later state, self-managed branch
 
-Self-managed step 1 offers "set this up later" independently for Provider
-and Composio. Composio's own connect flow today is effectively all-or-nothing
-per company (one key, one connection) — it's not confirmed whether Composio's
-existing UI already has a clean "not connected yet, connect later" resting
-state the wizard's mounted dialog can just surface, or whether it needs new
-UI to represent "explicitly deferred" as distinct from "never tried."
-Check against the real Connections → Composio page's current empty/disconnected
-state before assuming it maps cleanly.
+**Skipping records nothing, on either half of the step.** There is no
+"explicitly deferred" state to store and none is added.
+
+Composio's card already has the resting state, and it is the honest one:
+`composioRows(null)` returns both rows for a company with no status at all —
+`modeOf` reads a missing mode as `managed`, which is where a company with
+nothing configured genuinely is — with a token to add on the managed route and
+the own-account route offering to be chosen. That is the same card Connections
+draws, so the wizard mounts it rather than inventing an empty state for it.
+
+What is *not* stored is the distinction between "deferred" and "never tried".
+`null` is the truth about a company minutes old, and nothing downstream could
+act on the difference: no surface reads it, no later prompt is gated on it, and
+a company that skipped and a company that has not got there yet want exactly the
+same thing offered next. So the reassurance is shown while the operator is
+standing on the step — "you can add this later under Connections" — and
+forgotten when they press Next, which is what the step component unmounting does
+for free.
+
+One shape was deliberately not reused: the old model step's `tested =
+{kind:"skipped"}`. That is a single verdict slot read by the step gate *and* by
+the design pass's `modelless`, so recording a Composio skip in it would have
+suppressed the roster design brief — a real bug, from an operator saying "later"
+to their integrations.
 
 ## Whether `visibleSteps`' hide-conditions still make sense with a branch point
 

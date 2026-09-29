@@ -36,6 +36,7 @@ async fn getting_a_malformed_workflow_by_id_answers_400_data_parse() {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

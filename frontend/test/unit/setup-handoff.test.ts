@@ -3,8 +3,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  absorbHubSetupHandoff,
-  arrivedViaHubSetupHandoff,
   arrivedViaSetupHandoff,
   clearSetupHandoff,
   SETUP_HANDOFF_FRAGMENT,
@@ -25,10 +23,6 @@ import type { SetupHandoffScope } from "@/setup/state";
  */
 
 const hash = () => window.location.hash;
-
-/** A landing, as the console's own routing sees it (pathname + search + hash). */
-const land = (pathname: string, search: string, hash = "") =>
-  window.history.replaceState({}, "", `${pathname}${search}${hash}`);
 
 describe("the setup hand-off marker", () => {
   it("is a fragment whose route the router ignores", () => {
@@ -93,46 +87,3 @@ describe("the setup hand-off marker", () => {
   });
 });
 
-describe("a hub-carried setup destination", () => {
-  it("reads true only when the *query* carries it", () => {
-    land("/", "?company=acme");
-    expect(arrivedViaHubSetupHandoff()).toBe(false);
-
-    land("/", "?company=acme&from=setup");
-    expect(arrivedViaHubSetupHandoff()).toBe(true);
-
-    // A different value for the same key is not this marker.
-    land("/", "?company=acme&from=elsewhere");
-    expect(arrivedViaHubSetupHandoff()).toBe(false);
-  });
-
-  it("translates into the hash marker and takes the flag out of the query", () => {
-    land("/", "?company=acme&from=setup");
-
-    absorbHubSetupHandoff();
-
-    // The query flag is gone — the shell's own one-shot marker took its place,
-    // and a reload has neither to re-apply.
-    expect(window.location.search).toBe("?company=acme");
-    expect(hash()).toBe(SETUP_HANDOFF_FRAGMENT);
-    expect(arrivedViaHubSetupHandoff()).toBe(false);
-    expect(arrivedViaSetupHandoff()).toBe(true);
-  });
-
-  it("leaves an address without the marker alone", () => {
-    land("/", "?company=acme");
-
-    absorbHubSetupHandoff();
-
-    expect(window.location.search).toBe("?company=acme");
-    expect(hash()).toBe("");
-  });
-
-  it("recognizes the marker only for its originating connection and company", () => {
-    land("/", "?company=acme&from=setup&connection=conn-a");
-
-    expect(arrivedViaHubSetupHandoff({ connection: "conn-a", company: "acme" })).toBe(true);
-    expect(arrivedViaHubSetupHandoff({ connection: "conn-b", company: "acme" })).toBe(false);
-    expect(arrivedViaHubSetupHandoff({ connection: "conn-a", company: "other" })).toBe(false);
-  });
-});

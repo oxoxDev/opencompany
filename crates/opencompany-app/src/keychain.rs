@@ -66,6 +66,11 @@ use std::sync::{Mutex, OnceLock};
 /// The bundle identifier rather than a friendly name: it is what macOS shows in
 /// Keychain Access and what a person needs to recognise when deciding whether
 /// to trust a prompt.
+///
+/// Deliberately still the PRE-RENAME identifier. The bundle id moved to
+/// `com.tinyhumans.opencompany` (`tauri.conf.json`), but this string is the
+/// lookup key for every token already stored, so changing it would strand
+/// existing users' credentials and sign every paired device out.
 const SERVICE: &str = "ai.tinyhumans.opencompany";
 
 /// The key prefix for a paired device's session token.

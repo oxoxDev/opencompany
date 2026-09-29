@@ -5,9 +5,9 @@ description: Docker, cloud targets, and the hosted platform harness.
 # Deployment
 
 OpenCompany ships as two images — the host and the operator console — that run
-anywhere Docker does.
+with Docker or Podman.
 
-## Local Docker (development)
+## Local Docker or Podman (development)
 
 One script spins up a company **and** its console in development mode, attached
 to your terminal:
@@ -21,7 +21,8 @@ to your terminal:
 The launcher bind-mounts the local checkout: Vite hot-updates frontend edits,
 and `cargo-watch` rebuilds and restarts the backend when Rust source, Cargo
 files, or company definitions change. Each company uses a separate Compose
-project and persistent data volume.
+project and persistent data volume. For Podman, install its Docker-compatible
+CLI and Compose provider (commonly `podman-docker` and `podman-compose`).
 
 For custom ports, credentials, or feature flags, copy `deploy/.env.example` to `deploy/.env`
 before launching.

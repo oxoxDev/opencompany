@@ -266,14 +266,6 @@ async fn a_settled_card_is_briefed_through_the_desks_other_spelling() {
 }
 
 /// A card **no conversation raised** is briefed into none of them.
-///
-/// `same_conversation(None, "General")` is `true`, because `None` is one of
-/// General's four spellings *for a message*. A card's absent origin is not a
-/// spelling: it means nobody raised it. Reading it as General told an
-/// unaddressed turn that board-only work had been "raised in this
-/// conversation". `chat_history::owns` already draws that line for the
-/// terminal — `a_terminal_with_no_origin_belongs_to_nobody_not_to_general`
-/// pins it — and this is the same line, one layer up (coderabbit on #1982).
 #[tokio::test]
 async fn a_card_no_conversation_raised_is_briefed_into_none_of_them() {
     let home_dir = tmp_home();

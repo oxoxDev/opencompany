@@ -22,6 +22,7 @@ import { AlertCircle } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
+import { isGeneralDesk } from "@/lib/desks";
 import {
   Select,
   SelectContent,
@@ -170,7 +171,7 @@ export function AssigneeSelect({
       settle(client.listTeam(company)),
     ]).then(([desksRes, teamRes]) => {
       if (cancelled) return;
-      setDesks(desksRes.ok ? desksRes.value : []);
+      setDesks(desksRes.ok ? desksRes.value.filter((d) => !isGeneralDesk(d)) : []);
       setTeam(teamRes.ok ? teamRes.value : []);
       setFailed({ desks: !desksRes.ok, team: !teamRes.ok });
       setLoaded(true);

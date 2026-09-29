@@ -22,7 +22,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use oh::security::SecurityPolicy;
-use oh::tools::{Tool, ToolResult};
+use tinytools::{Tool, ToolResult};
 
 use super::*;
 use crate::harness::build::{file_tools, workspace_security};
@@ -173,7 +173,7 @@ async fn an_agent_cannot_rewrite_its_own_audit_log_through_its_file_tools() {
     let sink = seed_sink(&tenant.audit_dir());
     let before = read(&sink);
 
-    let tools = file_tools(&workspace);
+    let tools = file_tools(&workspace, None);
 
     // (i) THE MATERIAL ONE, and the control. The natural, fully-permitted call —
     //     the very call that used to hit the audit trail. It must succeed, and
@@ -269,7 +269,7 @@ async fn the_old_in_workspace_sink_is_rewritable_which_is_why_it_moved() {
 
     // One ordinary, permitted file-tool call — no traversal, no absolute path,
     // no `shell`.
-    let tools = file_tools(&workspace);
+    let tools = file_tools(&workspace, None);
     let result = attempt(
         &tools,
         "file_write",

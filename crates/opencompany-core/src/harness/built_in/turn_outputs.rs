@@ -151,6 +151,16 @@ impl Drop for TurnOutputClaim {
     }
 }
 
+/// Whether the current task runs inside a claimed turn scope.
+///
+/// [`TurnOutputCollector::workspace_node`] already drops an unscoped call, so
+/// this exists for the writer that must decide *before* doing work whose only
+/// purpose is the output — promoting an agent's file into the workspace, whose
+/// node would otherwise be minted for a reply that will never show it.
+pub fn in_claimed_turn() -> bool {
+    CURRENT_OUTPUT_SCOPE.try_with(|_| ()).is_ok()
+}
+
 /// Applies the same redaction and string bound used by turn-step details.
 pub fn redacted_text(key: &str, text: &str) -> String {
     approval_display::redact(&serde_json::json!({ (key): text }))

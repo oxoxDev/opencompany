@@ -71,8 +71,8 @@ use serde_json::{Value, json};
 
 use oh::integrations::IntegrationClient;
 use oh::search::tools::{SearchResponse, SearchResultItem};
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::credentials::Credential;
 use crate::metering::record_search_call;
@@ -536,6 +536,7 @@ impl Tool for WebSearchTool {
             }
         });
 
+        crate::harness::backend_transport::ensure_installed();
         let client = IntegrationClient::new(self.backend.backend_url.clone(), token.clone());
         let response = match dispatch_search(&client, &body, self.pre_dispatch).await {
             Ok(response) => response,

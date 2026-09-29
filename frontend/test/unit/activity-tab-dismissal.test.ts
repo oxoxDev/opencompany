@@ -38,11 +38,6 @@ import { ActivityTab } from "@/views/notifications/ActivityTab";
 
 const NOW = new Date("2026-09-11T10:00:00Z").getTime();
 
-const CHANNELS = {
-  rendered: new Set(["desk-ops"]),
-  mainChannelId: "desk-ops",
-};
-
 function row(over: Partial<NotificationDto> = {}): NotificationDto {
   return {
     id: "n1",
@@ -79,7 +74,6 @@ function render(notifications: readonly NotificationDto[], onDismiss: Dismiss): 
       createElement(ActivityTab, {
         notifications,
         now: NOW,
-        channels: CHANNELS,
         onDismiss,
         onDismissAll: () => undefined,
       }),
@@ -156,7 +150,6 @@ describe("dismissing one row", () => {
       createElement(ActivityTab, {
         notifications: [row(readAt === undefined ? {} : { readAt })],
         now: NOW,
-        channels: CHANNELS,
         onDismiss,
         onDismissAll: () => undefined,
       });

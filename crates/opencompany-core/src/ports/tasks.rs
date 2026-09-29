@@ -963,6 +963,7 @@ pub struct TaskOrigin {
     ///
     /// Required: a thread root without a desk names no conversation, which is
     /// precisely the state the two loose fields could reach.
+    #[serde(deserialize_with = "crate::ports::general_channel::deserialize_general_chat")]
     pub origin_chat_id: String,
     /// The thread within that desk, or `None` for the channel-level
     /// conversation.

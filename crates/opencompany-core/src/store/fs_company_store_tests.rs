@@ -24,6 +24,7 @@ async fn company_store_saves_and_loads() {
     let store = FsCompanyStore::new(&root);
     let id = CompanyId::new("acme");
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -91,6 +92,7 @@ async fn save_publishes_the_gate_marker_before_the_manifest() {
 
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),
@@ -150,6 +152,7 @@ async fn updating_an_existing_bundle_publishes_the_manifest_before_the_gate_mark
     let bundle = Bundle::new(root.clone(), &id);
 
     let first_save = CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -209,6 +212,7 @@ async fn a_save_interrupted_after_the_first_write_still_reads_back_as_absent() {
     fault_probe::fail_next_write(&bundle.meta_json());
 
     let record = || CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -293,6 +297,7 @@ async fn an_update_interrupted_on_the_second_write_does_not_persist_the_lifecycl
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -398,6 +403,7 @@ async fn an_update_interrupted_on_the_second_write_does_not_persist_the_manifest
         let mut manifest = sample_manifest();
         manifest.company.name = company_name.to_string();
         CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),
@@ -517,6 +523,7 @@ async fn cancelling_a_save_does_not_delete_a_temp_a_commit_still_owns() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record_named = |name: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),

@@ -25,8 +25,11 @@
 use std::sync::{Arc, Mutex};
 
 use crate::company::mcp::{McpHealth, McpServerDecl, McpStatus};
+use crate::company::mcp_policy;
 use crate::harness::mcp::registry_from_decls;
+use crate::ports::SecretStore;
 use crate::ports::now_millis;
+use crate::ports::types::CompanyId;
 
 /// The maximum byte length of any scrubbed, surfaced **message**.
 ///
@@ -393,7 +396,63 @@ pub fn operator_message(server: &str, class: &ProbeClass, err: &anyhow::Error) -
 ///
 /// A disabled decl is probed as if enabled (the caller decides whether to probe;
 /// probing must reflect the configured auth regardless of the exposed flag).
+/// Probes a server, then persists both what the probe learned: the scrubbed
+/// health record, and — on a successful listing — the tool inventory.
+///
+/// One function because every caller wants both, and two transcriptions of
+/// "probe, then persist" is how the health record and the inventory come to
+/// describe different moments.
+///
+/// Neither write can fail the probe. A store that refuses leaves the caller
+/// with a health record it can still answer with, which is strictly better
+/// than reporting the server unreachable because a write failed.
+///
+/// A failed probe leaves the previous inventory in place. The tools a server
+/// offered before an outage are the best available answer during one, and
+/// clearing them would empty the console's row set and silently drop every
+/// tool a stored tier default reaches.
+pub async fn probe_and_record(
+    company: &CompanyId,
+    decl: &McpServerDecl,
+    secrets: &dyn SecretStore,
+) -> McpHealth {
+    let (health, listing) = probe_server_listing(decl).await;
+    let _ = crate::company::mcp::save_health(company, &decl.name, &health, secrets).await;
+    if let Some(listing) = listing {
+        let inventory = mcp_policy::inventory_from_discovery(
+            listing
+                .iter()
+                .map(|(name, description)| (name.as_str(), description.as_deref())),
+            health.checked_at_millis,
+        );
+        let _ = mcp_policy::save_tool_inventory(
+            company,
+            secrets,
+            &mcp_policy::tool_inventory_key(&decl.name),
+            &inventory,
+        )
+        .await;
+    }
+    health
+}
+
 pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
+    probe_server_listing(decl).await.0
+}
+
+/// [`probe_server`], keeping the tool names the listing returned.
+///
+/// The discovery pass already happens — the plain probe computes a count from
+/// this same listing and drops the names. A caller that persists an inventory
+/// needs them, and a second probe to re-fetch what was just discarded would be
+/// a second round trip and a second chance for the two to disagree.
+///
+/// The names are `Some` only on a successful listing. An empty vector and a
+/// failed probe are different facts: the first says the server offers nothing,
+/// the second says nobody asked it.
+pub async fn probe_server_listing(
+    decl: &McpServerDecl,
+) -> (McpHealth, Option<Vec<(String, Option<String>)>>) {
     let secrets = decl.auth.secret_values();
     let auth_configured = decl.auth.is_configured();
 
@@ -404,16 +463,23 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
     match registry.list_tools(&decl.name).await {
         Ok(tools) => {
             let count = tools.len() as u32;
-            McpHealth {
-                status: McpStatus::Ok,
-                message: format!(
-                    "{count} tool{} available.",
-                    if count == 1 { "" } else { "s" }
-                ),
-                tool_count: count,
-                checked_at_millis: now_millis(),
-                auth_hint: None,
-            }
+            let listing = tools
+                .iter()
+                .map(|tool| (tool.name.clone(), tool.description.clone()))
+                .collect();
+            (
+                McpHealth {
+                    status: McpStatus::Ok,
+                    message: format!(
+                        "{count} tool{} available.",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    tool_count: count,
+                    checked_at_millis: now_millis(),
+                    auth_hint: None,
+                },
+                Some(listing),
+            )
         }
         Err(err) => {
             // The transport reports its own error type now. Wrap it so the
@@ -429,13 +495,16 @@ pub async fn probe_server(decl: &McpServerDecl) -> McpHealth {
             // this needs a live discovery call.
             let class = refine_oauth_capability(&decl.endpoint, class).await;
             let message = scrub(&operator_message(&decl.name, &class, &err), &secrets);
-            McpHealth {
-                status: class.status,
-                message,
-                tool_count: 0,
-                checked_at_millis: now_millis(),
-                auth_hint: class.auth_hint,
-            }
+            (
+                McpHealth {
+                    status: class.status,
+                    message,
+                    tool_count: 0,
+                    checked_at_millis: now_millis(),
+                    auth_hint: class.auth_hint,
+                },
+                None,
+            )
         }
     }
 }

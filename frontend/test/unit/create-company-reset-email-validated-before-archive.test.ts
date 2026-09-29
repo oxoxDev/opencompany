@@ -106,7 +106,7 @@ describe("resetting a company with a malformed admin email", () => {
     );
     await open(stubClient({ lifecycle, provisionCompany }));
 
-    await setAdminEmail("not-an-email");
+    await setAdminEmail("not a login");
     await submit();
 
     // The bug this guards: the old code archived "acme" here, then failed
@@ -118,7 +118,7 @@ describe("resetting a company with a malformed admin email", () => {
 
     const error = document.querySelector('[data-testid="create-company-error"]');
     expect(error, "no error shown").toBeTruthy();
-    expect(error!.textContent).toContain("email");
+    expect(error!.textContent).toMatch(/spaces/i);
   });
 
   it("still proceeds normally with a well-formed email", async () => {
@@ -159,6 +159,6 @@ describe("resetting a company with a malformed admin email", () => {
 
     const error = document.querySelector('[data-testid="create-company-error"]');
     expect(error, "no error shown").toBeTruthy();
-    expect(error!.textContent).toContain("address");
+    expect(error!.textContent).toMatch(/login/i);
   });
 });

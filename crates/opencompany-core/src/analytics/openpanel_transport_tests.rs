@@ -2,9 +2,7 @@
 //! handling), split out of `openpanel_tests.rs` (topic split, >750 lines).
 
 use super::*;
-use crate::analytics::config::{
-    CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENABLE_ENV, ENDPOINT_ENV, resolve,
-};
+use crate::analytics::config::{CLIENT_ID_ENV, ENABLE_ENV, ENDPOINT_ENV, resolve};
 use crate::analytics::types::OpaqueId;
 use crate::analytics::{Event, Outcome, Trigger};
 use crate::app::config::MapEnv;
@@ -14,9 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Obviously-fake credentials. Never a real one, in a file or anywhere else.
+/// An obviously-fake client id. Never a real one, in a file or anywhere else.
 const TEST_CLIENT_ID: &str = "not-a-real-client-id";
-const TEST_CLIENT_SECRET: &str = "not-a-real-client-secret";
 
 /// The headers each request arrived with, in order, name and value.
 type SeenHeaders = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
@@ -133,11 +130,7 @@ fn envelope() -> Envelope {
 
 /// A reporting environment pointed at `endpoint`, which `pairs` overrides.
 fn env(endpoint: &str, pairs: &[(&str, &str)]) -> MapEnv {
-    let mut all = vec![
-        (CLIENT_ID_ENV, TEST_CLIENT_ID),
-        (CLIENT_SECRET_ENV, TEST_CLIENT_SECRET),
-        (ENDPOINT_ENV, endpoint),
-    ];
+    let mut all = vec![(CLIENT_ID_ENV, TEST_CLIENT_ID), (ENDPOINT_ENV, endpoint)];
     all.extend_from_slice(pairs);
     MapEnv::new(all)
 }
@@ -165,8 +158,8 @@ fn events() -> Vec<Event> {
 /// the environment, and not declared hosted: it must send nothing.
 ///
 /// Note what is deliberately stacked against the assertion — the feature is
-/// on, the client exists, the endpoint resolves, both halves of the
-/// credential are present. The only thing that is not is consent. That is
+/// on, the client exists, the endpoint resolves, the client id is
+/// present. The only thing that is not is consent. That is
 /// the configuration a self-hoster who copied a hosted deployment's env file
 /// would have.
 #[tokio::test]
@@ -192,9 +185,9 @@ async fn a_self_hosted_build_makes_no_request() {
 /// The positive control that makes the test above non-vacuous: the same
 /// collector, the same events, the same code path, one variable changed.
 ///
-/// It also pins the whole wire contract — **one request per event**, the two
-/// auth headers by their exact spelling, and OpenPanel's discriminated-union
-/// body with the identity as `profileId` rather than as a property.
+/// It also pins the whole wire contract — **one request per event**, the
+/// client-id header by its exact spelling and **no** client-secret header,
+/// and OpenPanel's discriminated-union body with the identity as `profileId` rather than as a property.
 #[tokio::test]
 async fn a_hosted_tenant_reports_with_the_full_envelope() {
     let collector = spawn_collector().await;
@@ -238,21 +231,24 @@ async fn a_hosted_tenant_reports_with_the_full_envelope() {
             "request {request} carried no client id header"
         );
         assert_eq!(
-            collector.header(request, CLIENT_SECRET_HEADER).as_deref(),
-            Some(TEST_CLIENT_SECRET),
-            "request {request} carried no client secret header"
+            collector
+                .header(request, "openpanel-client-secret")
+                .as_deref(),
+            None,
+            "request {request} carried a client secret header; the collector's \
+             clients run with the secret check off and none is configured"
         );
     }
 
     collector.stop().await;
 }
 
-/// **The credential travels in headers and nowhere else.**
+/// **The credential travels in a header and nowhere else.**
 ///
 /// The transport this replaced stamped Mixpanel's token into every event's
 /// property bag, which put a credential one `dbg!` away from a test fixture
 /// or a captured body. Nothing does that now, and this is the assertion that
-/// keeps it true: not one byte of either half appears in any body on the
+/// keeps it true: not one byte of the client id appears in any body on the
 /// wire.
 #[tokio::test]
 async fn no_credential_reaches_the_request_body() {
@@ -266,19 +262,17 @@ async fn no_credential_reaches_the_request_body() {
 
     for body in collector.bodies.lock().unwrap().iter() {
         let rendered = body.to_string().to_ascii_lowercase();
-        for half in [TEST_CLIENT_ID, TEST_CLIENT_SECRET] {
-            assert!(
-                !rendered.contains(&half.to_ascii_lowercase()),
-                "the body carried {half}: {rendered}"
-            );
-        }
+        assert!(
+            !rendered.contains(&TEST_CLIENT_ID.to_ascii_lowercase()),
+            "the body carried the client id: {rendered}"
+        );
     }
     // The self-check: the needle really is findable where it *is* supposed
     // to be, or the guard above would pass on a transport that sent no
     // credential at all.
     assert_eq!(
-        collector.header(0, CLIENT_SECRET_HEADER).as_deref(),
-        Some(TEST_CLIENT_SECRET)
+        collector.header(0, CLIENT_ID_HEADER).as_deref(),
+        Some(TEST_CLIENT_ID)
     );
 
     collector.stop().await;
@@ -374,13 +368,13 @@ async fn a_refused_credential_stops_the_drain() {
     collector.stop().await;
 }
 
-/// **The write secret never follows a redirect to another host.**
+/// **The write credential never follows a redirect to another host.**
 ///
 /// The leak this closes is not exotic. `reqwest`'s default policy follows
 /// ten hops, and its cross-origin sanitization
 /// (`redirect.rs::remove_sensitive_headers`, 0.12.28) removes exactly
 /// `Authorization`, `Cookie`, `cookie2`, `Proxy-Authorization` and
-/// `WWW-Authenticate` — and nothing else. `openpanel-client-secret` is none
+/// `WWW-Authenticate` — and nothing else. `openpanel-client-id` is none
 /// of them, so before [`reqwest::redirect::Policy::none`] a single `307`
 /// from the configured collector handed this instance's long-lived write
 /// credential to whatever host the `Location` named.
@@ -466,7 +460,7 @@ async fn a_redirect_never_carries_the_credential_to_another_host() {
 /// `elsewhere.hits == 0` would also hold if the destination collector were
 /// simply broken, or if `spawn_collector` did not record what it received.
 /// Same collector, same events, pointed at directly rather than through a
-/// redirect: it must see all three requests, carrying the secret, so the
+/// redirect: it must see all three requests, carrying the client id, so the
 /// zero above is about the redirect and nothing else.
 #[tokio::test]
 async fn the_redirect_destination_would_have_recorded_the_credential() {
@@ -489,8 +483,8 @@ async fn the_redirect_destination_would_have_recorded_the_credential() {
          policy rather than a collector that counts nothing"
     );
     assert_eq!(
-        elsewhere.header(0, CLIENT_SECRET_HEADER).as_deref(),
-        Some(TEST_CLIENT_SECRET),
+        elsewhere.header(0, CLIENT_ID_HEADER).as_deref(),
+        Some(TEST_CLIENT_ID),
         "and it records the credential header, which is the thing that must not \
          have arrived across a redirect"
     );

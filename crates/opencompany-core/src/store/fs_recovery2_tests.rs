@@ -21,6 +21,7 @@ async fn a_failed_meta_commit_rolls_the_published_manifest_back() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record_named = |name: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -107,6 +108,7 @@ async fn aborting_during_the_error_path_cleanup_still_reclaims_the_staged_temp_f
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -196,6 +198,7 @@ async fn dropping_save_between_its_two_stages_does_not_strand_the_first_temp_fil
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -276,6 +279,7 @@ async fn a_failed_second_stage_write_does_not_strand_the_first_staged_temp_file(
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = || CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -602,6 +606,7 @@ async fn a_failed_existence_probe_during_an_update_does_not_misfire_the_first_pu
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),

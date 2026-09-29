@@ -118,7 +118,14 @@ async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served
         "an empty registry must not 404 every install"
     );
     assert_eq!(skill["name"], "Tenant Only");
-    assert_eq!(skill["source"], "registry");
+    assert_eq!(skill["source"], "custom");
+
+    let deltas = persisted_skills(&state).await;
+    let row = deltas
+        .iter()
+        .find(|s| s.slug == "tenant-only-skill")
+        .expect("the fallback persisted a row");
+    assert_eq!(row.source, crate::ports::skills_state::SkillSource::Custom);
 }
 
 /// A *configured* shared library that cannot load must not degrade to the
@@ -285,8 +292,8 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
-    // Install from registry, carrying the entry's metadata so the host persists
-    // a real SKILL.md the agent can act on (not a content-less slug).
+    // No shared library is served, so the install persists a SKILL.md built from
+    // the client's metadata and records it as custom.
     let (status, skill) = send(
         &state,
         "POST",
@@ -299,7 +306,7 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(skill["source"], "registry");
+    assert_eq!(skill["source"], "custom");
     assert!(skill["enabled"].as_bool().unwrap());
     // The install response reflects the persisted custom_doc (parsed back), so a
     // non-empty description proves content was stored — the fix for the agent
@@ -310,7 +317,7 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
         "Answer a question from multiple sources with citations."
     );
 
-    // Uninstall the registry skill: 204.
+    // Uninstall the installed skill: 204.
     let (status, _) = send(
         &state,
         "POST",
@@ -499,4 +506,72 @@ async fn inbox_read_marks_and_reports_unread() {
     let (status, body) = send(&state, "POST", "/api/v1/company/inboxes/ceo/read", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0);
+}
+
+/// Every skill write stamps the row, and the list reports the stamp — which is
+/// what lets the console sort by last edited and say when a skill last changed.
+///
+/// A skill nobody has written a delta over reports no stamp at all, rather than
+/// the moment it was read: a bundled or baseline skill is authored in the
+/// repository, so dating it to this request would invent an edit.
+#[tokio::test]
+async fn skills_writes_stamp_the_row_and_the_list_reports_it() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let before = crate::ports::now_millis();
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills",
+        Some(json!({"name": "Quarter Close", "description": "Close the books."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let authored = created["updatedAtMillis"]
+        .as_u64()
+        .expect("authoring stamps the row");
+    assert!(
+        authored >= before,
+        "the stamp is the moment of the write, got {authored} against {before}"
+    );
+
+    // A toggle rewrites the delta, so it re-dates it: "last edited" tracks the
+    // last write of any kind, which is what the operator saw themselves do.
+    let (status, toggled) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/skills/quarter-close",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{toggled}");
+    let retoggled = toggled["updatedAtMillis"]
+        .as_u64()
+        .expect("a toggle stamps the row too");
+    assert!(
+        retoggled >= authored,
+        "a later write never moves the stamp backwards: {retoggled} against {authored}"
+    );
+
+    // The stamp survives the store round trip and the effective-set resolution,
+    // not just the write handler's own response.
+    let (status, listed) = send(&state, "GET", "/api/v1/company/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let rows = listed.as_array().expect("a list of skills");
+    let mine = rows
+        .iter()
+        .find(|s| s["id"] == "quarter-close")
+        .expect("the authored skill is listed");
+    assert_eq!(mine["updatedAtMillis"].as_u64(), Some(retoggled));
+
+    // A baseline skill no delta covers carries no stamp.
+    let untouched = rows
+        .iter()
+        .find(|s| s["id"] != "quarter-close" && s["source"] == "company")
+        .expect("the global baseline is in the effective set");
+    assert!(
+        untouched["updatedAtMillis"].is_null(),
+        "a skill nobody edited has no last-edited time, got {untouched}"
+    );
 }

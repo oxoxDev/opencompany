@@ -25,6 +25,7 @@
 // round-trip and rebuild preservation — the data change #311 rules out.
 
 import type { DeskDto, TeamMemberDto } from "@/api/types";
+import { isGeneralDesk } from "@/lib/desks";
 import { avatarFor, fromDto, type TeamMember } from "@/lib/team";
 
 /**
@@ -147,7 +148,8 @@ export function buildOrgTree(
   const members = roster.map(fromDto);
   const byId = new Map(members.map((m) => [m.id, m]));
 
-  const orgDesks: OrgDesk[] = desks.map((desk) => {
+  // `#general` is the whole roster, not a desk in the hierarchy.
+  const orgDesks: OrgDesk[] = desks.filter((d) => !isGeneralDesk(d)).map((desk) => {
     // `overlayMembers` is omitted rather than empty when there are none, which
     // is why this reads through `?? []` instead of trusting the field.
     const overlay = new Set(desk.overlayMembers ?? []);

@@ -316,11 +316,11 @@ describe("the admin address", () => {
     });
   }
 
-  /** A host with no sign-in needs no address — but a typo is still a typo. */
-  it("lets a blank address pass where sign-in is not required, but not a typo", () => {
+  /** A host with no sign-in needs no login — but a typo is still a typo. */
+  it("lets a blank login pass where sign-in is not required, but not a typo", () => {
     expect(adminEmailProblem("", false)).toBeUndefined();
     expect(adminEmailProblem("   ", false)).toBeUndefined();
-    expect(adminEmailProblem("as", false)).toContain("@");
+    expect(adminEmailProblem("Ada Lovelace", false)).toContain("spaces");
   });
 });
 

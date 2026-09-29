@@ -11,15 +11,20 @@ fn a_real_looking_key_is_configured() {
     assert!(is_configured(A_REAL_PUBKEY));
 }
 
-/// The updater public key this repository ships, installed when desktop
-/// auto-update landed (`846913029`).
+/// The updater public key this repository ships. First installed when
+/// desktop auto-update landed (`846913029`); rotated to minisign key id
+/// `C10A9CFAF2A579C7` when the desktop moved to the `com.tinyhumans.opencompany`
+/// identifier and the signing secrets moved into the `Production` GitHub
+/// environment. Builds carrying the previous key (id `7123DDC68477042C`)
+/// cannot verify updates signed with this one, so they must be reinstalled
+/// from a DMG once.
 ///
 /// Pinned here on purpose. A minisign **public** key is meant to be
 /// distributed — it is what a shipped binary verifies a release against,
 /// and it is inert without the private half, which stays an operator
 /// secret — so carrying it is not the leak the pre-auto-update version of
 /// this test was guarding against.
-const SHIPPED_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxMjNEREM2ODQ3NzA0MkMKUldRc0JIZUV4dDBqY1NnMnBmK21oc0xGdnBhNTl3djVGWWErWFJ0aG1IYkZJTWpVczJZUjBzcGIK";
+const SHIPPED_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMxMEE5Q0ZBRjJBNTc5QzcKUldUSGVhWHkrcHdLd1Z3c3lRMnZpVklpZlNhVk0vN09nK01vdDJwYzIrbkJBbzhlQXFobmZ5cWUK";
 
 /// The config carries the key this repository intends, and no other.
 ///

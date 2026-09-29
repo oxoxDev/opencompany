@@ -83,7 +83,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { EULER, FIRST_RUN } from "./capabilities";
+import { EULER, FIRST_RUN, HIVE } from "./capabilities";
+
+const ANALYTICS = process.env.PW_ANALYTICS === "1";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
@@ -110,11 +112,15 @@ const INSTANCE_ID_FILE = "instance-id";
  */
 export const MANAGED_HOST_HOME: string | undefined = process.env.PW_BASE_URL
   ? undefined
-  : FIRST_RUN
-    ? join(repoRoot, "target/e2e/first-run-data")
-    : EULER
-      ? join(repoRoot, "target/e2e/euler-data")
-      : process.env.PW_HOST_DATA_DIR || join(repoRoot, "target/e2e/data");
+  : ANALYTICS
+    ? join(repoRoot, "target/e2e/analytics-data")
+    : FIRST_RUN
+      ? join(repoRoot, "target/e2e/first-run-data")
+      : EULER
+        ? join(repoRoot, "target/e2e/euler-data")
+        : HIVE
+          ? join(repoRoot, "target/e2e/hive-data")
+          : process.env.PW_HOST_DATA_DIR || join(repoRoot, "target/e2e/data");
 
 /**
  * The instance id the caller says this run must be talking to.
@@ -123,10 +129,10 @@ export const MANAGED_HOST_HOME: string | undefined = process.env.PW_BASE_URL
  * config nothing about which host is at that address, but whoever claimed the
  * port already read its `instance_id` and can say so here.
  */
-export const EXPECTED_INSTANCE_ID: string | undefined = process.env
-  .PW_EXPECTED_INSTANCE_ID?.trim()
-  ? process.env.PW_EXPECTED_INSTANCE_ID.trim()
-  : undefined;
+export const EXPECTED_INSTANCE_ID: string | undefined =
+  process.env.PW_EXPECTED_INSTANCE_ID?.trim()
+    ? process.env.PW_EXPECTED_INSTANCE_ID.trim()
+    : undefined;
 
 /**
  * The identity a host has already recorded under `home`, if any.
@@ -205,7 +211,8 @@ export function identityFailure(seen: HostObservation): string | undefined {
     );
   }
 
-  const instanceId = typeof spec.instance_id === "string" ? spec.instance_id : undefined;
+  const instanceId =
+    typeof spec.instance_id === "string" ? spec.instance_id : undefined;
 
   // An explicit expectation outranks a derived one: the caller who set it knows
   // something this config does not, and is the reason the variable exists.

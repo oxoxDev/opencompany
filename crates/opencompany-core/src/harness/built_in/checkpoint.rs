@@ -18,11 +18,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use oh::tools::traits::{
+use tinytools::{
     PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolSpec,
     ToolTimeout,
 };
-use openhuman_core as oh;
 
 use crate::store::fs::path_lock;
 
@@ -387,7 +386,7 @@ impl Tool for CheckpointingTool {
         &self,
         args: Value,
         options: ToolCallOptions,
-        context: Option<&dyn oh::tools::traits::ToolRunContext>,
+        context: Option<&dyn tinytools::ToolRunContext>,
     ) -> anyhow::Result<ToolResult> {
         let result = self
             .inner

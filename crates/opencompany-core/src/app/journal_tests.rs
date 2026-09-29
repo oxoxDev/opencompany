@@ -85,7 +85,15 @@ fn blank_env_values_fall_back_to_the_data_dir() {
 fn the_summary_names_the_store_and_the_knob() {
     let summary = resolve(None, Path::new("/data")).summary();
 
-    assert!(summary.contains("/data/openhuman/workspace/tinyagents_store"));
+    // Built by joining rather than written out, because the summary renders the
+    // platform's own separator: on Windows it says `\data\openhuman\...` and the
+    // forward-slash literal this replaces never matched. What the summary owes
+    // an operator is the right *path*, not one spelled the POSIX way.
+    let store = Path::new("/data")
+        .join("openhuman")
+        .join("workspace")
+        .join("tinyagents_store");
+    assert!(summary.contains(&store.display().to_string()), "{summary}");
     assert!(summary.contains("OPENCOMPANY_DATA_DIR"));
 
     let env_summary = resolve(Some("/srv/oh"), Path::new("/data")).summary();

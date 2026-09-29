@@ -39,9 +39,7 @@ deadline drains a backlog over a few minutes instead of bursting. Enforcement is
 not here — the gate re-checks the deadline under the lock that removes a parked
 entry, so an overdue approval default-denies on the operator's click whether or
 not this ever ran; what this adds is that the queue empties and the badge goes
-back to describing current state. `CompanyScheduler::tick_maintenance` remains
-as a thin delegate over the same `sweep_company`, so the two callers cannot
-drift.
+back to describing current state.
 
 `workflow_scheduler.rs` drives the *other* kind of cron: the `schedule` a saved
 workflow graph's `trigger` node carries (issue #169). Same `CronExpr` matcher,
@@ -121,21 +119,25 @@ that was never the product. Email (IMAP/SMTP) and the console remain the ways in
 
 ## Harness pool (`src/harness/`, feature `openhuman`)
 
-`src/harness/` embeds `openhuman_core` as a library (see
-[`docs/modules/openhuman/README.md`](../openhuman/README.md)). `HarnessPool`
-builds one openhuman `Agent` per manifest `[[agent]]` through `AgentBuilder`
-(`build.rs`), wiring memory (`memory.rs`, an openhuman `Memory` over the
-`ContextStore`), the hosted-Medulla inference provider (`provider.rs`, with a
-`MockProvider` for tests), and the approval policy (`policy.rs`, `[policy].mode`
-→ openhuman `ToolPolicy`). The default build links none of it.
+`src/harness/` embeds `openhuman_core` and `openhuman_embed` as libraries
+(see [`docs/modules/openhuman/README.md`](../openhuman/README.md)). One
+`openhuman_embed::Runtime` per process (`openhuman_runtime.rs`); `HarnessPool`
+mints one `openhuman_embed::Agent` per manifest `[[agent]]` on it from an
+`AgentSpec` (`build.rs::agent_spec_for`), with the inference route resolved
+per agent (`provider.rs`), the approval policy carried for the MCP tool
+handler (`policy.rs`) and a `turn_lock` per agent. Beside the roster the pool
+holds one `hive::graph::DeskHive` per `[[group_chat]]` — the
+`OpenHumanHive` + `CompletionDriver` a desk's episodes run on — and the
+`opencompany` MCP server every agent's tools are served over
+(`hive::mcp_server`). The default build links none of it.
 
-`HarnessPool::run` maps a completed turn's cost (`cost.rs`, `TurnCost` →
-ledger + `UsageMeter`). **Partial:** openhuman exposes turn usage only through
-a `pub(crate)` accessor, so until the upstream public accessor
-(tinyhumansai/openhuman#4940) lands, `run` records a **zero-usage** turn; the
-mapping itself is complete and tested. Group-chat/desk routing is single-
-responder in v1 — the full desk-resolving `chat` handler and approval resume
-live in the WS3 chat handler, not the harness.
+`HarnessPool::run` runs one turn under the agent's `turn_lock` on its stable
+session and maps its cost (`cost.rs`, from the runtime's
+`ModelCallCompleted` / `TurnCostUpdated` progress → ledger + `UsageMeter`).
+A chat cycle reaches the pool through `hive::dispatch`: a desk of two or more
+runs an episode of concurrent rounds, everything else one turn
+([`docs/spec/runtime/hive.md`](../../spec/runtime/hive.md)). Turns of
+different agents overlap; turns of one agent never do.
 
 ## Metering (`src/metering/`)
 

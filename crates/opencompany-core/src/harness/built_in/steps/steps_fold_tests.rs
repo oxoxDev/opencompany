@@ -32,13 +32,13 @@ struct LabelledTool {
 }
 
 impl LabelledTool {
-    fn boxed(name: &'static str, label: Option<&'static str>) -> Box<dyn oh::tools::traits::Tool> {
+    fn boxed(name: &'static str, label: Option<&'static str>) -> Box<dyn tinytools::Tool> {
         Box::new(Self { name, label })
     }
 }
 
 #[async_trait::async_trait]
-impl oh::tools::traits::Tool for LabelledTool {
+impl tinytools::Tool for LabelledTool {
     fn name(&self) -> &str {
         self.name
     }
@@ -55,8 +55,8 @@ impl oh::tools::traits::Tool for LabelledTool {
         self.label.map(str::to_string)
     }
 
-    async fn execute(&self, _args: Value) -> anyhow::Result<oh::tools::traits::ToolResult> {
-        Ok(oh::tools::traits::ToolResult::success("ok"))
+    async fn execute(&self, _args: Value) -> anyhow::Result<tinytools::ToolResult> {
+        Ok(tinytools::ToolResult::success("ok"))
     }
 }
 
@@ -74,11 +74,20 @@ fn the_vendored_loop_still_labels_a_tool_row_from_its_name_alone() {
     let src = vendored(
         "vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/observability/event_projection.rs",
     );
+    // The property, not the spelling. This pinned one exact line
+    // (`display_label: Some(humanize_tool_name(tool_name))`) and went red on
+    // an upstream bump that only moved it — the loop still derived every
+    // label from the name. A needle that breaks on a refactor cries wolf,
+    // and a canary nobody trusts gets deleted for the wrong reason.
     assert!(
-        src.contains("display_label: Some(humanize_tool_name(tool_name))"),
-        "the vendored loop no longer labels a tool row from its name — if it now asks \
-         the tool for its own label, `StepLabels` is redundant and should be removed \
-         rather than left to shadow the real answer"
+        src.contains("humanize_tool_name("),
+        "the vendored loop no longer derives a tool row's label from its name; find \
+         what it derives one from now and pin that instead"
+    );
+    assert!(
+        !src.contains(".display_label()"),
+        "the vendored loop now asks the tool for its own label, so `StepLabels` is \
+         redundant and should be removed rather than left to shadow the real answer"
     );
 }
 
@@ -384,6 +393,8 @@ fn each_failure_class_maps_to_its_own_operator_facing_kind() {
             TurnStepFailure::MissingPermission,
         ),
         (ToolFailureClass::MissingApp, TurnStepFailure::MissingApp),
+        (ToolFailureClass::NotFound, TurnStepFailure::NotFound),
+        (ToolFailureClass::Unsupported, TurnStepFailure::Unsupported),
         (
             ToolFailureClass::ServiceUnavailable,
             TurnStepFailure::Unavailable,

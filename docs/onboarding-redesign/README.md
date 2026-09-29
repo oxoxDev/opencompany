@@ -82,7 +82,7 @@ branch. Do them top to bottom; each depends on the ones above it.
 |---|---|---|---|
 | 0 | this folder (docs only) | — | plan + brief |
 | 1 | [reuse-mapping.md](reuse-mapping.md) — **read before writing any code** | — | not a code slice: the exact function/component/endpoint map every later slice must follow |
-| 2a | fan-out: add the `Search` slot | issue #2342 | `company_key/fan_out.rs` `Slot` enum gains `Search`; `search/managed/key` written alongside `provider/tinyhumans/key` and `composio/managed/key` |
+| 2a | fan-out: add the `Search` slot | issue #2342 | `company_key/fan_out.rs` `Slot` enum gains `Search`; `search/managed/key` written alongside `provider/tinyhumans/key` and `composio/tinyhumans/key` |
 | 2b | `search/resolve.rs` reads the company tier | 2a | `active()` checks `search/managed/key` before the bare instance-operator env credential |
 | 3 | wizard step 0: the setup-way choice | — | new `SetupWayStep` component + `STEPS` reorder; no backend change |
 | 4a | Managed step 1: reuse the real fan-out | 1, 2a | `PowerStep`'s TinyHumans path replaced by a call to `setCompanyCredential`/`setCompanyCredentialModel`, not `inference::store_key` |
@@ -129,7 +129,7 @@ beyond `search/managed/key`.
   code — on every step, not just once at the start. See
   [implementation-plan.md](implementation-plan.md)'s "Standing rules."
 - **No new secret or config keys.** Reuse `tinyhumans/key`,
-  `provider/tinyhumans/key`, `composio/managed/key`, and #2342's search
+  `provider/tinyhumans/key`, `composio/tinyhumans/key`, and #2342's search
   equivalent as-is. A task that seems to need a new key needs a different
   approach, not a new key.
 - Rust: `cargo fmt --all -- --check` locally; clippy/tests on CI, verified by

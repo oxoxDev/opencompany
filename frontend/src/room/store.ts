@@ -58,6 +58,19 @@ export interface RoomState {
   liveStepsByThread: Record<string, LiveStep[]>;
   liveStepsByMessage: Record<string, LiveStep[]>;
   receiptByThread: Record<string, ChatReceipt>;
+  /**
+   * Who last reported on each open turn, keyed exactly as its rows are — by
+   * query where the host stamped `messageSeq`, by thread otherwise.
+   *
+   * The live answer to "who is working", as distinct from `openTurns`' answer.
+   * An `OpenTurn` names the agent the host *started* the turn on and never
+   * revises it, which is right for a single responder and wrong the moment the
+   * floor moves: a desk hand-off runs the delegate under the same query, and a
+   * deliberating room passes the floor between seats for the whole episode.
+   * Only the frames say which seat is speaking now, and until this they said it
+   * to nothing — `agentId` arrived on every frame and was dropped.
+   */
+  liveAgentByTurn: Record<string, string>;
   openTurns: Record<string, OpenTurn[]>;
 }
 
@@ -84,6 +97,7 @@ function emptyState(): RoomState {
     liveStepsByThread: {},
     liveStepsByMessage: {},
     receiptByThread: {},
+    liveAgentByTurn: {},
     openTurns: {},
   };
 }
@@ -170,6 +184,7 @@ const unreadSince = field("unreadSince");
 const liveStepsByThread = field("liveStepsByThread");
 const liveStepsByMessage = field("liveStepsByMessage");
 const receiptByThread = field("receiptByThread");
+const liveAgentByTurn = field("liveAgentByTurn");
 const openTurns = field("openTurns");
 
 /* ---- writers: `useState` semantics, so call sites move across untouched ---- */
@@ -182,6 +197,7 @@ export const setUnreadSince = unreadSince.set;
 export const setLiveStepsByThread = liveStepsByThread.set;
 export const setLiveStepsByMessage = liveStepsByMessage.set;
 export const setReceiptByThread = receiptByThread.set;
+export const setLiveAgentByTurn = liveAgentByTurn.set;
 export const setOpenTurns = openTurns.set;
 
 /**
@@ -204,6 +220,7 @@ export function writersForScope(key: string) {
     setLiveStepsByThread: guard(setLiveStepsByThread),
     setLiveStepsByMessage: guard(setLiveStepsByMessage),
     setReceiptByThread: guard(setReceiptByThread),
+    setLiveAgentByTurn: guard(setLiveAgentByTurn),
     setOpenTurns: guard(setOpenTurns),
   };
 }
@@ -218,6 +235,7 @@ export const useUnreadSince = unreadSince.use;
 export const useLiveStepsByThread = liveStepsByThread.use;
 export const useLiveStepsByMessage = liveStepsByMessage.use;
 export const useReceiptByThread = receiptByThread.use;
+export const useLiveAgentByTurn = liveAgentByTurn.use;
 export const useOpenTurns = openTurns.use;
 
 /**

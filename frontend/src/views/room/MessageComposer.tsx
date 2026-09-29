@@ -133,33 +133,6 @@ interface Props {
    * local reference without a send ever claiming the node.
    */
   deleteAttachment?: (nodeId: string) => void;
-  /**
-   * Render nothing at all, while staying mounted.
-   *
-   * The read-only channel's answer (issue #1757, this PR): the requirement is
-   * "no composer on screen", not "no composer mounted", and the two are only
-   * the same thing if you forget where the draft lives. Every piece of what an
-   * operator has half-written — the text, the staged attachment, the resolved
-   * mentions, the selected intent, the formatting toggle — is `useState` in
-   * *this* component, so unmounting it is what discards the draft.
-   *
-   * `RoomView` renders one channel composer for every channel: React reconciles
-   * it as the same instance across a channel switch, which is why a draft has
-   * always survived walking to another channel and back. Gating that element on
-   * `!readOnly` quietly took that away — opening `#Operator` for a moment, with
-   * an unsent message in `#general`, unmounted the composer and emptied it
-   * (codex review on PR #1984). The old disabled-composer rendering was
-   * accidentally load-bearing.
-   *
-   * So the element stays; only its output goes. Returning `null` after every
-   * hook has run keeps this component's state alive (React only discards state
-   * on unmount) while putting nothing in the DOM — no textarea, no Send, no
-   * `data-tour` anchor, nothing focusable, nothing for a screen reader. That is
-   * the distinction a `hidden`/`display:none` wrapper would NOT make: it leaves
-   * the nodes in the tree for anything that queries the document, including the
-   * guided tour, which would then spotlight an invisible box.
-   */
-  suppressed?: boolean;
 }
 
 /**
@@ -250,7 +223,6 @@ export function MessageComposer({
   onTyping,
   uploadAttachment,
   deleteAttachment,
-  suppressed,
   autonomy,
 }: Props) {
   const [draft, setDraft] = useState("");
@@ -663,11 +635,6 @@ export function MessageComposer({
       el.setSelectionRange(start + mark.length, end + mark.length);
     });
   }
-
-  // After every hook, never before one: an early return above them would break
-  // the rules of hooks, and returning `null` here is precisely what keeps this
-  // instance's draft state alive while it renders nothing. See `suppressed`.
-  if (suppressed) return null;
 
   return (
     <div

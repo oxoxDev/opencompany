@@ -388,6 +388,7 @@ async fn deps_with_parking_and_mail(
         users,
         bootstrap_admin: None,
         channels: Vec::new(),
+        notifications: None,
         parking: Some(super::super::delivery::DeliveryParking {
             approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
             journal: journal.clone(),
@@ -398,6 +399,8 @@ async fn deps_with_parking_and_mail(
             continuations: Default::default(),
             gates: Default::default(),
             blocked_nodes: Default::default(),
+            grants: Default::default(),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         events: Arc::new(crate::store::FsEventLog::new(dir)),
     });
@@ -528,6 +531,7 @@ pub(super) fn deps_delivering_to_channel(
         users: Arc::new(FsOps::new(dir)),
         bootstrap_admin: None,
         channels: vec![Arc::new(channel)],
+        notifications: None,
         parking: None,
         events,
     });

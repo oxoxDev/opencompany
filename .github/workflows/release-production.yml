@@ -23,9 +23,10 @@
 #   create-release  generate the notes and create the Release AS A DRAFT.
 #   build-desktop   both DMGs, signed + notarized, plus the updater archives,
 #                   attached to the draft (build-desktop.yml).
-#   build-docker    the tenant image, built and discarded — ci.yml never runs
-#                   the Dockerfile, so this is the only proof the tag
-#                   containerises.
+#   publish-docker  the tenant image, built from the tag (so it reports the
+#                   bumped version), checked by the sentry-test gate, and
+#                   pushed to GHCR as `:v<version>`. The only place a release
+#                   image is built.
 #
 # There is deliberately NO separate build-and-test job. Everything on `release`
 # arrived through a PR that ran `ci.yml`, and the promotion dispatches `ci.yml`
@@ -33,6 +34,8 @@
 # `--locked` anyway. A third compile of the same tree added ~30 minutes to
 # every cut and found nothing the other two would not.
 #   updater-manifest `latest.json` assembled from both architectures' assets.
+#   promote-image   point GHCR `:latest` at `:v<version>` (same digest, no
+#                   rebuild) once everything else has succeeded.
 #   publish-release check every required asset is on the draft, then flip it
 #                   public. Immutable releases freeze the asset list at that
 #                   moment, so a published release is by construction complete.
@@ -239,6 +242,10 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+    # OPENAI_API_KEY (the AI release notes) lives in this environment, not at
+    # repository level. Branch-policied to `main` and `release`; this job only
+    # runs after `prepare-build` has refused any ref but `release`.
+    environment: Production
     steps:
       - name: Nothing to draft
         if: ${{ !inputs.create_release }}
@@ -322,16 +329,20 @@ jobs:
     permissions:
       contents: write # uploads into the draft Release
     uses: ./.github/workflows/build-desktop.yml
+    # Each signing name must be passed for the called workflow to see it; the
+    # value here is empty and the called job's `Production` environment
+    # supplies the real one. See build-desktop.yml's `secrets:` note.
     secrets:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
       build_ref: ${{ needs.prepare-build.outputs.build_ref }}
       tag: ${{ needs.prepare-build.outputs.tag }}
@@ -339,11 +350,43 @@ jobs:
       with_updater: ${{ inputs.create_release }}
       with_release_upload: ${{ inputs.create_release }}
 
-  build-docker:
-    name: "Docker: build (no push)"
+  # THE RELEASE TENANT IMAGE. boat.dev sandboxes run by
+  # tinyhumansai/opencompany-sandbox-manager pull it straight from GHCR and
+  # follow the newest GitHub Release (opencompany-sandbox-manager#6), so
+  # `:v<version>` has to exist BEFORE `publish-release` makes that release
+  # visible — hence `publish-release` needs this job.
+  #
+  # Built from `build_ref`, the TAG — the version-bump commit — so the image's
+  # `/spec` reports the version it is published as. (The old
+  # `publish-tenant-image.yml` fired on `workflow_run` and built
+  # `workflow_run.head_sha`, the commit BEFORE the bump, so every `vX.Y.Z` image
+  # reported the previous version, and it landed only after the release was
+  # already public.)
+  #
+  # THE GHCR PACKAGE MUST BE PUBLIC. A sandbox's pull is anonymous: it holds no
+  # GHCR credential, so `ghcr.io/tinyhumansai/opencompany` has to be made
+  # **public** in the repository's package settings (Packages ->
+  # opencompany -> Package settings -> Change visibility -> Public) — or
+  # boat.dev must be handed a pull credential — or every pull gets
+  # `denied: denied` and the sandbox cannot start. A freshly created GHCR package
+  # is private by default; publishing succeeds while pulling silently fails
+  # until that flip is done.
+  #
+  # `:latest` is NOT moved here: `promote-image` does that once the desktop
+  # assets and the manifest are in, so a cut that fails later never leaves
+  # `:latest` on a version that was never released. A rehearsal
+  # (`create_release: false`) builds and runs the gate but pushes nothing.
+  publish-docker:
+    name: "Docker: build, verify, push to GHCR"
     needs: [prepare-build]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # push the tenant image to GHCR under this repository's owner
+    env:
+      IMAGE: ghcr.io/tinyhumansai/opencompany
+      TAG: ${{ needs.prepare-build.outputs.tag }}
     steps:
       - name: Checkout build ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -369,20 +412,180 @@ jobs:
           echo "value=$value" >> "$GITHUB_OUTPUT"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-      - name: Build image (no push)
+      # Every Sentry input the staging deploy passes, passed here for the same
+      # reasons — the long rationale lives beside the build-args block in
+      # `deploy-staging.yml` and is not repeated. The short version: the
+      # console's half of crash reporting is inlined by Vite *during this build*,
+      # so an env var set on the running tenant afterwards is a silent no-op, and
+      # a release image built without them ships a console that reports nothing
+      # however the tenant is configured (issue #2392).
+      #
+      # `|| 'hosted-tenant'` mirrors `deploy-staging.yml`: an empty build-arg is
+      # not an unset one, and everything this image builds is a hosted tenant.
+      #
+      # `load: true` keeps the image in the local daemon so the gate below can
+      # run it; `push` stays false here on purpose. The image is pushed only
+      # AFTER the gate passes, and it is the very image the gate ran — the
+      # loaded one, pushed by `docker push` — not a second build.
+      - name: Build image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/Dockerfile
           push: false
+          load: true
           platforms: linux/amd64
-          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          tags: ${{ env.IMAGE }}:${{ needs.prepare-build.outputs.tag }}
           build-args: |
             FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
             VITE_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
+            VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
+            VITE_SENTRY_TRACES_SAMPLE_RATE=${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
+            SENTRY_URL=https://sentry.tinyhumans.ai
+            SENTRY_ORG=tinyhumans
+            SENTRY_PROJECT_REACT=opencompany-frontend
+            SENTRY_PROJECT_RUST=opencompany-core
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           cache-from: type=gha,scope=release-docker
           cache-to: type=gha,scope=release-docker,mode=max
+
+      # The post-deploy gate this issue exists for. `opencompany sentry-test`
+      # captures a test event and exits non-zero when nothing could be sent, so
+      # running it against the image that is about to be released turns "crash
+      # reporting silently stopped working" from something nobody notices into a
+      # failed release.
+      #
+      # It runs the RELEASE IMAGE, not a checkout: the three things that break
+      # here are the `crash-reporting` cargo feature being dropped from
+      # `TENANT_FEATURES`, the compiled-in default DSN being wrong, and egress to
+      # the ingest host being blocked. No DSN is passed: the container runs as a
+      # hosted tenant (`OPENCOMPANY_DEPLOYMENT=hosted-tenant`), so it reports to
+      # the compiled-in `opencompany-core` project exactly as a tenant does. Only the built artifact exercises all three, and the first
+      # is invisible to every test that runs outside it — a build without the
+      # feature resolves `Silence::NotCompiled` and reports nothing while every
+      # environment variable looks perfect.
+      #
+      # `--entrypoint` because the image's entrypoint is the `serve` switch.
+      #
+      # Sending is only half the check. `sentry-test` exits zero once its queue
+      # drains, which means the ingest ANSWERED — not that it kept anything, and
+      # the spec has always said so. That gap is not theoretical: between
+      # 2026-09-15 and 2026-09-18 this organisation's Sentry accepted zero events
+      # while Relay went on answering `200 {"id":…}` to every sender, and a gate
+      # that stopped at the exit code would have passed green throughout. So the
+      # event is read BACK through the API, and only a stored event passes.
+      #
+      # The read is polled rather than done once: ingestion is asynchronous and
+      # an event is not queryable the instant it is accepted. 120s, against the
+      # 60s the issue asks for, because failing a release over a slow queue would
+      # teach everyone to re-run the job until it goes green — which is how a
+      # gate stops being one.
+      #
+      # `continue-on-error` is deliberately NOT set. A release that cannot report
+      # its own crashes is the release least safe to ship blind.
+      - name: Verify crash reporting (sentry-test)
+        env:
+          OPENCOMPANY_SENTRY_ENVIRONMENT: ${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::SENTRY_AUTH_TOKEN is not set, so this release cannot be shown to report crashes. See docs/spec/runtime/crash-reporting.md." >&2
+            exit 1
+          fi
+
+          event_id="$(docker run --rm \
+            --entrypoint opencompany \
+            -e OPENCOMPANY_DEPLOYMENT=hosted-tenant \
+            -e OPENCOMPANY_SENTRY_ENVIRONMENT \
+            "${IMAGE}:${TAG}" \
+            sentry-test --message "release-production ${TAG} ${GITHUB_RUN_ID}")"
+          echo "sentry event id: ${event_id}"
+
+          # Sentry stores event ids unhyphenated; the SDK prints a hyphenated
+          # UUID. Looking up the printed form returns 404 forever.
+          lookup="$(printf '%s' "$event_id" | tr -d '-')"
+          url="${SENTRY_URL%/}/api/0/organizations/${SENTRY_ORG}/eventids/${lookup}/"
+
+          for attempt in $(seq 1 24); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" "$url" || echo 000)"
+            case "$code" in
+              200)
+                echo "crash reporting verified: event ${event_id} is stored (after $((attempt * 5))s)" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+              # Not "the event is missing" — "this token may not ask". Polling
+              # for two minutes on an authorisation error would report the wrong
+              # cause, and the fix (grant `org:read`) is nothing like the fix for
+              # a discarded event.
+              401 | 403)
+                echo "::error::Sentry refused the readback with HTTP ${code}. SENTRY_AUTH_TOKEN needs org:read scope on ${SENTRY_ORG} to look up an event id. The event itself (${event_id}) was sent and may well have arrived." >&2
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+
+          echo "::error::Sentry accepted event ${event_id} but never stored it (last lookup: HTTP ${code} after 120s). Reporting is NOT working: the ingest is answering while events are discarded. Check the Sentry instance's accepted-outcome stats, not this repository." >&2
+          exit 1
+
+      - name: Log in to GHCR
+        if: inputs.create_release
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The exact image the gate above ran. `v<version>` is unique by
+      # construction — `prepare-build` refused a tag that already exists.
+      - name: Push the release image
+        if: inputs.create_release
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${TAG}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${TAG}")"
+          {
+            echo "### Tenant image"
+            echo ""
+            echo "\`${IMAGE}:${TAG}\` — \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Moves `:latest` onto the release image as the LAST thing before the release
+  # goes public, and only when every other job has succeeded — so a cut that
+  # fails anywhere (and is cleaned up) never leaves `:latest` pointing at a
+  # version that was never released. A registry-side retag: same manifest,
+  # same digest as `:v<version>`, nothing rebuilt.
+  promote-image:
+    name: "Docker: point :latest at the release"
+    needs: [prepare-build, build-desktop, publish-docker, updater-manifest]
+    if: inputs.create_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write # retag the tenant image in GHCR
+    env:
+      IMAGE: ghcr.io/tinyhumansai/opencompany
+      TAG: ${{ needs.prepare-build.outputs.tag }}
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the release image latest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:${TAG}"
+          docker buildx imagetools inspect "${IMAGE}:latest"
 
   # `latest.json` is written into the DRAFT, before publish. A release
   # published without a manifest pins every existing install to the build it
@@ -411,7 +614,7 @@ jobs:
 
   publish-release:
     name: Publish release
-    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest]
+    needs: [prepare-build, create-release, build-desktop, publish-docker, updater-manifest, promote-image]
     if: inputs.create_release
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -464,18 +667,21 @@ jobs:
   # the draft (asset-less or half-filled) and the tag both go, so the next
   # dispatch bumps to the next patch cleanly and nothing half-built is
   # reachable. The version-bump commit stays on `release`; that is harmless.
+  # A `:v<version>` image already pushed to GHCR also stays: nothing pulls a
+  # version no Release names, and `:latest` never moved (see `promote-image`).
   cleanup-failed-release:
     name: Remove draft and tag if a step failed
     # Including `publish-release`: a failed asset check or a failed
     # `gh release edit` is exactly the half-built state this job exists for.
-    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest, publish-release]
+    needs: [prepare-build, create-release, build-desktop, publish-docker, updater-manifest, promote-image, publish-release]
     if: >-
       always()
       && inputs.create_release
       && needs.prepare-build.result == 'success'
       && (needs.create-release.result == 'failure' || needs.create-release.result == 'cancelled'
           || needs.build-desktop.result == 'failure' || needs.build-desktop.result == 'cancelled'
-          || needs.build-docker.result == 'failure' || needs.build-docker.result == 'cancelled'
+          || needs.publish-docker.result == 'failure' || needs.publish-docker.result == 'cancelled'
+          || needs.promote-image.result == 'failure' || needs.promote-image.result == 'cancelled'
           || needs.updater-manifest.result == 'failure' || needs.updater-manifest.result == 'cancelled'
           || needs.publish-release.result == 'failure' || needs.publish-release.result == 'cancelled')
     runs-on: ubuntu-latest

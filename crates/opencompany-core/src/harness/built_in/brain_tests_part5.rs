@@ -75,13 +75,6 @@ fn responder_for_does_not_let_a_hidden_overlay_desk_answer_the_general_line() {
 /// A **teammate** whose id is a General spelling keeps its DM, and does not
 /// take the company-wide line with it (issue #1743).
 ///
-/// `mint_agent_id` reserves `main` and `General`, but a manifest can still
-/// declare one, and a manifest is not something this host overrules. Before
-/// this, `resolve_roster_agent_id` matched the bare key and that teammate
-/// answered every unaddressed message — while `GET chat/history?desk=main`
-/// returned the *folded General conversation* (`is_general_chat` has folded
-/// `""`, `main`, `General` and `general` into one since issue #65). The
-/// responder and the transcript disagreed about whose conversation it was.
 /// The bare key is the line; `dm:<id>` is the teammate.
 #[test]
 fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_called_main() {
@@ -90,7 +83,7 @@ fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_calle
     brain.mutate_record(|r| {
         r.overlay_agents.push(OverlayAgent {
             provider: None,
-            id: "main".into(),
+            id: "general".into(),
             name: "Mainard".into(),
             role: "Analyst".into(),
             description: None,
@@ -100,17 +93,17 @@ fn responder_for_gives_the_general_line_to_the_orchestrator_not_a_teammate_calle
         })
     });
     assert!(
-        brain.record().is_roster_agent("main"),
+        brain.record().is_roster_agent("general"),
         "the teammate really is on the roster, so the old arm would have matched"
     );
     assert_eq!(
-        brain.responder_for(Some("main")),
+        brain.responder_for(Some("general")),
         "chief",
         "the bare key is the company's line, whatever a teammate is called"
     );
     assert_eq!(
-        brain.responder_for(Some("dm:main")),
-        "main",
+        brain.responder_for(Some("dm:general")),
+        "general",
         "and the teammate keeps its own DM, addressed the way the console addresses one"
     );
 }
@@ -276,6 +269,7 @@ name = "Design"
     )
     .expect("valid manifest");
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -341,6 +335,7 @@ members = ["eng1", "eng2"]
     )
     .expect("valid manifest");
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -425,6 +420,7 @@ members = ["eng1", "eng2"]
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

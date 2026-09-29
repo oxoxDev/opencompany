@@ -69,14 +69,14 @@ async fn an_ambiguous_name_is_reported_in_the_channel_it_was_sent_to() {
     assert_eq!(resolved.ambiguous.len(), 1, "and reported once");
 
     runtime
-        .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
+        .post_mention_ambiguity_note("general", None, &resolved.ambiguous)
         .await;
 
     let posted = replies(&runtime).await;
     assert_eq!(posted.len(), 1, "exactly one line: {posted:?}");
     let (agent, chat, text) = &posted[0];
     assert_eq!(agent, crate::ports::SYSTEM_AUTHOR);
-    assert_eq!(chat, "main", "into the conversation it was sent to");
+    assert_eq!(chat, "general", "into the conversation it was sent to");
     assert!(text.contains("@writer"), "names the literal typed: {text}");
     assert!(
         text.contains("pinged nobody"),
@@ -103,7 +103,7 @@ async fn an_ambiguous_name_in_a_thread_is_reported_into_that_thread() {
             CompanyEvent::OperatorMessage {
                 text: "kicking off a thread".to_string(),
                 by: None,
-                chat: Some("main".to_string()),
+                chat: Some("general".to_string()),
                 parent: None,
                 deliverable: None,
                 mentions: Vec::new(),
@@ -119,7 +119,7 @@ async fn an_ambiguous_name_in_a_thread_is_reported_into_that_thread() {
     assert_eq!(resolved.ambiguous.len(), 1, "reported once");
 
     runtime
-        .post_mention_ambiguity_note("main", Some(root), &resolved.ambiguous)
+        .post_mention_ambiguity_note("general", Some(root), &resolved.ambiguous)
         .await;
 
     let threaded = runtime
@@ -137,7 +137,7 @@ async fn an_ambiguous_name_in_a_thread_is_reported_into_that_thread() {
         .collect::<Vec<_>>();
     assert_eq!(threaded.len(), 1, "exactly one reply: {threaded:?}");
     let (parent, chat) = &threaded[0];
-    assert_eq!(chat, "main");
+    assert_eq!(chat, "general");
     assert_eq!(
         *parent,
         Some(root),
@@ -156,7 +156,7 @@ async fn an_unambiguous_message_posts_nothing() {
         .await;
     assert_eq!(resolved.mentions.len(), 1, "the ping resolves");
     runtime
-        .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
+        .post_mention_ambiguity_note("general", None, &resolved.ambiguous)
         .await;
     assert!(
         replies(&runtime).await.is_empty(),

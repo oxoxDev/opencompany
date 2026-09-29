@@ -56,8 +56,8 @@ name = "desktop_serve_parity"
 path = "tests/desktop_serve_parity.rs"
 
 [[test]]
-name = "hivemind_e2e"
-path = "tests/hivemind_e2e.rs"
+name = "hive_e2e"
+path = "tests/hive_e2e.rs"
 
 [[test]]
 name = "offline_e2e"
@@ -198,7 +198,12 @@ tower = { version = "0.5", features = ["util"] }
 tinyagents-harness = { path = "../../vendor/openhuman/vendor/tinyagents/crates/tinyagents-harness", optional = true, features = [
     "sqlite",
 ] }
-tinyinference = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference", optional = true }
+# At the 1ecf1b0 OpenHuman pin the single `tinyinference` package split into a
+# workspace; the LLM half (`ChatModel`, `Message`, `Usage`, `Error`) is
+# `tinyinference-llm`, renamed back to `tinyinference` here so the existing
+# `tinyinference::` paths keep resolving. Same vendored copy openhuman's
+# `tinyagents-harness` links.
+tinyinference = { package = "tinyinference-llm", path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-llm", optional = true }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
@@ -224,6 +229,26 @@ tinyinference = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyin
 # module: `tinyhosts` is linked as a library, so nothing here loads a cdylib.
 openhuman_core = { package = "openhuman", path = "../../vendor/openhuman/crates/openhuman-core", optional = true, default-features = false, features = ["skills", "mcp", "hosting"] }
 
+# The host-facing embedding facade over the same core: ONE process-wide
+# `Runtime` and one `Agent` per company agent (plan "hive-desks", Phase 2).
+# `openhuman_core::agent::{Agent, AgentBuilder}` no longer exist at this pin,
+# so every company turn goes through `openhuman_embed::Agent::turn`. Same
+# vendored path `tinyhivemind-openhuman` is patched onto (root `Cargo.toml`,
+# `[patch."https://github.com/tinyhumansai/openhuman"]`), so a hive binding and
+# this crate hold one `Agent` type. `skills` for `AgentSpec::skills_dir`; `mcp`
+# for `AgentSpec::mcp`, which is how a company agent reaches this host's own
+# tools (Phase 3 serves them over MCP).
+openhuman-embed = { path = "../../vendor/openhuman/crates/openhuman-embed", optional = true, default-features = false, features = ["mcp", "skills"] }
+# The TinyHumans backend transport for the same core. At the 1ecf1b0 pin
+# `openhuman-embed` alone installs NO backend transport: every hosted-backend
+# surface (`/agent-integrations/*` — managed search, Composio, media) answers
+# `BACKEND_UNAVAILABLE` until a host installs one. This crate carries the
+# SDK-backed `SdkBackendTransport`; `harness::backend_transport` installs it
+# once per process, before the runtime boots and before any
+# `IntegrationClient` is built. Feature-less: the transport is the one thing
+# taken from it.
+openhuman-tinyhumans = { path = "../../vendor/openhuman/crates/openhuman-tinyhumans", optional = true, default-features = false }
+
 # Desks, rosters, mentions and shared session transcripts — the pure algebra
 # behind a group chat several teammates share (`vendor/tinyhivemind`). It is the
 # one place conversation identity is decided, so the history fold, thread
@@ -239,12 +264,11 @@ openhuman_core = { package = "openhuman", path = "../../vendor/openhuman/crates/
 tinyhivemind-core = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-core" }
 
 # The session-runtime half of the same vendored library: the `SessionLog` paging
-# port, and the **attributed** transcript projection over it. Optional, and off
-# by default, unlike `tinyhivemind-core` above — nothing on the default path
-# calls it yet. The adapter that implements the port lives in
-# `runtime::hivemind` behind the `hivemind` feature, and no turn is wired to it;
-# vendoring it enabled would claim a behavior change this build does not make.
-tinyhivemind = { path = "../../vendor/tinyhivemind/crates/tinyhivemind", optional = true }
+# port, the **attributed** transcript projection over it, and the `speech`
+# vocabulary (post / broadcast / dm / complete_episode) a desk turn ends with.
+# Unconditional like `tinyhivemind-core`: the speech tool specs are rendered on
+# the default build too.
+tinyhivemind = { path = "../../vendor/tinyhivemind/crates/tinyhivemind" }
 
 # The MCP client, extracted out of OpenHuman into its own crate. OpenHuman's
 # `oh::mcp::http_client` facade still re-exports the transport and the payload
@@ -253,6 +277,17 @@ tinyhivemind = { path = "../../vendor/tinyhivemind/crates/tinyhivemind", optiona
 # `McpUnauthorizedError`) is a variant of it. Same vendored path OpenHuman
 # itself depends on, so Cargo resolves one copy, not two.
 tinymcp = { path = "../../vendor/openhuman/vendor/tinymcp/crates/tinymcp", optional = true, default-features = false }
+# The tool vocabulary every in-process tool here implements — `Tool`,
+# `ToolResult`, `PermissionLevel`, `ToolRunContext`. OpenHuman used to re-export
+# it as `openhuman_core::tools::traits`; at the 1ecf1b0 pin that module is gone
+# and the crate is named directly. Reached through tinyagents' vendored
+# checkout, the exact path `openhuman-core` declares, so cargo resolves ONE
+# package and a tool built here still satisfies OpenHuman's registry.
+tinytools = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools", optional = true }
+# The tool *dialect*: how a seat's model asks for a tool and reads its
+# result. An episode seat is built with a native belt, so it asks the
+# structured way; the spec path leaves this to the runtime.
+tinytools-agent = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinytools/crates/tinytools-agent", optional = true }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }
@@ -394,7 +429,11 @@ hmac = "0.12"
 pdf-extract = { version = "0.12", optional = true }
 calamine = { version = "0.36", optional = true }
 quick-xml = { version = "0.41", optional = true }
-zip = { version = "7", default-features = false, features = ["deflate"], optional = true }
+# Not optional: the console's skill upload accepts a `.zip`/`.skill` archive
+# in every build, so gating the reader behind a feature would make that route
+# silently refuse a valid archive on a build that merely omitted OOXML text
+# extraction.
+zip = { version = "7", default-features = false, features = ["deflate"] }
 
 sha2 = "0.10"
 getrandom = "0.4"
@@ -439,6 +478,17 @@ mongodb = { version = "3", optional = true }
 tinymemory = { path = "../../vendor/openhuman/vendor/tinymemory/crates/tinymemory", optional = true }
 tinymemory-api = { path = "../../vendor/openhuman/vendor/tinymemory/crates/tinymemory-api", optional = true }
 tinymemory-remote = { path = "../../vendor/openhuman/vendor/tinymemory/crates/tinymemory-remote", optional = true }
+
+# `sanitize_api_error` — scrubs bearer tokens and other secrets out of a raw
+# provider error string before it's logged or surfaced on the event bus. At
+# the 1ecf1b0 openhuman pin this moved out of `openhuman_core`'s own
+# `inference::provider::ops` and into `tinyinference_core::sanitize`, which
+# openhuman itself now calls it through; this crate's own call site
+# (`harness/built_in/composio.rs`) needs the same path dependency for the same
+# reason the `tinymemory*` entries above do — no registry version exists to
+# patch onto. Byte-identical path to `vendor/openhuman/Cargo.toml`'s own entry
+# so Cargo unifies the two rather than resolving a second `tinyinference-core`.
+tinyinference-core = { path = "../../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference-core", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -499,6 +549,30 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 # types rather than structural twins.
 tinyhivemind-hive = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-hive" }
 
+# Host-neutral conversation surfaces (`ConversationRef`, `MessageRoute`,
+# `RoutingPolicy`) and the Jev-first `route_message`/`route_broadcast`
+# composition. Pure, `serde` + `thiserror` only, unconditional for the same
+# reason `tinyhivemind-core` is: conversation identity is decided on the default
+# build too.
+tinyhivemind-embed = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-embed" }
+# The Jev System One wire types and `JevRouter` behind a host transport port
+# (`SystemOneTransport`). Deliberately contains no HTTP client; this crate
+# supplies one over `reqwest` under `openhuman` (plan Phase 7). Unconditional
+# because it is pure and the routing policy types live beside it.
+tinyhivemind-typesafe = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-typesafe" }
+# The first-class OpenHuman adapter: `OpenHumanHive` (one per desk), each member
+# bound to an already-built `openhuman_embed::Agent`, and the
+# `CompletionDriver` that proposes concurrent rounds. Optional because it
+# links `openhuman-embed`; it comes in with the `openhuman` feature.
+# The completion driver and the episode's tool record, both pure: the
+# conductor, the wire forms, and the record every tool call lands in. Split
+# out of `tinyhivemind-openhuman` upstream, which now holds only the crates
+# that link a harness.
+tinyhivemind-driver = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-driver" }
+tinyhivemind-tools = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-tools" }
+
+tinyhivemind-openhuman = { path = "../../vendor/tinyhivemind/crates/tinyhivemind-openhuman", optional = true }
+
 [features]
 # `oauth` ships in the standard build: the connection write routes
 # (authorize-url + server-side token exchange) are a first-class console
@@ -541,7 +615,7 @@ default = ["oauth", "platform-jwt", "documents", "tinymemory"]
 # "remember this file" from the operator's side, and a build that reads a
 # dropped PDF but cannot fetch a URL would be a distinction nobody asked for.
 # It is already in the default set via `oauth`, so this adds nothing there.
-documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:zip", "dep:reqwest"]
+documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:reqwest"]
 
 tiny = ["tinyagents-harness", "tinyinference"]
 # WS4: embed `vendor/openhuman` (`openhuman_core`) directly as the tenant agent
@@ -552,11 +626,11 @@ tiny = ["tinyagents-harness", "tinyinference"]
 # Enables `tiny` so the `tinyagents` crate is in scope: the harness's inference
 # models implement its `ChatModel<()>` trait (openhuman's old `Provider` trait
 # was deleted upstream); it is the same vendored crate `openhuman_core` uses.
-openhuman = ["tiny", "dep:openhuman_core", "dep:tinymcp", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
+openhuman = ["tiny", "dep:openhuman_core", "dep:openhuman-embed", "dep:openhuman-tinyhumans", "dep:tinyhivemind-openhuman", "dep:tinymcp", "dep:tinytools", "dep:tinytools-agent", "dep:tinyinference-core", "dep:reqwest", "dep:anyhow", "dep:log", "dep:tinyflows", "dep:regex", "dep:uuid", "dep:swc_core"]
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
-mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
+mcp = ["openhuman", "openhuman_core/mcp", "openhuman-embed/mcp", "dep:uuid", "dep:base64"]
 # Image/video generation tools (issue #109, epic #26 Cell B). Bridges
 # OpenHuman's `media_generation` tools (`media_generate_image`,
 # `media_generate_video`, `media_list_models`) into a company agent's toolbelt
@@ -565,7 +639,7 @@ mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
 # `media` domain; the default build links none of it. Real money moves through
 # these tools, so they are wired only when a company explicitly grants `media`
 # (never via the `*` wildcard) AND a managed credential is configured.
-media = ["openhuman", "openhuman_core/media"]
+media = ["openhuman", "openhuman_core/media", "tinyagents-harness/media"]
 # Per-tenant Composio tools (issue #110, epic #26 Cell D). Bridges OpenHuman's
 # backend-mode Composio surface (Gmail / Slack / GitHub via
 # `composio_list_toolkits`, `composio_list_connections`, `composio_list_tools`,
@@ -578,9 +652,6 @@ media = ["openhuman", "openhuman_core/media"]
 # from the JWT); the token has NO env fallback and a missing token fails closed
 # (no tools wired), so a company can never reach another tenant's connections.
 composio = ["openhuman"]
-# Real HTTP transport to openhuman-core. The trait + offline mock + providers
-# compile without this; only `HttpOpenHumanRpc` is gated behind it.
-openhuman-rpc = ["dep:reqwest"]
 # Real GitHub REST filer for feedback issues. The `GitHubClient` trait + offline
 # mock + the whole filing flow compile without this; only `HttpGitHubClient` is
 # gated behind it.
@@ -607,10 +678,6 @@ medulla = ["dep:reqwest"]
 # key parsers, is how a signature check comes to differ between two callers.
 tinyplace = ["dep:reqwest"]
 
-# The `tinyhivemind` session adapter (`runtime::hivemind`). Off by default and
-# wired to nothing: it compiles the port implementation and runs its tests, so
-# the projection can be adopted by a later change that is only about adoption.
-hivemind = ["dep:tinyhivemind"]
 # The Agent Client Protocol: the `/acp` endpoint's session/permission surface
 # and the `RunTurn` implementation over an ACP agent.
 #
@@ -764,6 +831,12 @@ tinymemory-conformance = { path = "../../vendor/openhuman/vendor/tinymemory/crat
 # real child process. Dev-only: under resolver v2 this feature is not unified
 # into normal builds, so the shipped binary is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+# The Jev transport's tests (`src/hive/jev_tests.rs`) stand up a fake
+# TinyHumans System One proxy and assert the bearer, the URL, the one retry
+# and the timeout against real HTTP rather than a scripted `SystemOneTransport`
+# — the transport IS the thing under test. Dev-only; the shipped binary keeps
+# `reqwest` alone.
+wiremock = "0.6"
 
 # Issue #392: measures what a per-append flush costs, so the per-record-kind
 # durability policy rests on a number rather than an intuition. Default features
@@ -789,4 +862,3 @@ harness = false
 name = "journal_read_before"
 path = "benches/journal_read_before.rs"
 harness = false
-

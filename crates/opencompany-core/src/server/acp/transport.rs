@@ -137,12 +137,12 @@ fn target(params: &Value) -> Result<(&str, String, Option<String>), String> {
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "`_meta.opencompany.company` is required".to_string())?;
-    let chat = meta
-        .get("chat")
-        .and_then(Value::as_str)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(crate::server::ops::language::DEFAULT_DESK)
-        .to_string();
+    let chat = crate::ports::general_channel::decode_general_chat_id(
+        meta.get("chat")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    );
     let agent = meta
         .get("agentId")
         .and_then(Value::as_str)

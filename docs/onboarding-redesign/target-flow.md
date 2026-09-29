@@ -22,7 +22,7 @@ implementing any step below.
    │    sets tinyhumans/key, then    │         │                                 │
    │    cascades:                   │         │                                 │
    │      provider/tinyhumans/key   │         │    each independently          │
-   │      composio/managed/key      │         │    skippable                   │
+   │      composio/tinyhumans/key      │         │    skippable                   │
    │      search/managed/key (#2342)│         │                                 │
    └────────────────┬────────────────┘         └────────────────┬────────────────┘
                      └─────────────────────┬──────────────────────┘
@@ -64,7 +64,7 @@ machinery works today; this redesign isn't adding a new caller for it.
   `needsModel`, `setCompanyCredentialModel` (`PUT …/credential/model`).
 
 This fires the same fan-out: `provider/tinyhumans/key`,
-`composio/managed/key`, and (once #2342 lands) `search/managed/key` — never
+`composio/tinyhumans/key`, and (once #2342 lands) `search/managed/key` — never
 overwriting a slot that already holds its own key.
 
 ## Self-managed · step 1 — Provider + Composio

@@ -280,3 +280,62 @@ fn every_silence_names_a_reason() {
         assert!(line.ends_with(')'), "{line}");
     }
 }
+
+fn hosted(pairs: &[(&str, &str)]) -> Decision {
+    resolve(Deployment::HostedTenant, &MapEnv::new(pairs.to_vec()))
+}
+
+fn destination(decision: &Decision) -> Option<&str> {
+    match decision {
+        Decision::Report { dsn, .. } => Some(dsn.expose()),
+        Decision::Silent(_) => None,
+    }
+}
+
+/// A hosted tenant with no DSN (unset or blank) reports to the compiled-in
+/// TinyHumans project, tagged as a hosted tenant.
+#[test]
+fn a_hosted_tenant_without_a_dsn_uses_the_default() {
+    for pairs in [&[][..], &[(DSN_ENV, "  ")][..]] {
+        let decision = hosted(pairs);
+        assert_eq!(destination(&decision), Some(DEFAULT_HOSTED_TENANT_DSN));
+        match decision {
+            Decision::Report { environment, .. } => assert_eq!(environment, "hosted-tenant"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// The default never reaches desktop or self-hosted, both of which can
+/// compile `crash-reporting`.
+#[test]
+fn the_default_dsn_is_hosted_tenant_only() {
+    for deployment in [Deployment::Desktop, Deployment::SelfHosted] {
+        assert_eq!(
+            resolve(deployment, &MapEnv::new(Vec::<(&str, &str)>::new())),
+            Decision::Silent(Silence::NoDsn),
+            "{deployment:?}"
+        );
+    }
+}
+
+/// The runtime DSN outranks the default, a malformed one is reported rather
+/// than replaced, and `off` silences the default too.
+#[test]
+fn the_default_dsn_yields_to_the_operator() {
+    assert_eq!(destination(&hosted(&[(DSN_ENV, DSN)])), Some(DSN));
+    assert_eq!(
+        hosted(&[(DSN_ENV, "not a dsn")]),
+        Decision::Silent(Silence::UnusableDsn)
+    );
+    assert_eq!(
+        hosted(&[(ENABLE_ENV, "off")]),
+        Decision::Silent(Silence::OptedOut)
+    );
+}
+
+/// The compiled-in constant is itself a DSN this module accepts.
+#[test]
+fn the_default_dsn_parses() {
+    assert!(parse_dsn(DEFAULT_HOSTED_TENANT_DSN).is_some());
+}

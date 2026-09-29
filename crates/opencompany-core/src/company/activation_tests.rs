@@ -70,6 +70,7 @@ fn manifest(allow: &[&str]) -> CompanyManifest {
 
 fn record(id: &CompanyId, allow: &[&str]) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         id: id.clone(),
         manifest: manifest(allow),

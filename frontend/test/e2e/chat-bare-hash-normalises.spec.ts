@@ -9,14 +9,13 @@ import { expect, test } from "@playwright/test";
  * navigation behind it. Two facts made that possible, and only one is wrong.
  *
  * The right one is that the composer is a single instance shared by every
- * channel, whose draft deliberately survives a channel change — see
- * `MessageComposer`'s `suppressed` doc; unmounting it is what discards a
- * half-written message, and PR #1984 restored that on purpose.
+ * channel, whose draft survives a channel change; unmounting it is what
+ * discards a half-written message.
  *
  * The wrong one is that a bare `#/chat` — where the magic-link landing route
  * puts you, because `useHashView` canonicalises the *view* and knows nothing
  * about chat's channels — left the open channel as the value of an expression
- * over `members`, `desks`, `transcripts` and `operator`. Each lands
+ * over `members`, `desks` and `transcripts`. Each lands
  * asynchronously, so any re-derivation could answer differently from the
  * channel the founder was shown, and `send` addresses whatever that expression
  * currently names.

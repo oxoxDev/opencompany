@@ -20,11 +20,15 @@ This section is not only additive. It removes three things.
 1. **The [demand ledger](demand-ledger.md) replaces the kanban board** as the
    work model, scoped to agents. Work is *stated by whoever is blocked*, deduped
    against what the company already knows, and closed by evidence that cites it.
-2. **[Desks are workflows](delegation.md#desks-are-workflows)**. A desk is a
-   `{id, name, description, members}` record whose entire behaviour is "resolve
-   the lead, run that member's turn, relay the reply". The workflow engine
-   already does that with retries, approval gating, nesting, cron and
-   cancellation. The entity goes away.
+2. **[Desks are rooms, not relays](delegation.md#desks-are-rooms)**. A desk
+   used to be a `{id, name, description, members}` record whose entire
+   behaviour was "resolve the lead, run that member's turn, relay the reply",
+   and the plan was to fold it into the workflow engine. It is now an
+   `OpenHumanHive` whose seats run concurrent rounds and speak to each other
+   ([../hive.md](../hive.md)); the synchronous hand-off tools
+   (`delegate_to_desk`, `delegate_to_teammate`) and the in-turn relay went
+   away instead. Workflows stay what they are: the static, inspectable graph
+   for work that is a pipeline rather than a conversation.
 3. **[Memory becomes generic](memory.md)**. Three bespoke ports plus a
    hand-rolled `CortexClient` collapse onto one `MemoryProvider` contract.
 
@@ -37,9 +41,12 @@ port the design rather than the features.
 
 Anything that matters is enforced by registration, routing, or a lock — never by
 asking a model to abstain. OpenCompany already argues this for tool reach in
-[`src/harness/confine.rs`](../../../../src/harness/confine.rs) ("an empty belt
-already means the model is offered nothing; the policy is what makes that a
-boundary rather than an absence"). This section applies the same standard to
+[`src/harness/built_in/confine.rs`](../../../../crates/opencompany-core/src/harness/built_in/confine.rs)
+("an empty belt already means the model is offered nothing; the policy is what
+makes that a boundary rather than an absence"), and for speech in a room —
+"exactly one action per turn" is an MCP error on the second call, not a
+sentence in the prompt ([../hive.md](../hive.md#speaking)). This section
+applies the same standard to
 *alignment*: which files a role sees, what may close a unit of work, and who may
 assert what.
 
@@ -88,7 +95,7 @@ routing table as a Rust `match`, ours reads it from the manifest.
 | Work stated by the blocked party, deduped, closed by evidence | absent; cards are pushed by a planner and closed by a drag | [demand-ledger.md](demand-ledger.md) |
 | Retry after a failed attempt | absent; [planning](../planning.md) is one tool-less call with no retry | [loop.md](loop.md) |
 | A judge separate from a verifier | absent | [loop.md](loop.md) |
-| Waiting for delegated work inside the turn that asked for it | **absent — no join primitive exists** | [delegation.md](delegation.md) |
+| Waiting for delegated work inside the turn that asked for it | **absent — no join primitive exists** for board work; a room waits for its seats by construction (a round commits when every seat has spoken) | [delegation.md](delegation.md) |
 | Directing a run in flight from outside it | half — enforcement exists, the operator queue does not | [delegation.md](delegation.md) |
 | Containerised code execution with a persistent library | the sandbox is vendored but not enabled | [sandbox.md](sandbox.md) |
 | One memory contract | three ports plus a bespoke client | [memory.md](memory.md) |
@@ -103,13 +110,14 @@ Ordered by dependency, not by value. Each phase is independently shippable.
 | P1 — the alignment layer | [alignment.md](alignment.md) | nothing |
 | P2 — demand replaces the board | [demand-ledger.md](demand-ledger.md) | P1 (claims close demands) |
 | P3 — the attempt loop | [loop.md](loop.md) | P2 (an attempt is against a demand) |
-| P4 — await, directives, desks-as-workflows | [delegation.md](delegation.md) | P3 |
+| P4 — await, directives | [delegation.md](delegation.md) | P3 |
 | P5 — containerised tools | [sandbox.md](sandbox.md) | nothing |
 | P6 — the research template | [../../../../companies/research_lab/README.md](../../../../companies/research_lab/README.md) | all of the above |
 
-P4 is where the desk collapse lands, because it needs the join primitive: a desk
-hand-off returns a reply *into the caller's turn*, and a workflow run currently
-has nowhere to land one.
+The desk collapse that used to sit in P4 is withdrawn: desks became rooms
+([../hive.md](../hive.md)), and a room needs no join primitive — a round is
+the join. `await_task` is still owed to **board** work, where a card's turn
+has nowhere to wait for the card it spawned.
 
 ## Inspectability
 

@@ -221,6 +221,9 @@ fn step_result(tool_name: &str, outcome: &ToolResult) -> Option<String> {
             elapsed_ms: 51,
             iteration: 1,
             failure: None,
+            display_label: None,
+            display_detail: None,
+            structured: None,
         },
     ]);
     steps.into_iter().next().expect("one step").result

@@ -42,6 +42,88 @@ use serde_json::{Value, json};
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::ports::types::{CompanyRecord, TeammateResolution};
 
+/// TinyHiveMind's active roster snapshot for one routing/dispatch decision.
+pub fn tinyhivemind_roster(record: &CompanyRecord) -> Vec<tinyhivemind_core::roster::RosterMember> {
+    record
+        .effective_agents()
+        .into_iter()
+        .filter(|agent| !record.is_retired(&agent.id))
+        .map(|agent| tinyhivemind_core::roster::RosterMember {
+            id: agent.id,
+            name: agent.name,
+        })
+        .collect()
+}
+
+pub struct TinyHiveDeskSnapshots {
+    declared: Vec<tinyhivemind_core::desk::Desk>,
+    added: Vec<tinyhivemind_core::desk::Desk>,
+    member_additions: Vec<tinyhivemind_core::desk::DeskMember>,
+    orders: Vec<tinyhivemind_core::desk::DeskOrder>,
+    retired: Vec<String>,
+}
+
+impl TinyHiveDeskSnapshots {
+    pub fn set(&self) -> tinyhivemind_core::desk::DeskSet<'_> {
+        tinyhivemind_core::desk::DeskSet::new(
+            &self.declared,
+            &self.added,
+            &self.member_additions,
+            &self.orders,
+            &self.retired,
+        )
+    }
+}
+
+pub fn tinyhivemind_desks(record: &CompanyRecord) -> TinyHiveDeskSnapshots {
+    use tinyhivemind_core::desk::{Desk, DeskMember, DeskOrder, ResponderMode};
+    TinyHiveDeskSnapshots {
+        declared: record
+            .manifest
+            .group_chats
+            .iter()
+            .map(|chat| Desk {
+                id: chat.id.clone(),
+                name: chat.name.clone(),
+                description: chat.description.clone(),
+                members: chat.members.clone(),
+                responder_mode: ResponderMode::Lead,
+            })
+            .collect(),
+        added: record
+            .overlay_desks
+            .iter()
+            .map(|desk| Desk {
+                id: desk.id.clone(),
+                name: desk.name.clone(),
+                description: desk.description.clone(),
+                members: desk.members.clone(),
+                responder_mode: match desk.responder {
+                    crate::ports::types::ResponderMode::Lead => ResponderMode::Lead,
+                    crate::ports::types::ResponderMode::Auto => ResponderMode::Auto,
+                },
+            })
+            .collect(),
+        member_additions: record
+            .overlay_desk_members
+            .iter()
+            .map(|member| DeskMember {
+                desk_id: member.desk_id.clone(),
+                agent_id: member.agent_id.clone(),
+            })
+            .collect(),
+        orders: record
+            .overlay_desk_order
+            .iter()
+            .map(|order| DeskOrder {
+                desk_id: order.desk_id.clone(),
+                ordered: order.ordered.clone(),
+            })
+            .collect(),
+        retired: record.overlay_retired_agents.clone(),
+    }
+}
+
 /// The `spawn_task` tool name — open a tracked task card on the board.
 pub const SPAWN_TASK_TOOL: &str = "spawn_task";
 /// The `delegate_to_desk` tool name — hand work to a desk's lead member.
@@ -216,58 +298,8 @@ pub fn desk_default_responder(record: &CompanyRecord, desk: &str) -> Option<Stri
 /// and runs before any brain — attributes its reply to the same teammate the
 /// turn it replaced would have been answered by.
 ///
-/// # The built-in `#general` channel answers to nobody here (issue #1743)
-///
-/// A General spelling that no desk claimed is the **company's own line**, and
-/// `None` is the right answer for it: both callers then resolve their own
-/// orchestrator, which is what has always answered an unaddressed message.
-///
-/// Without the guard the roster arm below claims it. `mint_agent_id` reserves
-/// `main` and `General`, but a manifest can still declare a teammate with one,
-/// and that teammate would then answer every unaddressed message — while
-/// `GET chat/history?desk=main` returned the *folded General conversation*
-/// rather than its transcript (`is_general_chat` has folded `""`, `main`,
-/// `General` and `general` into one since issue #65). The responder and the
-/// transcript named different conversations. The fold is a fact about the
-/// address, not about who was addressed.
-///
-/// Only the **bare** key. The teammate keeps its DM under `dm:<id>`, which the
-/// arm below still unwraps and resolves, and a desk that claims the key is
-/// matched first and still wins.
-///
-/// **A desk can claim the line by display name**, which the raw key misses: a
-/// blueprint declaring `id = "ops", name = "General"` answers to `General` but
-/// not to `main`, so asking for the raw key alone would hand a `main` turn to
-/// the orchestrator while an `ops` turn went to that desk's lead — two voices
-/// in one channel. The General arm therefore re-asks under
-/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK), which is the
-/// same fold `HarnessBrain::everyone_desk` applies before expanding
-/// `@everyone`, so who answers and who a broadcast names cannot disagree. With
-/// no claimant it misses and the caller's orchestrator answers, as before.
-/// The blueprint desk that claims the company-wide line, by **either** spelling.
-///
-/// A manifest can declare a desk on any of the folded General spellings, and
-/// which half it uses is arbitrary: `id = "ops", name = "General"` claims the
-/// line by name, `id = "main", name = "Front office"` claims it by id. Asking
-/// for a fixed [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK)
-/// recognised only the first, so for the second a turn addressed `main` reached
-/// its lead while the folded sibling `General` fell through to the orchestrator
-/// — one channel with two responders, decided by which alias the caller
-/// happened to use.
-///
-/// Only the manifest is searched. An overlay desk on a General key is refused
-/// by `resolve_desk_id` and unaddressable, so letting one claim the line here
-/// would hand `#general` to a desk nothing else routes to.
-pub(crate) fn general_claimant(record: &CompanyRecord) -> Option<String> {
-    let general = |s: &str| crate::server::chat_history::is_general_chat(Some(s));
-    record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|c| general(&c.id) || general(&c.name))
-        .map(|c| c.id.clone())
-}
-
+/// #general answers to nobody here, so both callers resolve their own
+/// orchestrator for it.
 pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     // The desk arm asks [`desk_default_responder`], not [`desk_lead`]: for a
     // lead desk the two are identical, and for an `Auto` channel (issue #1835)
@@ -282,14 +314,8 @@ pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     if let Some(responder) = desk_default_responder(record, chat) {
         return Some(responder);
     }
-    // The General fold sits **between** the desk arm and the roster arm, and
-    // has to stay there: a teammate whose id is a General spelling must not
-    // inherit the company's line, and a blueprint desk that claims the line
-    // must answer every folded spelling of it (issue #1743). Resolved through
-    // `desk_default_responder` too, so an `auto` General desk answers the same
-    // way it would under its own id.
-    if crate::server::chat_history::is_general_chat(Some(chat)) {
-        return general_claimant(record).and_then(|desk| desk_default_responder(record, &desk));
+    if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
+        return None;
     }
     if let Some(agent) = record.resolve_roster_agent_id(chat) {
         return Some(agent);
@@ -318,14 +344,6 @@ const LISTED_DESKS: usize = 12;
 /// is the set a delegation target is grounded against. Reads the same two
 /// sources [`CompanyRecord::resolve_desk_id`] searches, so "what ids exist" and
 /// "does this id resolve" cannot disagree.
-///
-/// That invariant is why the overlay walk skips a desk whose **id** is a
-/// General spelling (issue #1743): `resolve_desk_id` declines to match an
-/// overlay desk against one, so listing it here would ground the model on a
-/// target every `delegate_to_desk` call is then refused for. Only overlay
-/// desks, and only by id — a `[[group_chat]]` the blueprint declares still
-/// resolves under any spelling, and an overlay desk merely *named* `General`
-/// still resolves under its own id, so both stay listed.
 pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for chat in &record.manifest.group_chats {
@@ -334,7 +352,7 @@ pub fn desk_ids(record: &CompanyRecord) -> Vec<String> {
         }
     }
     for desk in &record.overlay_desks {
-        if !ids.contains(&desk.id) && !crate::server::chat_history::is_general_chat(Some(&desk.id))
+        if !ids.contains(&desk.id) && !crate::ports::general_channel::is_general_spelling(&desk.id)
         {
             ids.push(desk.id.clone());
         }
@@ -522,7 +540,9 @@ that is not already on that list."
         // request addressed to a specialist sitting beside it. It now names the
         // tool that does exist, the in-turn teaching shape #272 and #176 use
         // everywhere else on this seam.
-        let peers = agent_list(teammate_targets(record, delegator, &[]));
+        // Peers on the desk itself — the people the refused hand-off was
+        // aimed at — not the whole roster an unrestricted reach spans.
+        let peers = agent_list(desk_peers(record, delegator));
         return Some(match peers {
             Some(list) => format!(
                 "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
@@ -746,48 +766,71 @@ pub fn roster_agent_ids(record: &CompanyRecord) -> Vec<String> {
     ids
 }
 
-/// The teammates `caller` may hand work to with [`DELEGATE_TO_TEAMMATE_TOOL`]
-/// (issue #884): everybody on a desk with them, plus everybody on a desk their
-/// `allowed` ([`delegates_to`](crate::company::Agent::delegates_to)) list
-/// permits. Never the caller itself.
-///
-/// The desk-peer arm is the one #884 adds and the one that closes D1: a desk's
-/// lead can now reach the specialist sitting beside it without going back
-/// through the orchestrator. The allowlist arm is a re-reading of the existing
-/// #176 permission rather than a second one — a member allowed to hand work to a
-/// desk is allowed to hand it to somebody on that desk — so opting in to
-/// `delegates_to` grants exactly what it already granted, at teammate
-/// granularity.
-///
-/// Order is desk-peers first, then allowlisted desks, each in the desk's own
-/// membership order, deduplicated — so a refusal lists the nearest options
-/// first.
-pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]) -> Vec<String> {
+/// Everybody on a desk with `caller`, in desk-membership order, deduplicated,
+/// never the caller — the desk-peer arm of [`teammate_targets`] on its own.
+pub fn desk_peers(record: &CompanyRecord, caller: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
+    for desk in desks_of_member(record, caller) {
+        for member in record.effective_desk_members(&desk) {
+            if member != caller
+                && record.is_roster_agent(&member)
+                && !ids.iter().any(|held| held == &member)
+            {
+                ids.push(member);
+            }
+        }
+    }
+    ids
+}
+
+/// Whether a [`delegates_to`](crate::company::Agent::delegates_to) list places
+/// no bound on where its holder may hand work: **empty**, or carrying the
+/// [`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD).
+///
+/// Empty is unrestricted on the same convention as an omitted `tools` grant or
+/// an omitted `ledgers` list — the manifest says nothing, so nothing is
+/// narrowed. Only a list that names desks narrows. This is what makes a
+/// teammate able to reach the rest of its company without an operator
+/// enumerating the company in every agent's manifest entry.
+pub fn reach_is_unrestricted(allowed: &[String]) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
+}
+
+/// The teammates `caller` may hand work to with [`DELEGATE_TO_TEAMMATE_TOOL`]
+/// (issue #884). Never the caller itself.
+///
+/// With an unrestricted `allowed` (see [`reach_is_unrestricted`]) — the
+/// ordinary case, an agent whose manifest entry says nothing — that is
+/// **everybody on the roster**: desk-mates first, then everybody else in
+/// roster order. A teammate is not locked out of the company because nobody
+/// wrote it a list, and the orchestrator and a desk-less specialist are
+/// reachable like anyone else. What bounds a chain is the depth cap and the
+/// cycle guard at the tool boundary, not the reach.
+///
+/// With a list that names desks, the reach is everybody on a desk with the
+/// caller, plus everybody on a desk the list permits. The desk-peer arm is the
+/// one #884 added and the one that closes D1: a desk's lead can reach the
+/// specialist sitting beside it without going back through the orchestrator.
+/// The allowlist arm is a re-reading of the #176 desk permission at teammate
+/// granularity — a member allowed to hand work to a desk is allowed to hand it
+/// to somebody on that desk.
+///
+/// Order is desk-peers first, then the rest, each in the desk's own membership
+/// order, deduplicated — so a refusal (and the team brief) lists the nearest
+/// options first.
+pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = desk_peers(record, caller);
     let push = |ids: &mut Vec<String>, id: &str| {
         if id != caller && record.is_roster_agent(id) && !ids.iter().any(|held| held == id) {
             ids.push(id.to_string());
         }
     };
-    for desk in desks_of_member(record, caller) {
-        for member in record.effective_desk_members(&desk) {
-            push(&mut ids, &member);
-        }
-    }
-    if allowed
-        .iter()
-        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
-    {
-        // `"*"` is documented as "every desk the company has"
-        // ([`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD)),
-        // not "every roster agent" — the orchestrator and any agent sitting on
-        // no desk are outside a desk-based grant even when it is the widest
-        // one, so this must walk `desk_ids` + `effective_desk_members` exactly
-        // as the allowlisted-desk loop below does, not `roster_agent_ids`.
-        for desk in desk_ids(record) {
-            for member in record.effective_desk_members(&desk) {
-                push(&mut ids, &member);
-            }
+    if reach_is_unrestricted(allowed) {
+        for id in roster_agent_ids(record) {
+            push(&mut ids, &id);
         }
         return ids;
     }
@@ -803,7 +846,7 @@ pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]
 }
 
 /// Every desk `member` sits on, in [`desk_ids`] order.
-fn desks_of_member(record: &CompanyRecord, member: &str) -> Vec<String> {
+pub(crate) fn desks_of_member(record: &CompanyRecord, member: &str) -> Vec<String> {
     desk_ids(record)
         .into_iter()
         .filter(|id| {
@@ -834,9 +877,10 @@ fn agent_list(ids: Vec<String>) -> Option<String> {
 /// orchestrator's unrestricted copy, and a bare "not allowed" costs a turn per
 /// guess. Retryable in the same turn, unlike the depth and no-drain refusals.
 ///
-/// Never reached with an empty `allowed`: an empty allowlist means the tool was
-/// not wired at all. It still fails closed if one ever arrives — nothing
-/// resolves, so everything is refused.
+/// An **empty** `allowed` is unrestricted, exactly like the wildcard — see
+/// [`reach_is_unrestricted`]. It used to mean "the tool was not wired at all",
+/// back when only a member that opted in with `delegates_to` carried the tool;
+/// now every roster agent does, and an omitted list is the ordinary case.
 ///
 /// [`DELEGATES_TO_WILDCARD`]: crate::company::DELEGATES_TO_WILDCARD
 pub fn reject_out_of_allowlist_target(
@@ -844,10 +888,7 @@ pub fn reject_out_of_allowlist_target(
     allowed: &[String],
     key: &str,
 ) -> Option<String> {
-    if allowed
-        .iter()
-        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
-    {
+    if reach_is_unrestricted(allowed) {
         return None;
     }
     // As above: an unresolvable key belongs to `reject_desk_target`.

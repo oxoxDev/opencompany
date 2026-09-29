@@ -497,21 +497,24 @@ async fn the_shadow_floor_decides_nothing_with_hitl_disabled() {
 /// question, which is the failure mode a measurement cannot self-report.
 #[tokio::test]
 async fn what_the_shadow_counts_is_what_full_autonomy_already_stops() {
-    let p = policy("full", &[], None);
-    for tool in ["chargebee_send_invoice", "hosting_launch_site"] {
-        let args = serde_json::json!({});
-        assert!(
-            crate::policy::floor::evaluate(tool, &args, None).requires_human(),
-            "{tool} is a floor call"
-        );
-        assert!(
-            matches!(
-                p.check(&request(tool, args)).await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "{tool} is stopped by the judgement arm under full autonomy today"
-        );
-    }
+    in_cycle(async {
+        let p = policy("full", &[], None);
+        for tool in ["chargebee_send_invoice", "hosting_launch_site"] {
+            let args = serde_json::json!({});
+            assert!(
+                crate::policy::floor::evaluate(tool, &args, None).requires_human(),
+                "{tool} is a floor call"
+            );
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is stopped by the judgement arm under full autonomy today"
+            );
+        }
+    })
+    .await;
 }
 
 /// Every tier is reachable from a manifest, parses to its own variant, and
@@ -580,21 +583,24 @@ fn every_tier_is_reachable_from_a_manifest_and_parses_to_itself() {
 
 #[tokio::test]
 async fn full_allows_but_always_approve_still_parks() {
-    let p = policy("full", &["payment"], None);
-    // `file_write`, not `write_file`. This asserted the undeclared
-    // `write_file`, which the per-call judgement arm (issue #338) now stops
-    // fail-closed — nobody has declared what it does. The point being made
-    // here is that `full` allows a tool absent from `always_approve`, so it
-    // wants a tool `full` genuinely allows: `file_write` is declared, and is
-    // one of the low-consequence scratch writes #444 found safe enough to
-    // grant standing.
-    assert_eq!(
-        p.check(&request("file_write", serde_json::json!({}))).await,
-        ToolPolicyDecision::Allow
-    );
-    assert!(matches!(
-        p.check(&request("payment.send", serde_json::json!({})))
-            .await,
-        ToolPolicyDecision::RequireApproval { .. }
-    ));
+    in_cycle(async {
+        let p = policy("full", &["payment"], None);
+        // `file_write`, not `write_file`. This asserted the undeclared
+        // `write_file`, which the per-call judgement arm (issue #338) now stops
+        // fail-closed — nobody has declared what it does. The point being made
+        // here is that `full` allows a tool absent from `always_approve`, so it
+        // wants a tool `full` genuinely allows: `file_write` is declared, and is
+        // one of the low-consequence scratch writes #444 found safe enough to
+        // grant standing.
+        assert_eq!(
+            p.check(&request("file_write", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(matches!(
+            p.check(&request("payment.send", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    })
+    .await;
 }

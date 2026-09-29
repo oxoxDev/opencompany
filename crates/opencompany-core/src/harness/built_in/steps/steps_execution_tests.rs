@@ -112,7 +112,7 @@ fn not_found_serializes_as_the_snake_case_the_console_indexes_on() {
 #[test]
 fn every_path_tool_on_the_belt_is_listed() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let missing: Vec<String> = crate::harness::build::file_tools(dir.path())
+    let missing: Vec<String> = crate::harness::build::file_tools(dir.path(), None)
         .iter()
         .map(|t| t.name().to_string())
         .filter(|name| !PATH_ONLY_TOOLS.contains(&name.as_str()))

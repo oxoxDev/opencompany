@@ -182,6 +182,13 @@ pub(crate) struct RunSummary {
     /// which read as "rooted at the channel".
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_root: Option<u64>,
+    /// The desk episode this attempt is a seat turn of (plan hive-desks). The
+    /// console lanes it under its round; absent for every other attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    episode_id: Option<String>,
+    /// The round revision inside that episode (raw, 0-based).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    round_revision: Option<u64>,
     /// Epoch-millis the row was minted.
     created_at_millis: u64,
     /// Epoch-millis the cycle began. Absent while `pending`.
@@ -226,6 +233,8 @@ impl From<RunRecord> for RunSummary {
             phase: run.status.phase(),
             trigger_event_seq: run.trigger_event_seq.map(|s| s.value()),
             thread_root: run.thread_root.map(|s| s.value()),
+            episode_id: run.episode_id,
+            round_revision: run.round_revision,
             created_at_millis: run.created_at_millis,
             started_at_millis: run.started_at_millis,
             finished_at_millis: run.finished_at_millis,

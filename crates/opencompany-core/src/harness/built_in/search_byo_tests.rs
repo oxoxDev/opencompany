@@ -297,7 +297,7 @@ fn the_aliased_tool_step_label_names_the_provider() {
 /// way a real turn folds it: the loop supplies the humanized tool name,
 /// [`StepLabels`](crate::harness::steps::StepLabels) restores what the tool
 /// calls itself, and `fold_steps` renders the row.
-fn step_label(tools: &[Box<dyn openhuman_core::tools::traits::Tool>]) -> String {
+fn step_label(tools: &[Box<dyn tinytools::Tool>]) -> String {
     use crate::harness::search::WEB_SEARCH_TOOL;
     use crate::harness::steps::{StepLabels, fold_steps};
     use openhuman_core as oh;
@@ -308,7 +308,7 @@ fn step_label(tools: &[Box<dyn openhuman_core::tools::traits::Tool>]) -> String 
         tool_name: WEB_SEARCH_TOOL.into(),
         arguments: serde_json::Value::Null,
         iteration: 1,
-        display_label: Some(oh::tools::traits::humanize_tool_name(WEB_SEARCH_TOOL)),
+        display_label: Some(tinytools::humanize_tool_name(WEB_SEARCH_TOOL)),
         display_detail: None,
     };
     fold_steps(vec![labels.apply(started)])

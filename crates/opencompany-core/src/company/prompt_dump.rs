@@ -230,7 +230,34 @@ fn dump_agent(manifest: &CompanyManifest, agent: &Agent, orchestrator: bool) -> 
         });
     }
 
-    harness_sections(&grants, agent, orchestrator, &mut sections, &mut deferred);
+    // The roster and desks, rendered from a bare record over this manifest —
+    // operator-added teammates and desks live on the running company's record
+    // and are not in a bundle, which the origin line says.
+    let team = crate::company::team_brief::team_section(
+        &crate::ports::types::CompanyRecord::from_manifest(
+            crate::ports::types::CompanyId::new(manifest.company.name.trim()),
+            manifest.clone(),
+        ),
+        &agent.id,
+    );
+    if team.is_empty() {
+        deferred.push(Deferred {
+            title: "Your team".to_string(),
+            reason: "this agent is the only one on the roster, so there is nobody to list"
+                .to_string(),
+        });
+    } else {
+        sections.push(Section {
+            title: "Your team".to_string(),
+            origin: "`company::team_brief::team_section` over the manifest roster and desks — \
+                     teammates and desks an operator added from the console are on the running \
+                     company's record and appear only there"
+                .to_string(),
+            body: team,
+        });
+    }
+
+    harness_sections(&grants, orchestrator, &mut sections, &mut deferred);
 
     deferred.push(Deferred {
         title: "Working documents".to_string(),
@@ -281,7 +308,6 @@ fn context_paths(context: &[ContextEntry]) -> Vec<String> {
 #[cfg(feature = "openhuman")]
 fn harness_sections(
     grants: &[String],
-    agent: &Agent,
     orchestrator: bool,
     sections: &mut Vec<Section>,
     deferred: &mut Vec<Deferred>,
@@ -364,22 +390,37 @@ fn harness_sections(
             origin: "`harness::built_in::orchestrator::orchestrator_brief`".to_string(),
             body: crate::harness::built_in::orchestrator::orchestrator_brief(),
         });
-    } else if !agent.delegates_to.is_empty() {
+    } else {
         sections.push(Section {
-            title: "Delegation".to_string(),
-            origin: format!(
-                "`harness::built_in::orchestrator::member_delegation_brief`, narrowed to {:?}",
-                agent.delegates_to
-            ),
-            body: crate::harness::built_in::orchestrator::member_delegation_brief(
-                &agent.delegates_to,
-            ),
+            title: "Handing work on".to_string(),
+            origin: "`harness::built_in::orchestrator::member_delegation_brief` — every \
+                     non-orchestrator teammate carries the hand-off tools; the reach is stated \
+                     under Your team"
+                .to_string(),
+            body: crate::harness::built_in::orchestrator::member_delegation_brief(),
         });
     }
 
     deferred.push(Deferred {
         title: "MCP capability brief".to_string(),
-        reason: "appended only when this agent is granted an enabled MCP server, which needs a configured registry".to_string(),
+        reason: "appended only when this agent is granted an enabled MCP server or an explicit `mcp_registry` install, which needs a configured registry".to_string(),
+    });
+
+    // The server-family brief: one line per reachable server naming the dispatch
+    // tool that addresses it. Its rows are the live declared set reconciled
+    // against the directory installs, so a manifest alone cannot know them.
+    // Split on the feature for the reason PR #1780 gave for the Composio brief
+    // above — the call site is `#[cfg(feature = "mcp")]`, so in a binary without
+    // it the section is a compile-time absence, not a runtime-deferred one.
+    #[cfg(feature = "mcp")]
+    deferred.push(Deferred {
+        title: "MCP server-family brief".to_string(),
+        reason: "appended only when a dispatch tool is wired; it names each reachable server and the tool that addresses it, which needs the live server and install state".to_string(),
+    });
+    #[cfg(not(feature = "mcp"))]
+    deferred.push(Deferred {
+        title: "MCP server-family brief".to_string(),
+        reason: "this binary was built without `--features mcp`, so neither MCP dispatch tool is wired and there is no family to name; rebuild with `--features openhuman,mcp` to see it".to_string(),
     });
 
     // Issue #1759: the connected-integration grounding + Composio-routing brief.
@@ -412,7 +453,6 @@ fn harness_sections(
 #[cfg(not(feature = "openhuman"))]
 fn harness_sections(
     _grants: &[String],
-    _agent: &Agent,
     _orchestrator: bool,
     _sections: &mut Vec<Section>,
     deferred: &mut Vec<Deferred>,

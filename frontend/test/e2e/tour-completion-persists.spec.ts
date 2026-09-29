@@ -153,6 +153,18 @@ test("completing the tour is remembered across a reload", async ({ page }) => {
   await expectWelcomeStaysAway(page, "completing the tour");
 });
 
+test("the tour's composer stops open #general, which is writable", async ({ page }) => {
+  await settleConnectionScope(page);
+  await page.getByRole("button", { name: "Take the tour" }).click();
+
+  await advance(page, 1);
+  const card = page.getByRole("alertdialog");
+  await expect(card.getByText("Talk to your company")).toBeVisible();
+  await expect.poll(() => new URL(page.url()).hash).toMatch(/^#\/chat\/general(?:\?|$)/);
+  await expect(page.locator('[data-tour="chat-composer"]')).toBeVisible();
+  await expect(page.getByPlaceholder("Message #general")).toBeVisible();
+});
+
 test("skipping from inside a running tour is remembered across a reload", async ({ page }) => {
   await settleConnectionScope(page);
   await page.getByRole("button", { name: "Take the tour" }).click();

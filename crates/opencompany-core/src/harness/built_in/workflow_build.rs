@@ -2001,8 +2001,8 @@ pub(crate) struct RunFailureContext {
 /// The copilot was one tool-less `call_model` with a host-driven draft→correct
 /// loop bolted around it (issue #813). PR-2 made it a **builder agent**: the
 /// company evidence and effective tool set are gathered deterministically, then a
-/// fresh OpenHuman [`Agent`](oh::agent::Agent) is built over the roster's own
-/// inference engine ([`build_copilot_agent`](agent::build_copilot_agent)) with the
+/// fresh copilot is built over the roster's own inference engine
+/// ([`build_copilot_agent`](agent::build_copilot_agent)) with the
 /// three OC-native tools (`list_effective_tools`, `check_workflow`,
 /// `propose_company_workflow`, see [`tools`]).
 ///
@@ -2013,9 +2013,9 @@ pub(crate) struct RunFailureContext {
 /// and [`courtesy_validate_draft`] — so a graph reaches the operator on exactly
 /// the terms it did before.
 ///
-/// **Metering is on the agent, not the raw call.** The turn's spend is read from
-/// the agent's own [`last_turn_usage`](oh::agent::Agent::last_turn_usage) — which
-/// carries the backend-charged USD, unlike a token-only tinyflows runner — and
+/// **Metering is on the loop, not the raw call.** The request's spend is the
+/// sum the host loop read off every call — which carries the backend-charged
+/// USD, unlike a token-only tinyflows runner — and
 /// recorded under [`COPILOT_AGENT`] and a fresh `run_id`, because a synchronous
 /// request mints no attempt row but its tokens were genuinely spent.
 async fn run_copilot(
@@ -2087,43 +2087,28 @@ async fn run_copilot(
     let accepted: tools::AcceptedCell = Arc::new(StdMutex::new(None));
     let diag: tools::DiagCell = Arc::new(StdMutex::new(Vec::new()));
 
-    // A UNIQUE PER-TURN workspace so the vendored turn's session-transcript
-    // persistence cannot bleed into the next turn's fresh, empty-history agent
-    // (issue #1042). Each create/fix is an independent turn; a fresh dir is always
-    // empty, so the turn's resume scan finds nothing to replay — statelessness by
-    // construction. The dir is reclaimed after the turn (below).
-    let turn_workspace = deps
-        .workspace_root
-        .join("workflow-copilot")
-        .join(generate_id());
-
-    let mut copilot = agent::build_copilot_agent(
-        deps,
-        ctx,
-        accepted.clone(),
-        diag.clone(),
-        turn_workspace.clone(),
-    )?;
+    // Stateless by construction (issue #1042): the host loop starts from the
+    // persona and the evidence prompt alone, with no transcript to resume.
+    let copilot = agent::build_copilot_agent(deps, ctx, accepted.clone(), diag.clone());
 
     // A synchronous request (or a dead run's fix) mints no attempt row, but its
     // spend is still metered against a FRESH id under the copilot sentinel — the
     // tokens were spent, and the dead run's id must never be reused.
     let run_id = generate_id();
 
-    // ONE turn, under the same hard ceiling a card pass keeps. `run_single` drives
-    // the bounded tool loop; the timeout bounds the whole turn.
+    // ONE request, under the same hard ceiling a card pass keeps. `run_single`
+    // drives the bounded tool loop; the timeout bounds the whole thing.
     let outcome = tokio::time::timeout(BUILD_TIMEOUT, copilot.run_single(&user)).await;
 
-    // Reclaim the per-turn workspace now the turn is done — its transcript writes
-    // are synchronous within the turn, so nothing else needs it. Pure disk hygiene:
-    // correctness does NOT depend on this (a leftover dir is only ever scanned
-    // within its own already-empty scope, never by a later turn).
-    let _ = std::fs::remove_dir_all(&turn_workspace);
-
-    // Meter the turn regardless of how it ended — the agent's own usage carries
-    // backend-charged USD, so a charged turn records a non-zero cost even when the
-    // model produced no proposal.
-    let turn = crate::harness::built_in::read_turn_usage(&copilot);
+    // Meter the request regardless of how it ended — the loop sums each call's
+    // usage, with the backend-charged USD the provider stamps on it, so a
+    // charged request records a non-zero cost even when the model produced no
+    // proposal. A timed-out or errored loop hands nothing back; its spend is
+    // the one figure this path cannot recover.
+    let turn = match &outcome {
+        Ok(Ok(loop_outcome)) => loop_outcome.usage,
+        _ => crate::harness::cost::TurnUsage::default(),
+    };
     let usage = TokenUsage {
         input: turn.input_tokens,
         output: turn.output_tokens,
@@ -2150,9 +2135,15 @@ async fn run_copilot(
     // constructing a tokio Elapsed or driving a real timeout.
     let end = match outcome {
         Err(_elapsed) => TurnEnd::TimedOut,
-        Ok(Ok(reply)) => TurnEnd::Replied {
-            text: reply,
-            hit_cap: copilot.last_turn_hit_cap(),
+        Ok(Ok(loop_outcome)) => match loop_outcome.end {
+            crate::harness::host_loop::LoopEnd::Replied(text) => TurnEnd::Replied {
+                text,
+                hit_cap: false,
+            },
+            crate::harness::host_loop::LoopEnd::HitCap(text) => TurnEnd::Replied {
+                text,
+                hit_cap: true,
+            },
         },
         Ok(Err(err)) => TurnEnd::Errored(err.to_string()),
     };

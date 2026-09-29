@@ -44,21 +44,20 @@ async fn chat_returns_echoed_response() {
     assert_eq!(value["responses"][0]["channel"], "operator");
 }
 
-/// An actionable operator chat opens exactly one task card on the dashboard
-/// (deterministic, independent of the brain's own `spawn_task`), and a
-/// greeting opens none. Runs on the default echo brain, so it proves the
-/// handler-level wiring, not model behaviour.
+/// An actionable operator chat opens **no** card on its own — the board is a
+/// tool call. The REST handler used to card any message that led with an
+/// action verb, so "build the landing page" became a work item before any
+/// agent had read it; it is now tracked only when an agent calls `spawn_task`
+/// (this test runs on the echo brain, which never does).
 ///
-/// Issue #576: that card now lands in **Planning**, not To-do. The request
-/// carries `fixed_cookie`, so a signed-in person is behind it — which is
-/// what the promotion is conditional on.
-///
-/// `tasks.len() == 1` is doing real work here beyond "a card was opened":
-/// the card is created *directly* in `planning` by a single `upsert_task`,
-/// so a second card, or a card that arrived via To-do and was promoted,
-/// would both show up here.
+/// The one signal the route still cards on is the composer's "Build me the
+/// workflow" control, and issue #576 still holds for that card: it lands in
+/// **Planning**, not To-do, because a signed-in person (`fixed_cookie`) is
+/// behind the request. `tasks.len() == 1` is doing real work there: the card
+/// is created *directly* in `planning` by a single `upsert_task`, so a second
+/// card, or one that arrived via To-do and was promoted, would both show.
 #[tokio::test]
-async fn actionable_chat_opens_a_planning_task_card() {
+async fn a_plain_chat_opens_no_card_and_a_requested_workflow_lands_in_planning() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home, "running").await;
@@ -66,28 +65,38 @@ async fn actionable_chat_opens_a_planning_task_card() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    let chat = |text: &str| {
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/company/chat")
-            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-            .header("content-type", "application/json")
-            .body(Body::from(format!(
-                r#"{{"text":{}}}"#,
-                serde_json::json!(text)
-            )))
-            .unwrap()
-    };
-
-    // Actionable → one Planning card, titled from the ask.
+    // An instruction the lexical triage reads as work — and no card.
+    assert!(
+        matches!(
+            crate::company::task_intent::triage_message("build the landing page"),
+            crate::company::task_intent::MessageTriage::Track(_)
+        ),
+        "fixture must be a message the triage calls work, or this proves nothing"
+    );
     let r = app
         .clone()
-        .oneshot(chat("build the landing page"))
+        .oneshot(chat_to("build the landing page", None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(
+        runtime.tasks().list(&id).await.unwrap().is_empty(),
+        "an actionable ask opens no card by itself: tracking is an agent's tool call"
+    );
+
+    // Greeting → still nothing.
+    let r = app.clone().oneshot(chat_to("thanks!", None)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(runtime.tasks().list(&id).await.unwrap().is_empty());
+
+    // The explicit control → one Planning card, titled from the ask.
+    let r = app
+        .oneshot(workflow_chat_to("build the landing page", None))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
+    assert_eq!(tasks.len(), 1, "a requested workflow opens one card");
     assert_eq!(
         tasks[0].column,
         crate::ports::tasks::COLUMN_PLANNING,
@@ -95,12 +104,6 @@ async fn actionable_chat_opens_a_planning_task_card() {
     );
     assert_eq!(tasks[0].priority, "medium");
     assert_eq!(tasks[0].title, "Build the landing page");
-
-    // Greeting → no new card.
-    let r = app.oneshot(chat("thanks!")).await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 1, "a greeting must not open a card");
 }
 
 /// Issue #1725, through the route an operator actually hits: "hi" comes
@@ -159,6 +162,11 @@ async fn a_bare_greeting_is_answered_without_a_turn() {
 
 /// The card a chat opens is handed to the teammate the operator addressed.
 ///
+/// Every test in this family sends the composer's "Build me the workflow"
+/// control, because that is the one signal on which the route still opens a
+/// card on its own — a plain message is tracked only when an agent calls
+/// `spawn_task`. What is pinned here is what a route-opened card *records*.
+///
 /// The fixture is the whole test. `CROSSED` names *backend* work and is
 /// addressed to the **product manager**, so the two candidate answers are
 /// distinguishable: pre-fix this card was born blank and the planning pass
@@ -175,16 +183,8 @@ async fn chat_addressed_to_a_teammate_assigns_that_teammate() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    assert!(
-        matches!(
-            crate::company::task_intent::triage_message(CROSSED),
-            crate::company::task_intent::MessageTriage::Track(_)
-        ),
-        "fixture must be a message the handler cards, or this proves nothing"
-    );
-
     let r = app
-        .oneshot(chat_to(CROSSED, Some("product_manager")))
+        .oneshot(workflow_chat_to(CROSSED, Some("product_manager")))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -216,7 +216,7 @@ async fn chat_addressed_to_a_desk_assigns_the_desk() {
     let app = router(state);
 
     let r = app
-        .oneshot(chat_to(CROSSED, Some("engineering")))
+        .oneshot(workflow_chat_to(CROSSED, Some("engineering")))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -229,9 +229,9 @@ async fn chat_addressed_to_a_desk_assigns_the_desk() {
     );
 }
 
-/// Everything that addresses nobody in particular still opens a blank card:
-/// no thread at all, the empty string, the console's legacy fallback desk
-/// id, and the default "General" desk this company does not have.
+/// Everything that addresses nobody in particular opens a blank card when a
+/// workflow is asked for: no thread at all, the empty string, the console's
+/// legacy spellings of #general, and #general itself.
 ///
 /// This pins the direction of the change — *more* cards are operator-chosen,
 /// none fewer — and it is the clause that keeps the orchestrator's own queue
@@ -245,13 +245,23 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
-        let r = app.clone().oneshot(chat_to(CROSSED, thread)).await.unwrap();
+    for thread in [
+        None,
+        Some(""),
+        Some("main"),
+        Some("General"),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID),
+    ] {
+        let r = app
+            .clone()
+            .oneshot(workflow_chat_to(CROSSED, thread))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "thread {thread:?}");
     }
 
     let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 4, "one card per message: {tasks:?}");
+    assert_eq!(tasks.len(), 5, "one card per message: {tasks:?}");
     for card in &tasks {
         assert_eq!(
             card.assignee, "",
@@ -274,7 +284,7 @@ async fn an_unknown_addressee_leaves_the_card_unassigned() {
     let app = router(state);
 
     let r = app
-        .oneshot(chat_to(CROSSED, Some("nobody_by_that_name")))
+        .oneshot(workflow_chat_to(CROSSED, Some("nobody_by_that_name")))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK, "an unknown thread is not a 400");
@@ -289,8 +299,8 @@ async fn an_unknown_addressee_leaves_the_card_unassigned() {
 ///
 /// `origin_chat_id` is the field issue #151 added for exactly this, and the
 /// console already renders the marker in whatever channel it names — the
-/// route was simply never filling it in. An unaddressed message still opens
-/// a card with no origin, which is every card this route opened before.
+/// route was simply never filling it in. An unaddressed message opens a card
+/// whose origin is #general.
 #[tokio::test]
 async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
     let home_dir = home();
@@ -302,7 +312,7 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
 
     let r = app
         .clone()
-        .oneshot(chat_to(CROSSED, Some("dm:designer")))
+        .oneshot(workflow_chat_to(CROSSED, Some("dm:designer")))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -314,7 +324,7 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
     );
 
     let r = app
-        .oneshot(chat_to("draft the investor update", None))
+        .oneshot(workflow_chat_to("draft the investor update", None))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -323,24 +333,14 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
         .iter()
         .find(|c| c.title == "Draft the investor update")
         .expect("the second card");
-    // No desk, therefore no conversation and no thread inside one. Before
-    // #1890 step 5 this card carried a thread root beside no desk — the
-    // drifted pair — and the root was inert: `relay_reply` posts back
-    // through the desk, so a root with nothing to post into named nothing.
-    // `TaskOrigin` cannot hold that state, so it is simply absent now.
-    //
-    // Restoring a real origin here means stamping the General desk the
-    // route already folds this message into, which is a behaviour change
-    // and not this one.
     assert_eq!(
         unaddressed.origin_chat_id(),
-        None,
-        "an unaddressed message has no conversation to answer in"
+        Some("general"),
+        "an unaddressed message is a #general conversation"
     );
-    assert_eq!(
-        unaddressed.origin_parent(),
-        None,
-        "and therefore no thread inside one either"
+    assert!(
+        unaddressed.origin_parent().is_some(),
+        "rooted on the message that opened it"
     );
 
     // The addressed card, found by title rather than by index: the two are
@@ -404,7 +404,11 @@ async fn a_chat_card_remembers_the_thread_inside_the_channel() {
     let app = router(state);
 
     let r = app
-        .oneshot(chat_in_thread(CROSSED, Some("dm:designer"), Some(41)))
+        .oneshot(workflow_chat_in_thread(
+            CROSSED,
+            Some("dm:designer"),
+            Some(41),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -430,7 +434,7 @@ async fn a_console_dm_channel_id_addresses_the_teammate() {
     let app = router(state);
 
     let r = app
-        .oneshot(chat_to(CROSSED, Some("dm:designer")))
+        .oneshot(workflow_chat_to(CROSSED, Some("dm:designer")))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -533,11 +537,12 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
-            manifest: manifest(),
+            manifest: roster_manifest(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
@@ -558,7 +563,7 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home, manifest())
+    let runtime = RuntimeBuilder::new(home, roster_manifest())
         .with_id(id.clone())
         .with_tasks(Arc::new(FailingTaskUpsert))
         .build()
@@ -602,16 +607,50 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
         .await
         .unwrap();
     let notice = events.into_iter().find_map(|stored| match stored.event {
-        CompanyEvent::AgentReply { agent_id, text, .. }
-            if agent_id == crate::ports::SYSTEM_AUTHOR =>
-        {
-            Some(text)
-        }
+        CompanyEvent::AgentReply {
+            agent_id,
+            text,
+            chat_id,
+            ..
+        } if agent_id == crate::ports::SYSTEM_AUTHOR => Some((chat_id, text)),
         _ => None,
     });
-    assert!(
-        notice.is_some_and(|text| text.to_lowercase().contains("card")),
+    let (chat_id, text) = notice.expect(
         "a card-open failure must leave a visible system note in the channel, not just a \
-         server-side log line"
+         server-side log line",
     );
+    assert!(text.to_lowercase().contains("card"));
+    assert_eq!(
+        chat_id,
+        crate::server::ops::language::GENERAL_CHANNEL_ID,
+        "an unaddressed message's notice lands in General"
+    );
+}
+
+#[tokio::test]
+async fn an_unaddressed_chat_is_stored_on_general() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_roster(&home).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+    let app = router(state);
+
+    let r = app
+        .oneshot(workflow_chat_to("draft the investor update", None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let chats: Vec<Option<String>> = runtime
+        .events()
+        .read_from(&id, EventSeq::new(0), 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { chat, .. } => Some(chat),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chats, vec![Some("general".to_string())]);
 }

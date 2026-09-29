@@ -15,24 +15,13 @@ use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 
-/// Issue #1152: an explicit "Just chatting" **withholds** the card the
-/// triage would otherwise have opened.
-///
-/// The mirror of the test above, and the asymmetry it closes. Since #845 the
-/// operator could override the classifier *upward* — mint a card it
-/// declined — and there was no control anywhere that overrode it downward.
-/// So a message the lexical layer reads as `Track` ("can you build the
-/// landing page?" asked rhetorically, while thinking out loud) opened a
-/// card, assigned it to a desk, and started a planning pass, and the only
-/// recourse was to go to the board and delete it.
-///
-/// The fixture's verdict is asserted `Track` **first**, in the strongest
-/// direction available: the `chat` run is made before any other, on an empty
-/// board, and the unmarked run right after it opens the card on the very
-/// same words. So "zero cards" is the intent doing the work, not a message
-/// the classifier was never going to card.
+/// Issue #1152's "Just chatting" and the plain send now agree: neither opens
+/// a card, and neither does `once`. The lexical triage used to card an
+/// unmarked `Track` message and the chat intent was the operator's only way
+/// to withhold it; with the route no longer carding on the triage at all,
+/// the only intent that mints is `workflow` — and that one still does.
 #[tokio::test]
-async fn just_chatting_withholds_the_card_the_triage_would_have_opened() {
+async fn only_an_explicit_workflow_request_opens_a_card_from_the_route() {
     use crate::ports::tasks::TaskDeliverable;
 
     let home_dir = home();
@@ -42,15 +31,14 @@ async fn just_chatting_withholds_the_card_the_triage_would_have_opened() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    // Work by construction — the request frame beats the interrogative, so
-    // the triage names a title and the card branch fires.
+    // A message the triage reads as work, so "no card" is the route's doing.
     let text = "can you build the landing page?";
     assert!(
         matches!(
             crate::company::task_intent::triage_message(text),
             crate::company::task_intent::MessageTriage::Track(_)
         ),
-        "fixture must be a message the handler cards, or this proves nothing"
+        "fixture must be a message the triage calls work, or this proves nothing"
     );
 
     let chat = |intent: Option<&str>| {
@@ -70,43 +58,31 @@ async fn just_chatting_withholds_the_card_the_triage_would_have_opened() {
             .unwrap()
     };
 
-    // `chat`: the operator's statement outranks the classifier's `Track`.
-    let r = app.clone().oneshot(chat(Some("chat"))).await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK, "the message is still answered");
-    assert!(
-        runtime.tasks().list(&id).await.unwrap().is_empty(),
-        "a message sent as chat must open no card, whatever the triage read"
-    );
+    for intent in [None, Some("chat"), Some("once")] {
+        let r = app.clone().oneshot(chat(intent)).await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "{intent:?}: the message is still answered"
+        );
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "{intent:?}: a chat message opens no card by itself"
+        );
+    }
 
-    // The same words, unmarked: the card the run above withheld.
-    let r = app.clone().oneshot(chat(None)).await.unwrap();
+    let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let tasks = runtime.tasks().list(&id).await.unwrap();
     assert_eq!(
         tasks.len(),
         1,
-        "an unmarked message is unchanged — this is what the `chat` run withheld"
+        "`workflow` is the operator's positive statement of intent"
     );
-    assert_eq!(tasks[0].deliverable, TaskDeliverable::Once);
-
-    // …and so are both work words, on the same words again.
-    let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(
-        runtime.tasks().list(&id).await.unwrap().len(),
-        2,
-        "`once` is unchanged"
-    );
-
-    let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 3, "`workflow` is unchanged");
-    assert!(
-        tasks
-            .iter()
-            .any(|t| t.deliverable == TaskDeliverable::Workflow),
-        "and still routes its card to the builder pass: {tasks:?}"
+        tasks[0].deliverable,
+        TaskDeliverable::Workflow,
+        "and it routes its card to the builder pass: {tasks:?}"
     );
 }
 
@@ -169,12 +145,14 @@ async fn only_a_person_gets_a_self_promoting_card() {
         let id = CompanyId::new("acme");
         let runtime = state.registry().get(&id).unwrap();
 
+        // The explicit workflow control: the one signal the route still
+        // opens a card on by itself.
         let message = ChatMessage {
             mentions: None,
             text: ask.to_string(),
             chat: None,
             parent: None,
-            deliverable: None,
+            deliverable: Some(crate::ports::types::MessageIntent::Workflow),
             detach: false,
             attachments: Vec::new(),
         };
@@ -184,7 +162,7 @@ async fn only_a_person_gets_a_self_promoting_card() {
             &message,
             by.as_ref(),
             None,
-            crate::server::ops::language::DEFAULT_DESK,
+            crate::server::ops::language::GENERAL_CHANNEL_ID,
         )
         .await
         .expect("the turn is accepted");
@@ -224,6 +202,7 @@ async fn chat_routes_through_the_harness_brain() {
     .unwrap();
 
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -253,6 +232,7 @@ async fn chat_routes_through_the_harness_brain() {
         .unwrap();
 
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -287,6 +267,7 @@ async fn chat_routes_through_the_harness_brain() {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,

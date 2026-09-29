@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Loader2 } from "lucide-react";
 
-import { signInWithHubToken, verifyCode } from "@/api/auth";
+import { verifyCode } from "@/api/auth";
 import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import {
   createLocalInstance,
@@ -44,7 +44,6 @@ import { HostsProvider, useHosts, type HostsValue } from "@/connections/HostsCon
 import { firstHostCopy } from "@/connections/first-host";
 import type { ConnectionId } from "@/connections/types";
 import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
-import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
 import { captureKeyLink } from "@/lib/pending-key-link";
@@ -71,9 +70,10 @@ export function readMagicLinkFrom(search: string): { company: string | null; cod
   // round trip that had in fact succeeded, whose real code was sitting in
   // `pending-key-link` waiting for the card that asked for it.
   //
-  // So a marked landing belongs to whoever marked it. `key=auth` is the hub's
-  // sign-in return (`readHubToken`) and `key=link` is this console's own grant
-  // return (`readKeyLink`); a magic link carries no marker at all.
+  // So a marked landing belongs to whoever marked it. `key=link` is this
+  // console's own grant return (`readKeyLink`); a magic link carries no marker
+  // at all. (`key=auth` was the hub sign-in's marker, and is still refused
+  // here so a stale bookmark of one cannot be read as a magic link.)
   const marker = params.get("key");
   if (marker === "link" || marker === "auth") return null;
   return { company: params.get("company"), code };
@@ -84,34 +84,12 @@ function readMagicLink(): { company: string | null; code: string } | null {
 }
 
 /**
- * Reads `?token=&key=auth` off a hub sign-in landing.
- *
- * The hub appends these to the redirect URI it was given, so they arrive on a
- * plain top-level navigation back to this console. `key=auth` is the hub's own
- * marker for that redirect and is what distinguishes this token from the
- * `?token=` the console config uses for a platform bearer — see `config.ts`.
- *
- * **Pure**, for the same reason `readMagicLink` is: StrictMode double-invokes
- * the `useMemo` this runs in, so stripping the URL here would make the second
- * invocation read a cleaned URL and silently drop the token.
- *
- * A failed sign-in comes back as `?error=` instead, which is not read here —
- * the hub's error text is its own wording about its own flow, and this console
- * says its piece in `hubNotice`.
- */
-function readHubToken(): string | null {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("key") !== "auth") return null;
-  return params.get("token");
-}
-
-/**
  * Reads `?key=link&state=&code=` off a key-grant landing.
  *
- * The console's own marker, deliberately distinct from the hub's `key=auth`:
- * both legs come back to this same origin, and one mints a session while the
- * other mints a company credential. Confusing them would mean redeeming a grant
- * code as a sign-in, or vice versa.
+ * The console's own marker: a magic link comes back to this same origin with
+ * no marker at all, and one mints a session while the other mints a company
+ * credential. Confusing them would mean redeeming a grant code as a sign-in,
+ * or vice versa.
  *
  * **Pure**, like its two neighbours, because StrictMode double-invokes the
  * `useMemo` this runs in — stripping the URL here would make the second
@@ -139,7 +117,7 @@ function readKeyLinkError(): boolean {
 /**
  * Strips the key-grant result out of the address bar.
  *
- * Same `replaceState` discipline as `clearHubResultFromUrl`, and for the same
+ * Same `replaceState` discipline as `clearMagicLinkFromUrl`, and for the same
  * reason: `code` is a live single-use credential, and a back button that
  * restored it — or a `Referer` that carried it — would hand it to something
  * else. `company` is kept; it is not a credential and is what scopes the
@@ -160,20 +138,14 @@ export function clearKeyLinkFromUrl(): void {
   );
 }
 
-/** Whether the hub bounced the sign-in back with a failure rather than a token. */
-function readHubError(): boolean {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("key") === "auth" && params.get("error") !== null;
-}
-
 /**
  * Strips the magic link out of the address bar.
  *
  * The code is a single-use credential, so it must not linger in the URL, the
  * history, or a `Referer` header once we hold it.
  *
- * `company` is deliberately kept, for the same reason `clearHubResultFromUrl`
- * keeps it: it is not a credential, and it is what scopes the console. This
+ * `company` is deliberately kept: it is not a credential, and it is what
+ * scopes the console. This
  * once deleted it too — harmless back when the console was one implicit host,
  * and a silent state reset once connections arrived. `restoreConnections` is
  * told which same-origin console this load is (`isThisConsole`, added for
@@ -190,35 +162,6 @@ export function clearMagicLinkFromUrl(): void {
   const params = new URLSearchParams(window.location.search);
   if (!params.has("code")) return;
   params.delete("code");
-  const query = params.toString();
-  window.history.replaceState(
-    {},
-    "",
-    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
-  );
-}
-
-/**
- * Strips the hub's sign-in result out of the address bar.
- *
- * `replaceState` rather than a push, so the token is gone from the history
- * entry as well as from the bar — a back button that restored it would hand a
- * live ecosystem credential to a reload, and a `Referer` carrying it would hand
- * it to whatever the console links out to next.
- *
- * `company` is deliberately kept. It is not a credential, and dropping it would
- * un-scope the console on a reload of a multi-company host.
- *
- * The hash is preserved for the same reason it is in `clearMagicLinkFromUrl`:
- * it belongs to the router, and rewriting the URL without it would bounce a
- * deep link back to the default view.
- */
-export function clearHubResultFromUrl(): void {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("key") !== "auth") return;
-  params.delete("token");
-  params.delete("error");
-  params.delete("key");
   const query = params.toString();
   window.history.replaceState(
     {},
@@ -486,13 +429,11 @@ function Console() {
 
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
-  const hubToken = useMemo(() => readHubToken(), []);
   // Captured before the strip below, and handed to whichever card started the
   // grant. Not part of `auth` — a key grant does not sign anyone in and must not
   // hold up the boot.
   const keyLink = useMemo(() => readKeyLink(), []);
   const keyLinkFailed = useMemo(() => readKeyLinkError(), []);
-  const hubFailed = useMemo(() => readHubError(), []);
   /**
    * The in-flight redemption, so a link is redeemed exactly once.
    *
@@ -503,7 +444,7 @@ function Console() {
   const redemption = useRef<Promise<unknown> | null>(null);
   const [auth, setAuth] = useState<{ ready: boolean; notice?: string; failed?: boolean }>({
     // Nothing to redeem is the common case, and it must not cost a frame.
-    ready: !magicLink && !hubToken && !hubFailed,
+    ready: !magicLink,
   });
 
   // Now that any credential is captured in state, take it out of the URL.
@@ -513,16 +454,7 @@ function Console() {
       captureKeyLink(keyLink, keyLinkFailed);
       clearKeyLinkFromUrl();
     }
-    if (hubToken || hubFailed) {
-      clearHubResultFromUrl();
-      // A hub sign-in that was asked to land on setup's destination carries it
-      // as a query parameter (`?from=setup`) — the host put it there so the
-      // OAuth round trip could carry it. Translate it into the hash marker the
-      // shell consumes, so the sign-in lands on the roster setup just built
-      // with the welcome suppressed, exactly as a setup link would have.
-      absorbHubSetupHandoff();
-    }
-  }, [magicLink, hubToken, hubFailed, keyLink, keyLinkFailed]);
+  }, [magicLink, keyLink, keyLinkFailed]);
 
   /**
    * Redeem a landing credential before any console asks for data.
@@ -546,24 +478,6 @@ function Console() {
     let cancelled = false;
 
     async function redeem() {
-      if (hubFailed) {
-        if (!cancelled)
-          setAuth({
-            ready: true,
-            failed: true,
-            notice: "That sign-in didn't complete. Try again, or use a link below.",
-          });
-        return;
-      }
-      if (hubToken) {
-        try {
-          redemption.current ??= signInWithHubToken(client!, config.company, hubToken);
-          await redemption.current;
-        } catch (err) {
-          if (!cancelled) setAuth({ ready: true, failed: true, notice: hubNotice(err) });
-          return;
-        }
-      }
       if (magicLink) {
         try {
           redemption.current ??= verifyCode(client!, magicLink.company ?? config.company, magicLink.code);
@@ -586,7 +500,7 @@ function Console() {
     return () => {
       cancelled = true;
     };
-  }, [auth.ready, bootstrapId, config.company, hubFailed, hubToken, magicLink]);
+  }, [auth.ready, bootstrapId, config.company, magicLink]);
 
   // Probe every registered connection, independently: one host being slow or
   // unreachable must not hold up another's console.
@@ -987,32 +901,9 @@ function NoConnection({
 }
 
 /**
- * What to tell someone whose ecosystem sign-in did not work.
- *
- * Each line is about the *credential* or the *host*, never about the person:
- * "expired", "no access yet", "not connected". None of them confirms or denies
- * that any address has an account here, which is the rule the whole sign-in
- * surface is built around.
- */
-function hubNotice(err: unknown): string {
-  const code = err instanceof ApiError ? err.code : "";
-  switch (code) {
-    case "hub_rejected":
-      return "That sign-in expired. Try again, or use a link below.";
-    case "not_a_member":
-      return "You're signed in to TinyHumans, but this company hasn't given you access yet. Ask an admin to invite you.";
-    case "hub_unavailable":
-      return "This host isn't connected to a TinyHumans account. Sign in with a link instead.";
-    default:
-      return "We couldn't complete that sign-in. Try a link below.";
-  }
-}
-
-/**
  * What to tell someone whose magic link did not redeem.
  *
- * The counterpart of {@link hubNotice}, and it exists for the same reason: a
- * refused sign-in that says nothing renders the ordinary form, which is
+ * A refused sign-in that says nothing renders the ordinary form, which is
  * indistinguishable from the screen a cold visit gets. A link that lapsed after
  * fifteen minutes is the *routine* outcome of clicking one out of a mailbox the
  * next morning — not an edge case — and the person who does it has no reason to

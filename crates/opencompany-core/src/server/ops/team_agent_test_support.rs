@@ -99,6 +99,7 @@ pub(super) async fn state_with_manifest(home: &std::path::Path, manifest_toml: &
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

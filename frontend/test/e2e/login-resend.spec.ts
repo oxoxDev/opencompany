@@ -38,6 +38,15 @@ const STRANGER = "nobody-1333@example.com";
 
 const SUBTITLE = "We'll email you a link. No password needed.";
 
+/**
+ * The harness host binds loopback with no mail transport, and a host that
+ * cannot mail draws no link form at all — the password is its one sign-in.
+ * The screen under test is the mailed-link one, so the host's answer is
+ * stubbed to say it mails; `auth/request` itself still answers the real host,
+ * which acknowledges a stranger exactly as it does a member.
+ */
+const MAILING_HOST = { mode: "email", passwords: true, magicLink: true, claimable: false };
+
 test("the sent card offers a throttled resend, and nothing around it contradicts it", async ({
   page,
 }) => {
@@ -46,6 +55,7 @@ test("the sent card offers a throttled resend, and nothing around it contradicts
   // the button unlocks and asserting only that it locks — and it is the
   // unlocking half that proves the countdown is a wait rather than a dead end.
   await page.clock.install();
+  await page.route("**/auth/config", (route) => route.fulfill({ json: MAILING_HOST }));
   await page.goto("/");
 
   const emailField = page.getByLabel("Email");

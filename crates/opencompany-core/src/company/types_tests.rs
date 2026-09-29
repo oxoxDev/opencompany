@@ -174,6 +174,15 @@ fn tools_composio_section_parses_toolkits_and_defaults_empty() {
     assert!(without.tools.composio.toolkits.is_empty());
 }
 
+#[test]
+fn a_stale_speech_section_is_refused_with_a_hint() {
+    let text = "[company]\nname = \"Acme\"\n[speech]\ndisabled = true\n";
+    let problem = CompanyManifest::legacy_speech_block(text).expect("refused");
+    assert!(problem.contains("[speech]"), "{problem}");
+    assert!(problem.contains("opencompany"), "{problem}");
+    assert!(CompanyManifest::legacy_speech_block("[company]\nname = \"Acme\"\n").is_none());
+}
+
 // Guards the newly-added `Serialize` derive: a manifest with renamed
 // `[[agent]]`/`[[schedule]]` arrays must survive a serialize→deserialize
 // round-trip through JSON without dropping the renamed fields.

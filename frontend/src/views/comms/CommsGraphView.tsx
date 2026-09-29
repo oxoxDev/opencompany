@@ -154,6 +154,7 @@ const EDGE_CLASS: Record<CommsEdge["kind"], string> = {
   "may-delegate": "stroke-muted-foreground/40",
   "handed-off": "stroke-primary/70",
   spawned: "stroke-status-done/70",
+  spoke: "stroke-status-running/80",
 };
 
 function Legend() {
@@ -170,6 +171,9 @@ function Legend() {
       </li>
       <li>
         <Solid className="stroke-status-done/70" /> created
+      </li>
+      <li>
+        <Solid className="stroke-status-running/80" /> spoke to (broadcast, dm, referral)
       </li>
       <li className="text-muted-foreground/70">
         dashed is what the manifest allows; solid is what has happened

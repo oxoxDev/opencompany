@@ -113,6 +113,7 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -124,9 +125,9 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
 
 #[cfg(feature = "openhuman")]
 #[tokio::test]
-async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
-    let sent_model = Arc::new(std::sync::Mutex::new(None::<String>));
-    let model_for_route = sent_model.clone();
+async fn managed_probe_accepts_an_authenticated_catalog_without_spending_credit() {
+    let chat_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let chat_requests_for_route = chat_requests.clone();
     let app = axum::Router::new()
         .route(
             "/agent-integrations/openrouter/models",
@@ -150,24 +151,18 @@ async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
         )
         .route(
             "/agent-integrations/openrouter/chat/completions",
-            axum::routing::post(
-                move |headers: axum::http::HeaderMap,
-                      axum::Json(body): axum::Json<serde_json::Value>| {
-                    let sent_model = model_for_route.clone();
-                    async move {
-                        assert_eq!(
-                            headers
-                                .get("authorization")
-                                .and_then(|value| value.to_str().ok()),
-                            Some("Bearer th-not-a-real-key")
-                        );
-                        *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+            axum::routing::post(move || {
+                let chat_requests = chat_requests_for_route.clone();
+                async move {
+                    chat_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
                         axum::Json(serde_json::json!({
-                            "choices": [{ "message": { "content": "pong" } }]
-                        }))
-                    }
-                },
-            ),
+                            "error": { "message": "rate limited" }
+                        })),
+                    )
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -184,16 +179,14 @@ async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
             ..Default::default()
         },
         &env,
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
 
     assert!(result.ok, "{:?}", result.error);
     assert_eq!(result.model.as_deref(), Some("openai/gpt-test"));
-    assert_eq!(
-        sent_model.lock().unwrap().as_deref(),
-        Some("openai/gpt-test")
-    );
+    assert_eq!(chat_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[cfg(feature = "openhuman")]
@@ -239,6 +232,7 @@ async fn cloud_provider_probe_discovers_a_model_before_chat() {
             base_url: Some(format!("http://{address}/v1")),
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -303,6 +297,7 @@ async fn probe_prioritises_a_chat_model_after_five_non_chat_entries() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -353,6 +348,7 @@ async fn probe_bounds_model_specific_catalog_rejections() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -392,6 +388,7 @@ async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -433,6 +430,7 @@ async fn catalog_auth_rejections_keep_their_credential_message() {
                 base_url: Some(format!("http://{address}/v1")),
             },
             &MapEnv::default(),
+            crate::app::config::DEFAULT_API_URL,
         )
         .await;
         server.abort();
@@ -538,6 +536,7 @@ async fn setup_probe_refuses_a_credentialed_endpoint_before_sending_anything() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();

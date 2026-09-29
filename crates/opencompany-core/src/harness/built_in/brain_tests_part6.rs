@@ -309,6 +309,7 @@ async fn mcp_failures_surface_as_error_steps_and_event() {
     let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
     let failures = crate::harness::mcp_probe::McpFailureQueue::default();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -342,6 +343,7 @@ async fn mcp_failures_surface_as_error_steps_and_event() {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -464,6 +466,7 @@ async fn a_failed_journal_write_does_not_swallow_the_rest_of_the_drain() {
     let log = Arc::new(FailFirstLog::default());
     let failures = crate::harness::mcp_probe::McpFailureQueue::default();
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -497,6 +500,7 @@ async fn a_failed_journal_write_does_not_swallow_the_rest_of_the_drain() {
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -549,145 +553,5 @@ async fn a_failed_journal_write_does_not_swallow_the_rest_of_the_drain() {
             CompanyEvent::McpCallFailed { server, .. } if server == "third"
         )),
         "the last failure in the batch was still journaled"
-    );
-}
-
-/// **A hive episode drains queued MCP failures and surfaces a response.**
-///
-/// Two findings in one test, because they share the exact same
-/// production call site (the hive branch of `run_cycle_scoped`) and a
-/// fix to one without the other leaves the interaction untested:
-///
-/// - Before the fix, the hive branch never called
-///   `self.surface_mcp_failures`, so an MCP tool-call failure queued
-///   during a member's turn produced neither an error step nor an
-///   `McpCallFailed` journal row — it sat on `self.deps.mcp_failures`
-///   until a later, unrelated chat turn cleared it silently.
-/// - Before the fix, the hive branch pushed nothing onto
-///   `channel_responses`, so `CycleResult.channel_responses` — which
-///   becomes `CycleReport.responses`, what a synchronous chat-API caller
-///   and `emit_cycle_webhooks` both read — stayed empty even though the
-///   desk had just answered, and no `work.completed` webhook ever fired.
-#[tokio::test]
-async fn a_hive_episode_drains_mcp_failures_and_surfaces_a_response() {
-    use crate::harness::mcp_probe::McpFailure;
-    use crate::ports::EventLog;
-    use crate::ports::types::EventSeq;
-    use crate::store::FsEventLog;
-
-    let dir = tempfile::tempdir().unwrap();
-    let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
-    let failures = crate::harness::mcp_probe::McpFailureQueue::default();
-    let deps = HarnessDeps {
-        emergency_gate: None,
-        notifications: None,
-        ledgers: None,
-        ledger_registry: Default::default(),
-        provider: Arc::new(MockProvider::new("mock: ")),
-        provider_slug: "mock".to_string(),
-        serves: None,
-        context: Arc::new(FsContextStore::new(dir.path())),
-        store: Arc::new(FsCompanyStore::new(dir.path())),
-        meter: None,
-        workspace_root: dir.path().to_path_buf(),
-        mcp_home: None,
-        workspace_git_enabled: false,
-        audit_root: dir.path().to_path_buf(),
-        model_override: None,
-        tasks: None,
-        artifacts: None,
-        skills: None,
-        skills_source_dir: None,
-        skills_registry: std::sync::Arc::from([]),
-        default_mcp_servers: Vec::new(),
-        mcp_servers: Vec::new(),
-        facts: None,
-        events: Some(events.clone()),
-        delegations: orchestrator::DelegationQueue::default(),
-        workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
-        mcp_failures: failures.clone(),
-        pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
-        workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
-        run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
-        run_output_store: None,
-        workflow_revisions: None,
-        approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
-        secrets: None,
-        web_allowed_domains: Vec::new(),
-        capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
-        workflow_source_dir: None,
-        plan: None,
-        media: None,
-        composio: None,
-        #[cfg(feature = "chargebee")]
-        chargebee: None,
-        #[cfg(feature = "paypal")]
-        paypal: None,
-        hosting: None,
-        steer: crate::company::steer::InflightRegistry::default(),
-        run_supervisor: crate::runtime::RunSupervisor::default(),
-        delivery: None,
-        search: None,
-        tenant_search: None,
-        workspace: None,
-        workflow_runs: None,
-        deep_trace: None,
-    };
-    let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_hive_desk());
-
-    // Queued as though a tool call inside a hive member's turn failed —
-    // the same shape `mcp_failures_surface_as_error_steps_and_event`
-    // seeds for the ordinary responder path.
-    failures.push(McpFailure {
-        server: "browserbase".into(),
-        tool: "browse".into(),
-        status: "tool_call_rejected".into(),
-        hint: None,
-        scrubbed_message: "server rejected the call".into(),
-    });
-
-    let result = brain
-        .run_cycle(
-            request(vec![CompanyEvent::OperatorMessage {
-                mentions: Vec::new(),
-                parent: None,
-                text: "Decide the rollout.".into(),
-                by: None,
-                chat: Some("eng_desk".into()),
-                deliverable: None,
-                attachments: Vec::new(),
-            }]),
-            &NoopHost,
-        )
-        .await
-        .expect("the cycle runs even though a tool call failed inside it");
-
-    // Finding: a synchronous caller (and `emit_cycle_webhooks`, which reads
-    // the exact same collection) must see the hive desk's answer.
-    assert_eq!(
-        result.channel_responses.len(),
-        1,
-        "the hive episode's closing report must reach channel_responses: {:?}",
-        result.channel_responses
-    );
-
-    // Finding: the queued MCP failure must be drained during the episode,
-    // not left for a later, unrelated turn.
-    assert!(
-        failures.drain().is_empty(),
-        "the hive episode must drain the queue itself"
-    );
-    let logged = events
-        .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
-        .await
-        .expect("read events");
-    assert!(
-        logged.iter().any(|e| matches!(
-            &e.event,
-            CompanyEvent::McpCallFailed { server, status, .. }
-                if server == "browserbase" && status == "tool_call_rejected"
-        )),
-        "an McpCallFailed audit event must be journaled from inside the hive episode: \
-         {logged:?}"
     );
 }

@@ -18,6 +18,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
     .expect("manifest");
     crate::store::FsCompanyStore::new(home.to_path_buf())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest.clone(),

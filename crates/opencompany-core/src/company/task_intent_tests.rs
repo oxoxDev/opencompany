@@ -16,6 +16,17 @@ fn leading_imperative_is_actionable() {
 }
 
 #[test]
+fn relaying_a_greeting_is_answering_with_tools_not_trackable_work() {
+    for message in [
+        "can you tell johnny hi?",
+        "tell backend_engineer hello",
+        "please send alice a hey",
+    ] {
+        assert_eq!(triage_message(message), MessageTriage::Answer, "{message}");
+    }
+}
+
+#[test]
 fn framed_request_with_action_verb_is_actionable() {
     assert_eq!(
         detect_task_intent("Can you build the landing page?").as_deref(),

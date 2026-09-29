@@ -73,7 +73,7 @@ async fn a_turn_past_the_old_ten_iteration_ceiling_now_finishes() {
         "expected {reads} tool rounds plus a final answer"
     );
     assert!(
-        !hit_cap(&agent).await,
+        !hit_cap(&outcome),
         "a turn that finished must not report an iteration-cap pause"
     );
 }
@@ -124,7 +124,7 @@ async fn a_budget_halt_stops_the_turn_and_is_not_an_iteration_cap_pause() {
         "expected the turn to halt well short of its {reads} scripted rounds, got {calls}"
     );
     assert!(
-        !hit_cap(&agent).await,
+        !hit_cap(&outcome),
         "a budget halt must NOT be reported as an iteration-cap pause — Part 1 of #926 \
          renders that pause to the operator and the two are different outcomes"
     );
@@ -169,7 +169,7 @@ async fn a_turn_with_no_declared_budget_gets_no_in_turn_brake_at_any_cost() {
         "expected every scripted round to run — nothing should have cut it short"
     );
     assert!(
-        !hit_cap(&agent).await,
+        !hit_cap(&outcome),
         "the script stayed well under the iteration ceiling; a cap pause here \
          would mean something other than the intended reply mechanism stopped \
          the turn"
@@ -194,7 +194,7 @@ async fn exhausting_the_raised_cap_still_reports_an_iteration_cap_pause() {
     let outcome = outcome.expect("the turn runs");
 
     assert!(
-        hit_cap(&agent).await,
+        hit_cap(&outcome),
         "a turn that never stopped calling tools must report the cap: {}",
         outcome.reply
     );

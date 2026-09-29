@@ -16,87 +16,88 @@ use serde::{Deserialize, Serialize};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::CompanyStore;
+use crate::ports::general_channel::{
+    GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, decode_general_chat_id,
+};
 use crate::ports::types::{
     Actor, ActorKind, Attachment, ChatOutput, ChatOutputKind, CompanyEvent, CompanyId,
-    CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent, TurnStep,
+    CompanyRecord, EventSeq, Mention, MentionTarget, StoredEvent, TurnStep, UtteranceKind,
 };
-use crate::server::ops::language::DEFAULT_DESK;
-
-// Conversation identity now lives in `tinyhivemind_core::chat`, and these are
-// re-exported so every existing caller keeps its path (issue #65, #435).
-//
-// The move is what lets `ports::types` stop reaching *upward* into
-// `crate::server::` to fold a General spelling: `resolve_desk_id` and
-// `desk_alias_is_ambiguous` call this rule, and a port calling a server module
-// was a layering violation that only a shared crate could remove.
-pub use tinyhivemind_core::chat::{
-    GENERAL_DESK, MAIN_THREAD_ID, is_general_chat, same_conversation,
-};
-
-// `DEFAULT_DESK` is the prosumer glossary string mirroring
-// `frontend/src/lib/language.ts`; `GENERAL_DESK` is the desk's identity. They
-// are different concerns that happen to be the same literal, so neither imports
-// the other — but they must never drift, because a message journaled under the
-// glossary word has to fold into the identity. Pinned here rather than
-// duplicated, and it costs nothing at runtime.
-const _: () = assert!(
-    matches!(DEFAULT_DESK.as_bytes(), b"General") && matches!(GENERAL_DESK.as_bytes(), b"General"),
-    "the operator-facing default desk name and the General desk id must agree",
-);
+use crate::server::readable::{DisplayNames, project_history};
 
 /// The largest message page either history surface may materialize. Keeping
 /// the limit beside the shared reader prevents a new caller from turning its
 /// `Vec` reservation back into an allocation controlled by the request.
 pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
 
-/// Where this lives, and why it is not beside its first caller.
-///
-/// It began in the chat seed, under `src/harness/`, which compiles only
-/// with the `openhuman` feature. Two later callers — the thread index in
-/// [`crate::runtime::cycle`] and `read_thread` — need the same resolution,
-/// and the first of those is in the ungated runtime, so the default build
-/// stopped compiling. Beside [`owns`] is where it belonged anyway: this
-/// module is the one place that answers what a desk id means, and a
-/// second copy is exactly what it exists to prevent.
-/// Resolves an incoming `chat_id` to the `(desk_id, desk_name)` pair
-/// [`owns`] filters on, exactly as the REST history route's
-/// `resolve_desk` does (issue #65).
-///
-/// `owns` matches a stored event's chat id against *both* the desk id and the
-/// desk name, because a named desk's messages can be journaled under either
-/// spelling. Passing `(chat_id, chat_id)` for a desk the operator addressed by
-/// id would therefore silently miss any line stored under its name — a seed that
-/// "looks fixed" but is empty. So a non-General selector is resolved against the
-/// manifest's group chats the same way the console resolves it.
-///
-/// * `None` → the synthetic General/operator desk.
-/// * A General spelling (`"main"` / `"general"` / `""`) short-circuits: every
-///   spelling folds together in [`same_conversation`], so no
-///   manifest read is needed and `(chat, chat)` already owns all of them.
-/// * Anything else is matched (case-insensitive, by id or name) against the
-///   manifest's group chats; an unmatched selector passes through as `(id, name)
-///   = (chat, chat)`, so an ad-hoc thread id still finds what was journaled under
-///   that exact string.
+/// Resolves an incoming `chat_id` to the `(desk_id, desk_name)` pair [`owns`]
+/// filters on. `None` and every legacy General spelling resolve to #general;
+/// anything else is resolved against the company's desks by [`desk_aliases`].
 pub async fn resolve_seed_desk(
     store: &Arc<dyn CompanyStore>,
     company: &CompanyId,
     chat_id: Option<&str>,
 ) -> (String, String) {
-    let Some(desk) = trivially_resolved(chat_id) else {
-        // Only a named desk needs the manifest, and only then is it read.
-        return match store.load(company).await {
-            Ok(Some(record)) => desk_aliases(&record, chat_id),
-            // A store miss or read error must not fail the turn — fall back to
-            // the verbatim selector, which still owns everything journaled
-            // under that exact string (the common case, where the console
-            // addresses id == name).
-            Ok(None) | Err(_) => {
-                let desk = chat_id.unwrap_or(GENERAL_DESK);
-                (desk.to_string(), desk.to_string())
-            }
-        };
-    };
-    desk
+    let desk = decode_general_chat_id(chat_id.unwrap_or_default().to_string());
+    if desk == GENERAL_CHANNEL_ID {
+        return (desk.clone(), desk);
+    }
+    match store.load(company).await {
+        Ok(Some(record)) => desk_aliases(&record, Some(&desk)),
+        Ok(None) | Err(_) => (desk.clone(), desk),
+    }
+}
+
+/// The other spelling the same operator DM is journaled under, if `key` names
+/// one.
+///
+/// A DM has two correct addresses and the host uses both. The console posts an
+/// ordinary teammate's DM under the **bare** teammate id (`dmThreadId`,
+/// `views/room/channels.ts`), while a DM hive keys its episode -- and therefore
+/// every row the episode journals (`hive::conducted`'s `chat:`) -- under
+/// `dm:<id>`. A reader that matched only the address it was asked for saw half
+/// its own conversation: the operator's message under one key and the episode's
+/// replies under the other, so an episode's transcript vanished on reload while
+/// the company sat blocked on an approval it had raised there.
+///
+/// `agent_channels` already folds both spellings for an agent's own session and
+/// says why ("the console and the route disagree and both are correct"); this
+/// is that rule, for a reader that starts from either address.
+///
+/// # Why this is only reached for a non-desk key
+///
+/// Because a declared desk resolves first. A blueprint may name both a desk and
+/// a teammate `main` -- manifest validation does not forbid the collision
+/// (issue #1743) -- and the desk must keep the bare key, so this is asked only
+/// once `resolve_desk_id` has declined it.
+#[must_use]
+pub fn dm_sibling(record: &CompanyRecord, key: &str) -> Option<String> {
+    // **A declared desk owns its key outright, and grows no second one.**
+    //
+    // Asserted here rather than assumed of the callers. `desk_aliases` does
+    // reach this only after `resolve_desk_id` declines, but `operator`'s own
+    // `resolve_desk` matches `manifest.group_chats` alone -- so an **overlay**
+    // desk, created from the console and absent from the manifest, arrives
+    // looking unmatched. Where one shares an id with a teammate, that desk's
+    // transcript would have taken the teammate's DM rows (tinysweeper on
+    // #2484). `resolve_desk_id` is the rule that knows about overlays, so it
+    // is the one asked.
+    if record.resolve_desk_id(key).is_some() {
+        return None;
+    }
+    let prefix = crate::runtime::assignee::DM_PREFIX;
+    // **The exact id first, and only then the prefix.**
+    //
+    // A teammate may itself be named `dm:<something>` -- nothing forbids it,
+    // and this module already carries the mirror case of a teammate named for
+    // a General spelling. Stripping first would answer `dm:ceo` with `ceo`'s
+    // sibling while a teammate literally called `dm:ceo` sat in the roster,
+    // handing one teammate's DM the other's rows.
+    if let Some(agent) = record.resolve_roster_agent_id(key) {
+        return Some(format!("{prefix}{agent}"));
+    }
+    key.strip_prefix(prefix)
+        .and_then(|bare| record.resolve_roster_agent_id(bare))
 }
 
 /// [`resolve_seed_desk`] for a caller that already holds the record.
@@ -106,10 +107,11 @@ pub async fn resolve_seed_desk(
 /// already answers. Same resolution, no store round-trip — and one body, so the
 /// two cannot drift into disagreeing about what a desk id means.
 pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, String) {
-    if let Some(resolved) = trivially_resolved(chat_id) {
-        return resolved;
+    let desk = decode_general_chat_id(chat_id.unwrap_or_default().to_string());
+    if desk == GENERAL_CHANNEL_ID {
+        return (desk.clone(), desk);
     }
-    let desk = chat_id.unwrap_or(GENERAL_DESK);
+    let desk = desk.as_str();
     // **Through `resolve_desk_id`, not a second lookup of its own** (codex +
     // coderabbit on #1972). That function already answers "which desk is this
     // key", and it answers two things a one-pass `id == key || name == key`
@@ -121,10 +123,15 @@ pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, S
     // that wrong here does not merely miss lines, it *merges* two desks: `owns`
     // would then be handed one desk's id and another's name.
     let Some(id) = record.resolve_desk_id(desk) else {
-        // Not a desk this company declares — an ad-hoc thread id or a DM. It
-        // still owns everything journaled under that exact string, which is
-        // what the verbatim pair says.
-        return (desk.to_string(), desk.to_string());
+        // Not a desk this company declares — an ad-hoc thread id or a DM.
+        //
+        // An ad-hoc thread owns everything journaled under that exact string,
+        // which is what the verbatim pair says. A DM owns **both** spellings it
+        // is journaled under, and `owns` already matches either slot — so the
+        // sibling rides in the name slot, which that function only ever
+        // compares and never renders. See [`dm_sibling`].
+        let sibling = dm_sibling(record, desk).unwrap_or_else(|| desk.to_string());
+        return (desk.to_string(), sibling);
     };
     let name = record
         .manifest
@@ -143,99 +150,18 @@ pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, S
     (id, name)
 }
 
-/// The two selectors that resolve without consulting a manifest at all.
-///
-/// `None` is the General desk — an unaddressed message is *routed* there
-/// (`chat_and_emit`), so treating it as "addressed to nothing" is what left
-/// those turns out of every desk-scoped read. Any other General spelling
-/// short-circuits too: they all fold in [`same_conversation`], so `(chat, chat)`
-/// already owns each other's lines.
-fn trivially_resolved(chat_id: Option<&str>) -> Option<(String, String)> {
-    match chat_id {
-        None => Some((GENERAL_DESK.to_string(), GENERAL_DESK.to_string())),
-        Some(desk) if is_general_chat(Some(desk)) => Some((desk.to_string(), desk.to_string())),
-        Some(_) => None,
-    }
+/// Does a chat id stamped on a room's own bookkeeping name the conversation
+/// being read? Matches either slot the resolver produced, as [`owns`] does.
+fn bookkeeping_names(stored: &str, desk_id: &str, desk_name: &str) -> bool {
+    stored == desk_id || stored == desk_name
 }
 
-/// Does a conversation id **stamped onto a record** name `desk`?
-///
-/// The fold is [`same_conversation`]'s — every spelling of General is one
-/// conversation, every other id compares verbatim — with the one difference
-/// this function exists to state:
-///
-/// **`None` is not the General desk.** [`same_conversation`] reads a missing id
-/// as *the id was never addressed*, which for a chat message is right: an
-/// unaddressed post went to the company-wide line, so it folds into General. A
-/// `None` **stamped on a record** means the opposite — *no conversation
-/// produced this*. A blocker parked by the planning pass, a card created on the
-/// board, a scheduler tick: each carries no thread because none of them
-/// happened in a conversation, and folding that into General hands every one of
-/// them to whoever next types in `#general`.
-///
-/// That is not hypothetical. `pending_blocker_groups` matched thread-less
-/// parked blockers against `#general` through [`same_conversation`], so a
-/// founder's first line in the channel was consumed as the *answer* to one of
-/// them: the send settled in milliseconds with no cycle, no run and no reply,
-/// and the console showed a message that read exactly like one being worked on.
-/// `owns` had already carved the same rule out by hand for a
-/// `DeskTaskCompleted` with no origin ("**`None` is not the General desk**",
-/// see its doc) — one carve-out written twice and missed a third time is the
-/// drift; one named predicate is the fix, the same argument
-/// [`same_conversation`] itself was extracted under.
-///
-/// The `desk` side stays a plain `&str` on purpose: a caller asking "is this
-/// record's origin the desk I am reading?" always has a desk, and taking an
-/// `Option` there would re-open the question this answers.
+/// Does a conversation id stamped onto a record name `desk`? A record with no
+/// stamped conversation names none.
 pub fn stamped_conversation_is(origin: Option<&str>, desk: &str) -> bool {
-    origin.is_some_and(|origin| same_conversation(Some(origin), Some(desk)))
+    origin == Some(desk)
 }
 
-/// Whether a stored event belongs to the desk identified by `desk_id` /
-/// `desk_name`.
-///
-/// Both `AgentReply`s and `OperatorMessage`s route by their stored chat id,
-/// matched against the desk's id and its name through [`same_conversation`] — so
-/// a named desk still compares verbatim and the General desk answers to every
-/// spelling of itself, and no historical message is orphaned by the id it
-/// happened to be journaled under (issue #65).
-///
-/// **Folded on both sides, not just the event's** (issue #435). The General
-/// check used to key on the *desk being asked for* being spelled `"General"`,
-/// which the console never does: its default thread is `"main"`, so
-/// `?desk=main` resolves to `("main", "main")` — no group chat is named `main` —
-/// and every event journaled under `"General"` was excluded from the one
-/// transcript that should hold them. An unaddressed chat post is exactly that
-/// pair: the operator message stores `chat: None` and its answer is journaled
-/// with `chat_id: "General"`, so the console's main line dropped both halves of
-/// its own conversation. The asymmetry also put this function at odds with
-/// `resolvable_parent`, which now folds through the same rule: a continuation
-/// could be parented to a root the main line refuses to render, and the console
-/// drops a reply whose parent it cannot find rather than showing it flat.
-///
-/// **A third kind of event routes here since issue #377**: the dispatch
-/// terminal. A card raised from a channel settles somewhere — `in_review`,
-/// `paused`, `todo` — and until #377 nothing structural said so in the channel
-/// it came from, so a reader saw the agent's relay prose and reasonably
-/// concluded the work had finished when it had in fact parked. The terminal
-/// routes by the origin the card recorded at raise time, matched on exactly the
-/// terms the other two are.
-///
-/// **`None` is not the General desk.** Everywhere else in this module a missing
-/// chat id means *the id was never addressed* and folds into General; on a
-/// terminal it means *no conversation raised this card* — it was created on the
-/// board, by a scheduler, or before the origin was recorded. Folding that into
-/// General would post a marker about board-only work into the operator's main
-/// line, which is a different bug from the one #377 fixes, so this arm answers
-/// `false` for every desk including General. It is the single most bug-prone
-/// line in this function and has its own test.
-///
-/// That rule is [`stamped_conversation_is`] now. This arm keeps its own
-/// `return false` because it must also skip the shared tail below, but anywhere
-/// *else* asking "does this record's stamped origin name my desk?" calls the
-/// predicate rather than writing the carve-out again — writing it twice and
-/// forgetting it a third time is what let a thread-less parked blocker read as
-/// pending in `#general`.
 /// One channel this agent can read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Channel {
@@ -311,23 +237,59 @@ pub fn agent_channels(record: &CompanyRecord, agent_id: &str) -> Vec<Channel> {
         }
     }
 
-    // The company's own line. Not a desk (issue #1743) unless a blueprint
-    // declared one under a General spelling, in which case the loop above
-    // already claimed it and this is a no-op.
-    let general = tinyhivemind_core::chat::GENERAL_DESK.to_string();
-    if seen.insert(general.clone()) {
+    if seen.insert(GENERAL_CHANNEL_ID.to_string()) {
         channels.push(Channel {
             label: "#general".to_string(),
-            name: general.clone(),
-            id: general,
+            name: GENERAL_CHANNEL_NAME.to_string(),
+            id: GENERAL_CHANNEL_ID.to_string(),
         });
+    }
+
+    // **The private line this teammate shares with each of the others (#2368).**
+    //
+    // A pair thread is `dm:<a>+<b>` — neither a desk nor this agent's own
+    // direct line — so it matched nothing above, and an agent could not read
+    // back a conversation it had itself been part of. Two seats settled
+    // something and rediscovered it from scratch the next day.
+    //
+    // Enumerable rather than searchable: `pair_conversation` sorts the two
+    // ids, so the thread this agent shares with any teammate is computable
+    // without an index, and one that never happened simply holds no rows.
+    // Only threads this agent is IN: every key is built from its own id, so a
+    // pair between two other people is not addressable here at all.
+    //
+    // Agent-scoped by construction. Every caller of this function reads on
+    // behalf of ONE agent — its session delta, its own speech targets, and the
+    // console's Session tab for that agent — so this adds no channel to the
+    // operator's rail.
+    let mut partners: Vec<String> = Vec::new();
+    for agent in record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| a.id.clone())
+        .chain(record.overlay_agents.iter().map(|a| a.id.clone()))
+    {
+        if agent != agent_id && !partners.contains(&agent) {
+            partners.push(agent);
+        }
+    }
+    for partner in partners {
+        let thread = crate::hive::referral::pair_conversation(agent_id, &partner);
+        if seen.insert(thread.clone()) {
+            channels.push(Channel {
+                label: format!("@{partner}"),
+                name: thread.clone(),
+                id: thread,
+            });
+        }
     }
 
     channels
 }
 
 /// The desk's display name, falling back to its id.
-fn desk_display_name(record: &CompanyRecord, desk_id: &str) -> String {
+pub(crate) fn desk_display_name(record: &CompanyRecord, desk_id: &str) -> String {
     record
         .manifest
         .group_chats
@@ -345,22 +307,19 @@ fn desk_display_name(record: &CompanyRecord, desk_id: &str) -> String {
         .unwrap_or_else(|| desk_id.to_string())
 }
 
+/// Whether a stored event belongs to the desk identified by `desk_id` /
+/// `desk_name`. A dispatch terminal with no origin belongs to no conversation.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
     let stored = match event {
-        CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.as_str()),
-        CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
-        // Issue #377. `None` short-circuits to `false` here rather than
-        // falling through to the shared tail: `same_conversation` reads a
-        // `None` as "unaddressed, therefore General", and this event's `None`
-        // means the opposite — no conversation raised this card, so it belongs
-        // to no conversation's history.
+        CompanyEvent::AgentReply { chat_id, .. } => chat_id.as_str(),
+        CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref().unwrap_or(GENERAL_CHANNEL_ID),
         CompanyEvent::DeskTaskCompleted { origin_chat_id, .. } => match origin_chat_id.as_deref() {
-            Some(origin) => Some(origin),
+            Some(origin) => origin,
             None => return false,
         },
         _ => return false,
     };
-    same_conversation(stored, Some(desk_id)) || same_conversation(stored, Some(desk_name))
+    stored == desk_id || stored == desk_name
 }
 
 /// The channel line a settled dispatch leaves behind (issue #377) —
@@ -437,6 +396,42 @@ pub struct ReferralLine {
     pub outbound: bool,
 }
 
+/// One agent-to-agent exchange on this desk, folded onto the `ask` row that
+/// opened it.
+///
+/// Same idiom and the same reason as [`ReferralConversation`] beside it, with
+/// one difference worth stating: a crossing's relayed rows are *dropped*
+/// host-side, while these are *kept* — in the pair channel the exchange was
+/// written to. The desk still never sees them, because a desk reads its own
+/// channel and they are not in it, so without this fold the only trace of two
+/// seats talking is the concluding paraphrase. The rows exist; this is what
+/// carries them to the row that sent the seats aside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentConversation {
+    /// The `ask` row it is rooted at, and its identity.
+    ///
+    /// Two seats can hold several exchanges in one episode, and they share a
+    /// channel: `pair_conversation` is deterministic, so every one of them is
+    /// `dm:<a>+<b>`. Without the root they are indistinguishable -- same
+    /// asker, same askee, same channel -- and a reader sees the same line
+    /// twice with no way to tell which is which.
+    pub root: u64,
+    /// The seat that asked.
+    pub asker_id: String,
+    /// The seat it asked.
+    pub askee_id: String,
+    /// The channel the exchange is written to (`dm:{a}+{b}`).
+    pub conversation_id: String,
+    /// Whether it has ended. A live exchange is worded in the present tense,
+    /// for the reason [`ReferralConversation`] words a running crossing that
+    /// way: past tense is a claim that something is over.
+    pub concluded: bool,
+    /// Whether it ended by running out of turns rather than by concluding.
+    pub forced: bool,
+    /// The exchange itself, in transcript order.
+    pub lines: Vec<ReferralLine>,
+}
+
 /// The whole exchange between an agent on this desk and somebody who is not,
 /// folded onto the report that brought it home.
 ///
@@ -479,36 +474,6 @@ pub struct ReferralConversation {
     pub lines: Vec<ReferralLine>,
 }
 
-/// One line of a private aside, in the order it was said.
-///
-/// No `author_label`: unlike a referral, both sides of an aside sit on the desk
-/// being read, so the console already knows their names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AsideLine {
-    /// The agent that wrote it.
-    pub author_id: String,
-    /// What they said, with the `!aside @peer` head already stripped.
-    pub text: String,
-}
-
-/// A private exchange between members of one desk, folded onto the move it rode
-/// under.
-///
-/// The same idiom as [`ReferralConversation`] and for the same reason: it is
-/// detail behind a line, not part of the desk's own conversation. It differs in
-/// who may read it — an operator reads every row in full (`Audience::admits`
-/// admits `Viewer::Operator` unconditionally), because privacy here is between
-/// agents and is a deliberation device, never a security boundary. Collapsing it
-/// is a rendering choice, not an access-control one, and nothing here withholds
-/// anything from the person reading.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AsideConversation {
-    /// Everyone in it — the author first, then who they addressed.
-    pub members: Vec<String>,
-    /// The exchange, oldest first. Its length is the collapsed label's count.
-    pub lines: Vec<AsideLine>,
-}
-
 #[cfg(test)]
 impl MessageView {
     /// A bare row, for tests that exercise the folds rather than the projection.
@@ -530,8 +495,9 @@ impl MessageView {
             by_person: false,
             referred_from: None,
             referral_conversation: None,
+            agent_conversations: Vec::new(),
             aside_audience: audience,
-            aside_conversation: None,
+            episode: None,
             steps: Vec::new(),
             task_id: None,
             parent_id: None,
@@ -651,7 +617,8 @@ pub struct MessageView {
     /// The message text.
     pub text: String,
     /// **What the agent was actually handed for this row** — the text before
-    /// [`readable_moves`] rewrote it into operator-facing prose.
+    /// [`readable_moves`](crate::server::readable::readable_moves) projected it
+    /// for a person.
     ///
     /// Same reasoning as [`Self::cue_author`], applied to the other half of
     /// the cue line: `render_cues` in `agent_session.rs` prepends
@@ -660,7 +627,7 @@ pub struct MessageView {
     /// a surface that claims to show what the model saw — the raw-turns view
     /// — must not feed it [`Self::text`], which has already had `!support
     /// #topic ^3` turned into prose. Equal to [`Self::text`] on every row
-    /// `readable_moves` does not touch.
+    /// the display projection does not touch.
     pub cue_text: String,
     /// When it was journaled, epoch millis.
     pub at_millis: f64,
@@ -694,14 +661,23 @@ pub struct MessageView {
     pub referred_from: Option<ReferredFrom>,
     /// The crossing this report brought home, when it brought one.
     pub referral_conversation: Option<ReferralConversation>,
-    /// The addressees of this row when it is a private aside, else empty.
+    /// The agent-to-agent exchanges this row reported, oldest first.
     ///
-    /// Fold input, not output: `fold_asides` reads it to know which rows to
-    /// collect, and no DTO carries it — what the console renders is the folded
-    /// [`Self::aside_conversation`] on the row the aside rode under.
+    /// A list, not one: several exchanges legitimately land on the same row.
+    /// Every exchange still running folds onto the row that sent the seats
+    /// aside, and one seat can open several from a single desk message --
+    /// which it does whenever the first answer does not settle the question.
+    /// A single slot kept whichever was folded last and dropped the rest.
+    pub agent_conversations: Vec<AgentConversation>,
+    /// The addressees of this row when the host narrowed it — a seat's `dm`
+    /// inside a desk — else empty. Projected as `audience`; an operator reads
+    /// the row regardless, because audience is a coordination device between
+    /// agents and never access control.
     pub aside_audience: Vec<String>,
-    /// The private exchange this move carried, when it carried one.
-    pub aside_conversation: Option<AsideConversation>,
+    /// What this reply was inside the episode that produced it (plan
+    /// hive-desks, Phase 4): its round, its speech act, a `dm`'s recipients
+    /// and how a `broadcast` was routed on. `None` outside an episode.
+    pub episode: Option<crate::ports::types::ReplyEpisode>,
     /// Whether this row may reach only administrators (issue #1781 review,
     /// Codex P1).
     ///
@@ -973,6 +949,7 @@ impl MessageView {
                 parent,
                 mentions,
                 audience,
+                episode,
                 ..
             } => {
                 // Keys rework #2306, round-2 review KR-L2-03: re-classifies
@@ -990,10 +967,11 @@ impl MessageView {
                     // `body_of`'s `AgentReply` arm names the agent, so this does.
                     cue_author: agent_id.clone(),
                     author: agent_id,
-                    // `body_of`'s `AgentReply` arm hands the agent `text.clone()`
-                    // untouched — clone before `readable_moves` consumes it below.
+                    // `body_of`'s `AgentReply` arm hands the agent this body
+                    // untouched; `text` is projected for a person at the end of
+                    // `history_for_desk`.
                     cue_text: text.clone(),
-                    text: readable_moves(text),
+                    text,
                     at_millis,
                     mine: false,
                     // The runtime wrote this, whichever brain produced it.
@@ -1001,8 +979,9 @@ impl MessageView {
                     // Set by the referral fold in `history_for_desk`, never here.
                     referred_from: None,
                     referral_conversation: None,
+                    agent_conversations: Vec::new(),
                     aside_audience: audience,
-                    aside_conversation: None,
+                    episode,
                     steps,
                     task_id,
                     outputs,
@@ -1082,8 +1061,9 @@ impl MessageView {
                     // Set by the referral fold in `history_for_desk`, never here.
                     referred_from: None,
                     referral_conversation: None,
+                    agent_conversations: Vec::new(),
                     aside_audience: Vec::new(),
-                    aside_conversation: None,
+                    episode: None,
                     id,
                     channel: voice,
                     admin_only: false,
@@ -1176,8 +1156,9 @@ impl MessageView {
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
                 referral_conversation: None,
+                agent_conversations: Vec::new(),
                 aside_audience: Vec::new(),
-                aside_conversation: None,
+                episode: None,
                 steps: Vec::new(),
                 task_id: Some(task_id),
                 outputs: Vec::new(),
@@ -1213,8 +1194,9 @@ impl MessageView {
                 // Set by the referral fold in `history_for_desk`, never here.
                 referred_from: None,
                 referral_conversation: None,
+                agent_conversations: Vec::new(),
                 aside_audience: Vec::new(),
-                aside_conversation: None,
+                episode: None,
                 steps: Vec::new(),
                 task_id: None,
                 outputs: Vec::new(),
@@ -1510,6 +1492,7 @@ pub async fn history_for_desk(
 
     // One roster read per history, not one per message.
     let authors = author_labels(runtime).await?;
+    let names = DisplayNames::load(runtime).await;
     let mut cursor = before_seq.map(EventSeq::new);
     let mut messages = Vec::with_capacity(first);
     while messages.len() < first {
@@ -1551,7 +1534,7 @@ pub async fn history_for_desk(
                 // FAILED turn's notice carries its own reserved id and is not
                 // dropped — the turn it describes does not exist, so there is
                 // no gap for a reader to notice.
-                if message.channel == crate::hivemind::HIVE_REPORT_AUTHOR {
+                if crate::hive::referral::is_legacy_report_author(&message.channel) {
                     continue;
                 }
                 messages.push(message);
@@ -1608,148 +1591,201 @@ pub async fn history_for_desk(
 
     drop_dead_cards(runtime, &mut messages).await?;
     drop_dead_outputs(runtime, &mut messages).await?;
-    attach_referral_origins(runtime, desk_id, &mut messages).await?;
-    fold_asides(&mut messages);
+    attach_referral_origins(runtime, desk_id, desk_name, &mut messages).await?;
+    attach_agent_conversations(runtime, desk_id, desk_name, &mut messages).await?;
+    project_history(&mut messages, &names);
     Ok(messages)
 }
 
-/// Fold each private aside onto the move it rode under.
-///
-/// A seat writes its move and may add one `!aside @peer` line beneath it; the
-/// host journals that line as its own row carrying an `audience`. Left alone it
-/// renders in the transcript as an ordinary message with the raw marker still in
-/// its body — which is both a leak of the grammar into the operator's view and a
-/// misreading of what happened, since the row was never addressed to the room.
-///
-/// So the aside rows are lifted out of the transcript and hung on the nearest
-/// preceding desk-visible row by the same author — the move they rode under.
-///
-/// **An orphan is kept, never dropped.** An aside with no move above it (the
-/// author's first row, or a history page that begins mid-exchange) stays where it
-/// is as an ordinary row. A rendered line in the wrong shape is a cosmetic
-/// defect; a dropped one is a lost message, and this projection already refuses
-/// that trade for referrals one function below.
-pub(crate) fn fold_asides(messages: &mut Vec<MessageView>) {
-    if messages
-        .iter()
-        .all(|message| message.aside_audience.is_empty())
-    {
-        return;
-    }
-    let mut folded = Vec::with_capacity(messages.len());
-    for message in std::mem::take(messages) {
-        if message.aside_audience.is_empty() {
-            folded.push(message);
-            continue;
-        }
-        // The move this aside rode under: the nearest row above it that this same
-        // seat wrote in the open. Searching by author rather than by adjacency
-        // keeps the pairing right when two seats aside in the same round.
-        let anchor = folded.iter_mut().rev().find(|earlier| {
-            // Same seat, and speaking in the open: an orphaned aside kept
-            // above must not become the anchor for the one below it.
-            earlier.author == message.author && earlier.aside_audience.is_empty()
-        });
-        let Some(anchor) = anchor else {
-            // Orphan: no move of ours above it. Keep the row.
-            folded.push(message);
-            continue;
-        };
-        let line = AsideLine {
-            author_id: message.author.clone(),
-            text: aside_body(&message.text),
-        };
-        match &mut anchor.aside_conversation {
-            Some(conversation) => {
-                for member in &message.aside_audience {
-                    if !conversation.members.contains(member) {
-                        conversation.members.push(member.clone());
-                    }
-                }
-                conversation.lines.push(line);
-            }
-            slot @ None => {
-                let mut members = vec![message.author.clone()];
-                members.extend(message.aside_audience.iter().cloned());
-                *slot = Some(AsideConversation {
-                    members,
-                    lines: vec![line],
-                });
-            }
-        }
-    }
-    *messages = folded;
-}
-
-/// `!aside @peer the body` -> `the body`.
-///
-/// The marker and the addressee are what the collapsed chip's header already
-/// says; leaving them in the body is the leak this fold exists to close.
-/// `line_kind` cannot do it — `MOVE_KINDS` deliberately omits `aside`, because a
-/// marker the fold discards is not a move anybody made — so the strip is here.
-fn aside_body(text: &str) -> String {
-    let trimmed = text.trim_start();
-    let Some(rest) = trimmed.strip_prefix("!aside") else {
-        return text.to_string();
-    };
-    let mut rest = rest.trim_start();
-    // Every leading `@name`, not just the first: an aside may name more than one
-    // peer when a desk raised `max_members`.
-    while let Some(after_at) = rest.strip_prefix('@') {
-        let cut = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
-        rest = after_at[cut..].trim_start();
-    }
-    // Trailing space too: the head strip is the only thing standing between the
-    // authored line and a chat bubble, and a bubble padded with the whitespace
-    // that used to separate `@peer` from the body is a rendering artefact.
-    rest.trim_end().to_string()
-}
-
-/// Fold each `ReferralEnqueued` marker onto the message it caused
-/// (tinyhivemind P15).
-///
-/// # Why a fold and not a field on the message
-///
-/// The marker is written INSIDE the enqueue transaction, which is necessarily
-/// before the child turn exists — that ordering is what makes it an idempotency
-/// marker at all. So the message it causes cannot carry the provenance at write
-/// time, and the projection is the only place the two can meet.
-///
-/// # How they are matched
-///
-/// A marker names the desk the child runs on and the agent that asked. The
-/// child is the first message on that desk, after the marker, authored by that
-/// agent. Both are written by one task with nothing in between, so "first
-/// after" is exact rather than probabilistic — and the match still requires the
-/// author to agree, so an unrelated line landing between them is not adopted.
-///
-/// # The return leg is an INPUT, not a line in the channel
-///
-/// One agent speaks in both rooms, and it is the ASKER. It goes to the other
-/// desk and asks there under its own name; the desk that answers, answers on
-/// its OWN desk and never appears in the room it was asked from. When the asker
-/// judges the answer sufficient, it comes home and reports — in its own words,
-/// under its own name.
-///
-/// So the child of a RETURN marker is not a message anyone should read. It is
-/// the answer being handed back to the asker so the asker can run a turn on it,
-/// and rendering it produced exactly the double the single-accountable-voice
-/// rule exists to prevent: the other desk's agent posting its answer verbatim
-/// into a room it is not part of, immediately followed by the asker summarising
-/// that same answer. The reader saw the same content twice, in two voices, one
-/// of which does not belong there.
-///
-/// The relay is therefore dropped from the projection and its provenance moves
-/// onto the asker's report — which is the line a reader wants the chip on
-/// anyway, because that is the message whose origin is not otherwise visible.
-///
-/// **Only when the report actually exists.** If the asker's turn has not landed
-/// yet, or failed, the relay renders as it did before. A rendered line in the
-/// wrong voice is a cosmetic defect; a dropped one is a lost answer, and this
 /// projection already refuses that trade once (see the orphan arm below).
+/// Folds each agent-to-agent exchange onto the `ask` row that opened it.
+///
+/// The exchange's own rows are written to the pair channel, so a desk reading
+/// its own channel never sees them: the `ConversationOpened` reference is the
+/// only trace here, and on its own it can say that two seats talked but not
+/// what they said. This reads the pair channel out of the same page and hands
+/// the rows to the row that sent them aside.
+///
+/// Mirrors [`attach_referral_origins`] deliberately, down to the lookback: a
+/// conversation whose `ask` fell outside the window renders with whatever part
+/// of it the page holds, which is the same bounded-widening bargain a crossing
+/// makes. Silent when nothing matches — an episode that never opened one is
+/// every episode before seats could ask each other.
+async fn attach_agent_conversations(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    desk_name: &str,
+    messages: &mut [MessageView],
+) -> Result<(), OpenCompanyError> {
+    let Some(oldest) = messages
+        .iter()
+        .filter_map(|m| m.id.parse::<u64>().ok())
+        .min()
+    else {
+        return Ok(());
+    };
+    const LOOKBACK: u64 = 64;
+    let page = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            EventSeq::new(oldest.saturating_sub(LOOKBACK)),
+            4096,
+        )
+        .await?;
+
+    // Opened on THIS desk. The reference row is journaled to the desk even
+    // though the exchange is not, which is the whole point of it.
+    let mut opened: Vec<(u64, String, String, String)> = Vec::new();
+    let mut ended: std::collections::HashMap<u64, (u64, bool)> = std::collections::HashMap::new();
+    for stored in page.iter() {
+        match &stored.event {
+            CompanyEvent::ConversationOpened {
+                chat_id,
+                conversation_id,
+                root,
+                asker,
+                askee,
+                ..
+            } if bookkeeping_names(chat_id, desk_id, desk_name) => {
+                opened.push((*root, conversation_id.clone(), asker.clone(), askee.clone()));
+            }
+            CompanyEvent::ConversationConcluded {
+                chat_id,
+                root,
+                forced,
+                ..
+            } if bookkeeping_names(chat_id, desk_id, desk_name) => {
+                ended.insert(*root, (stored.seq.value(), *forced));
+            }
+            _ => {}
+        }
+    }
+    if opened.is_empty() {
+        return Ok(());
+    }
+
+    for (root, conversation_id, asker, askee) in opened {
+        // **The exchange is the ask row and everything rooted at it**, not
+        // every row in the channel. Two seats that ask each other inside one
+        // episode share a single `dm:<a>+<b>` channel and their conversations
+        // interleave there, so collecting by channel alone hands each of them
+        // the other's rows — the same trap
+        // `two_crossings_to_one_person_each_fold_their_own_exchange` pins for a
+        // crossing, reached here by a different road.
+        let lines: Vec<ReferralLine> = page
+            .iter()
+            .filter(|stored| {
+                let CompanyEvent::AgentReply {
+                    chat_id,
+                    parent,
+                    episode,
+                    ..
+                } = &stored.event
+                else {
+                    return false;
+                };
+                // The conclusion is threaded under the ask too, so a seat's
+                // thread read reaches it; here it would be the askee's last
+                // line said twice. `Dm` is the conductor's alone: `dm` is
+                // unserved, so no seat writes one.
+                if episode
+                    .as_ref()
+                    .is_some_and(|episode| matches!(episode.kind, UtteranceKind::Dm))
+                {
+                    return false;
+                };
+                *chat_id == conversation_id
+                    && (stored.seq.value() == root || *parent == Some(EventSeq::new(root)))
+            })
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply { agent_id, text, .. } => Some(ReferralLine {
+                    author_id: agent_id.clone(),
+                    // Empty for the seat that asked, exactly as a crossing
+                    // leaves it: the row this folds onto already names them.
+                    // The replying seat itself rather than the row's single
+                    // `askee`: identical for a pair, and right for a group
+                    // ask, where any of several seats may answer.
+                    author_label: if *agent_id == asker {
+                        String::new()
+                    } else {
+                        agent_id.clone()
+                    },
+                    text: text.clone(),
+                    outbound: *agent_id == asker,
+                }),
+                _ => None,
+            })
+            .collect();
+        if lines.is_empty() {
+            continue;
+        }
+
+        // **The asker's report**, which is not the row the exchange is rooted
+        // at and not simply the row before the conclusion either.
+        //
+        // An `ask` is written to the pair channel, so `root` names a row this
+        // desk does not have. And the askee cross-posts its conclusion to the
+        // desk *before* the asker wraps up, so "the last desk row before the
+        // conclusion" lands on the seat that was ASKED — which then reads
+        // "Implementation Planner ... asked @implementation_planner", a seat
+        // asking itself, the one thing that did not happen.
+        //
+        // The exchange belongs to the question that caused it, so it folds
+        // onto the asker's first desk row after the conclusion: the report
+        // that brought the answer home. One still running has no report yet
+        // and folds onto the row that sent the seats aside — the ask's own
+        // parent, which is also the asker's.
+        // The row that sent the seats aside: the ask's own parent, which is
+        // always on this desk and always exists. Every exchange falls back to
+        // it, so none can be dropped for want of somewhere to go.
+        let sent_aside = page.iter().find_map(|stored| match &stored.event {
+            CompanyEvent::AgentReply { parent, .. } if stored.seq.value() == root => {
+                parent.map(|seq| seq.value())
+            }
+            _ => None,
+        });
+        let anchor = match ended.get(&root) {
+            Some((concluded_at, _)) => page
+                .iter()
+                .find(|stored| {
+                    stored.seq.value() > *concluded_at
+                        && matches!(
+                            &stored.event,
+                            CompanyEvent::AgentReply { chat_id, agent_id, .. }
+                                if bookkeeping_names(chat_id, desk_id, desk_name) && *agent_id == asker
+                        )
+                })
+                .map(|stored| stored.seq.value())
+                // **A concluded exchange the asker never reported.** It asked
+                // again instead, or the episode ended under it. Anchoring only
+                // on the report discarded the exchange outright -- a live run
+                // concluded two and showed neither, because the asker kept
+                // asking and never posted to the desk.
+                .or(sent_aside),
+            None => sent_aside,
+        };
+        let Some(anchor) = anchor else { continue };
+        let Some(view) = messages.iter_mut().find(|m| m.id == anchor.to_string()) else {
+            continue;
+        };
+        view.agent_conversations.push(AgentConversation {
+            root,
+            asker_id: asker,
+            askee_id: askee,
+            conversation_id,
+            concluded: ended.contains_key(&root),
+            forced: ended.get(&root).map(|(_, forced)| *forced).unwrap_or(false),
+            lines,
+        });
+    }
+    Ok(())
+}
+
 async fn attach_referral_origins(
     runtime: &CompanyRuntime,
     desk_id: &str,
+    desk_name: &str,
     messages: &mut Vec<MessageView>,
 ) -> Result<(), OpenCompanyError> {
     let Some(oldest) = messages
@@ -1780,6 +1816,7 @@ async fn attach_referral_origins(
     let mut relayed: Vec<String> = Vec::new();
     for (index, stored) in page.iter().enumerate() {
         let CompanyEvent::ReferralEnqueued {
+            rows: exchange_rows,
             from_desk,
             from_desk_name,
             asker,
@@ -1790,11 +1827,12 @@ async fn attach_referral_origins(
             returning,
             answers,
             conversation,
+            ..
         } = &stored.event
         else {
             continue;
         };
-        if to_desk != desk_id {
+        if !bookkeeping_names(to_desk, desk_id, desk_name) {
             continue;
         }
         // **A crossing that went to a PERSON lives in its own conversation.**
@@ -1827,7 +1865,17 @@ async fn attach_referral_origins(
             // Bounded at the next crossing into the SAME pair thread, which is
             // where this one's exchange ends by construction: the rows between
             // two markers are the rows that marker caused.
-            let next_for_pair = page[index + 1..]
+            //
+            // **Unless the marker names its own rows.** The forward scan assumes
+            // the rows follow the marker, which holds for a deliberation
+            // crossing — the marker is written first and the turns follow. A
+            // tool-sent `desk_dm` inverts it: the rows are journaled while the
+            // turn runs, and the marker folds onto that turn's own reply, which
+            // is composed afterwards. Scanning forward from such a marker finds
+            // the answer and misses the question it is a chip for. A marker that
+            // carries its range is read by range instead, which is true whichever
+            // side of it the rows landed on (#2368).
+            let next_marker = page[index + 1..]
                 .iter()
                 .position(|later| {
                     matches!(
@@ -1838,9 +1886,55 @@ async fn attach_referral_origins(
                         } if next == pair
                     )
                 })
-                .map_or(page.len(), |at| index + 1 + at);
+                .map(|at| index + 1 + at);
+            // **The boundary is the next crossing's first ROW, not its marker.**
+            //
+            // A deliberation crossing mints its marker first and the turns
+            // follow, so marker order and row order agree and cutting at the
+            // next marker is exact. A `desk_dm` inverts it: the question is
+            // journaled mid-turn and the marker minted afterwards, onto the
+            // turn's own reply. The rows between marker A and marker B then
+            // include the ones B was minted FOR, so cutting at B let a settled
+            // crossing absorb the opening of the next one — a two-line chip
+            // grew to four the moment the same pair spoke again, the two extra
+            // lines being questions of a crossing still in flight, shown as
+            // part of an exchange that had already finished.
+            let next_for_pair = match next_marker {
+                Some(at) => {
+                    let claimed = match &page[at].event {
+                        CompanyEvent::ReferralEnqueued {
+                            rows: Some((opened, _)),
+                            ..
+                        } => page[index + 1..at]
+                            .iter()
+                            .position(|row| row.seq.value() >= *opened)
+                            .map(|before| index + 1 + before),
+                        _ => None,
+                    };
+                    claimed.unwrap_or(at)
+                }
+                None => page.len(),
+            };
+            // A range EXTENDS the forward scan, it does not replace it. The rows
+            // a marker names are the ones already written when it was minted —
+            // a tool's own DM, journaled mid-turn — and the rows that follow it
+            // are the answer coming back. Reading only the range showed the
+            // question and dropped the reply; reading only forward did the
+            // reverse.
+            let scanned = match exchange_rows {
+                Some(_) => page.as_slice(),
+                None => &page[index + 1..next_for_pair],
+            };
             let mut lines = Vec::new();
-            for later in &page[index + 1..next_for_pair] {
+            for (at, later) in scanned.iter().enumerate() {
+                if let Some((opened, closed)) = exchange_rows {
+                    let seq = later.seq.value();
+                    let named = (*opened..=*closed).contains(&seq);
+                    let follows = at > index && at < next_for_pair;
+                    if !named && !follows {
+                        continue;
+                    }
+                }
                 let CompanyEvent::AgentReply {
                     chat_id, agent_id, ..
                 } = &later.event
@@ -1862,9 +1956,7 @@ async fn attach_referral_origins(
                     } else {
                         target.clone()
                     },
-                    // The ask is a committed MOVE — the grammar is addressed to
-                    // the fold, never to a person reading a transcript.
-                    text: readable_moves(words),
+                    text: words,
                     outbound: agent_id == asker,
                 });
             }
@@ -1939,7 +2031,7 @@ async fn attach_referral_origins(
                     chat_id, agent_id, ..
                 } => {
                     chat_id == to_desk
-                        && (agent_id == crate::hivemind::HIVE_REFERRAL_AUTHOR
+                        && (agent_id == crate::hive::referral::HIVE_REFERRAL_AUTHOR
                         // **The answering desk's own view of the crossing.**
                         //
                         // The two shapes above are both the ASKING desk's: the
@@ -2172,7 +2264,7 @@ async fn attach_referral_origins(
                     lines.push(ReferralLine {
                         author_id: target.clone(),
                         author_label: String::new(),
-                        text: readable_moves(crate::hivemind::referral::asked_message(&text)),
+                        text: crate::hive::referral::asked_message(&text),
                         outbound: true,
                     });
                 }
@@ -2225,7 +2317,8 @@ async fn attach_referral_origins(
                             audience,
                             ..
                         } if chat_id == from_desk
-                            && !crate::hivemind::is_hive_author(agent_id)
+                            && !crate::hive::referral::is_hive_author(agent_id)
+                            && !crate::hive::referral::is_legacy_report_author(agent_id)
                             // **An aside is not a turn, here as in `turns_of`.**
                             //
                             // A room's `!aside` is journaled with the same
@@ -2240,7 +2333,7 @@ async fn attach_referral_origins(
                             Some(ReferralLine {
                                 author_id: agent_id.clone(),
                                 author_label: agent_id.clone(),
-                                text: readable_moves(text.clone()),
+                                text: text.clone(),
                                 outbound: false,
                             })
                         }
@@ -2257,11 +2350,11 @@ async fn attach_referral_origins(
                                 // The room's attribution removed — this line is
                                 // already attributed by the fold that carries
                                 // it. See `referral::unattributed`.
-                                text: readable_moves(crate::hivemind::referral::unattributed(
+                                text: crate::hive::referral::unattributed(
                                     asker,
                                     from_desk_name,
                                     &text,
-                                )),
+                                ),
                                 outbound: false,
                             });
                         }
@@ -2344,9 +2437,7 @@ async fn attach_referral_origins(
                             lines: vec![ReferralLine {
                                 author_id: asker.clone(),
                                 author_label: asker_label.clone(),
-                                // A room's question is a committed MOVE, and the
-                                // grammar is addressed to the fold.
-                                text: readable_moves(text),
+                                text,
                                 outbound: false,
                             }],
                         });
@@ -2393,33 +2484,6 @@ fn strip_relay_note(event: &CompanyEvent) -> Option<String> {
         .map_or(text.as_str(), |(answer, _)| answer)
         .trim();
     (!words.is_empty()).then(|| words.to_string())
-}
-
-/// Renders a deliberation turn for a person, leaving every other reply alone.
-///
-/// A room's grammar — `!move`, `#topic`, `^N`, `>N` — is addressed to the fold
-/// and was reaching the operator verbatim: `!support #lazy-load ^3 agreed`
-/// rendered as-is in a chat window. Each line that carries a move is rewritten
-/// to a plain-English lead; a line that carries none passes through untouched,
-/// which is every reply on every desk that does not deliberate.
-///
-/// Line by line, because a turn may pair prose with its move, and only the
-/// marked line is grammar.
-///
-/// **The journal keeps the original.** The fold reads markers off the stored
-/// line, so this rewrite lives here and nowhere earlier — a room whose own
-/// transcript had been cleaned could not count itself.
-pub(crate) fn readable_moves(text: String) -> String {
-    if !text
-        .lines()
-        .any(|line| crate::hivemind::line_kind(line).is_some())
-    {
-        return text;
-    }
-    text.lines()
-        .map(|line| crate::hivemind::readable(line).unwrap_or_else(|| line.to_string()))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Blanks `task_id` on any row naming a card the board no longer has
@@ -2648,9 +2712,6 @@ mod attribution_audit;
 #[path = "chat_history_mentions_tests.rs"]
 mod tests_mentions;
 #[cfg(test)]
-#[path = "chat_history_moves_tests.rs"]
-mod tests_moves;
-#[cfg(test)]
 #[path = "chat_history_reactions_tests.rs"]
 mod tests_reactions;
 #[cfg(test)]
@@ -2661,6 +2722,10 @@ mod tests_terminal;
 #[path = "chat_history_dead_card_test.rs"]
 mod dead_card_test;
 
+/// Where a referred line says it came from, and who it says is speaking.
+#[cfg(test)]
+#[path = "chat_history_agent_conversation_test.rs"]
+mod agent_conversation_test;
 #[cfg(test)]
 #[path = "chat_history_referral_origin_crossing_test.rs"]
 mod referral_origin_crossing_test;
@@ -2670,7 +2735,7 @@ mod referral_origin_episode_test;
 #[cfg(test)]
 #[path = "chat_history_referral_origin_relay_test.rs"]
 mod referral_origin_relay_test;
-/// Where a referred line says it came from, and who it says is speaking.
+
 #[cfg(test)]
 #[path = "chat_history_referral_origin_test_support.rs"]
 mod referral_origin_test_support;

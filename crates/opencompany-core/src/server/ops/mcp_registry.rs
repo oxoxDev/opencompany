@@ -47,7 +47,9 @@ use axum::Router;
 use axum::routing::{delete, get, post, put};
 
 use crate::AppState;
+use crate::company::McpServer;
 use crate::company::mcp::{McpHealth, McpSource};
+use crate::company::mcp_endpoint::normalize_endpoint;
 use crate::server::ops::mcp::{McpServerDto, RosterAgentDto};
 use crate::server::ops::scoped;
 
@@ -74,6 +76,12 @@ pub(super) fn router() -> Router<AppState> {
         ))
         .merge(scoped("/mcp/registry/{server_id}/env", put(update_env)))
         .merge(scoped("/mcp/registry/{server_id}", delete(uninstall)))
+        .merge(scoped(
+            "/mcp/registry/{server_id}/tools/policy",
+            get(read_tool_policy)
+                .put(write_tool_policy)
+                .delete(reset_tool_policy),
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -118,56 +126,6 @@ pub(super) struct RegistryInstall {
 // ---------------------------------------------------------------------------
 // Endpoint reconciliation — always compiled
 // ---------------------------------------------------------------------------
-
-/// Normalises an MCP endpoint to the identity two lists are compared on:
-/// lowercased scheme and host, default port dropped, query and fragment
-/// stripped, trailing slash dropped.
-///
-/// **The query string must go.** A List A server can carry its credential as a
-/// query parameter (the BrowserBase style — see
-/// [`AuthMaterial::QueryParam`](crate::company::mcp::AuthMaterial::QueryParam)),
-/// so `…/mcp?token=abc` and `…/mcp` are the same server reached two ways. A
-/// comparison that kept the query would never match them and the operator would
-/// get the duplicate row this whole rule exists to prevent — with two
-/// credentials and two health badges disagreeing about one server.
-///
-/// Returns `None` for a blank endpoint, which is what a stdio install has: no
-/// address means nothing to reconcile *on*, not "reconciles with everything".
-pub(super) fn normalize_endpoint(endpoint: &str) -> Option<String> {
-    let raw = endpoint.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let (scheme, rest) = match raw.split_once("://") {
-        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
-        // Not a URL we can decompose. Compare it case-insensitively as a whole
-        // rather than guessing at a shape — a wrong split would merge two
-        // unrelated rows, which is worse than leaving a duplicate.
-        None => return Some(raw.to_ascii_lowercase()),
-    };
-    // `?` and `#` cannot legally appear in an authority, so cutting them off the
-    // whole remainder first is safe and handles `https://host?q` too.
-    let cut = rest.find(['?', '#']).unwrap_or(rest.len());
-    let rest = &rest[..cut];
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, ""),
-    };
-    let mut authority = authority.to_ascii_lowercase();
-    for (default_scheme, port) in [("http", ":80"), ("https", ":443")] {
-        if scheme == default_scheme
-            && let Some(host) = authority.strip_suffix(port)
-        {
-            authority = host.to_string();
-            break;
-        }
-    }
-    let path = path.trim_end_matches('/');
-    if authority.is_empty() && path.is_empty() {
-        return None;
-    }
-    Some(format!("{scheme}://{authority}{path}"))
-}
 
 /// A display slug for a registry row, derived from its qualified name.
 ///
@@ -215,6 +173,40 @@ fn slugify(raw: &str) -> Option<String> {
     }
     let trimmed = out.trim_matches('-');
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The directory entry as this company's own server declaration.
+///
+/// Lives here rather than beside the route so it compiles and is tested
+/// without the `mcp` feature, like every other rule in this module.
+///
+/// The qualified name is the row's name, which is what the directory, the
+/// console's source badge and a later `PUT …/mcp/servers/{name}` all agree on.
+/// Tool lists are left empty — the directory says nothing about which of a
+/// server's tools this company wants, and an empty pair means "all of them",
+/// which is what an install has always meant.
+///
+/// Its only caller is the route in `wired`, which is `#[cfg(feature = "mcp")]`
+/// — so on a build without that feature the rule is exercised by the tests
+/// below and by nothing else, which is the shape this module is for.
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+pub(super) fn declaration_from_directory(
+    qualified_name: &str,
+    endpoint: &str,
+    description: Option<String>,
+) -> McpServer {
+    McpServer {
+        name: qualified_name.to_string(),
+        endpoint: endpoint.to_string(),
+        description,
+        command: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        read_only_tools: Vec::new(),
+        timeout_secs: 30,
+        enabled: true,
+        auth_secret: None,
+    }
 }
 
 /// Folds registry installs into the List A rows, in place.
@@ -387,7 +379,10 @@ pub(in crate::server::ops) mod catalogue;
 #[cfg(feature = "mcp")]
 mod wired;
 #[cfg(feature = "mcp")]
-use wired::{connect_server, disconnect_server, entry, install, search, uninstall, update_env};
+use wired::{
+    connect_server, disconnect_server, entry, install, read_tool_policy, reset_tool_policy, search,
+    uninstall, update_env, write_tool_policy,
+};
 #[cfg(feature = "mcp")]
 pub(super) use wired::{installs, remove_install};
 
@@ -455,10 +450,28 @@ mod unwired {
         let _ = company;
         crate::server::ops::not_wired("mcp registry")
     }
+
+    pub(super) async fn read_tool_policy(company: ScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
+
+    pub(super) async fn write_tool_policy(company: AdminScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
+
+    pub(super) async fn reset_tool_policy(company: AdminScopedCompany) -> Response {
+        let _ = company;
+        crate::server::ops::not_wired("mcp registry")
+    }
 }
 
 #[cfg(not(feature = "mcp"))]
-use unwired::{connect_server, disconnect_server, entry, install, search, uninstall, update_env};
+use unwired::{
+    connect_server, disconnect_server, entry, install, read_tool_policy, reset_tool_policy, search,
+    uninstall, update_env, write_tool_policy,
+};
 #[cfg(not(feature = "mcp"))]
 pub(super) use unwired::{installs, remove_install};
 

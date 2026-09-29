@@ -243,6 +243,27 @@ export function setCompanyCredentialModel(
   });
 }
 
+/** The host's answer to `POST …/credential/link/start`. */
+export interface CredentialLinkStart {
+  authorizeUrl: string;
+}
+
+/**
+ * Begin a one-click TinyHumans connection. Admin-only; 404 on a host with no hub.
+ *
+ * The returned URL is for the person's **browser**: the hub signs them in
+ * through their provider and shows a consent screen, both on the hub's own
+ * origin with its own address bar visible. In a browser tab that is a
+ * top-level navigation; in the desktop it is handed to the system browser and
+ * the host finishes the grant itself on its own return route.
+ */
+export function startCredentialLink(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<CredentialLinkStart> {
+  return client.post<CredentialLinkStart>(`${client.scopeFor(company)}/credential/link/start`, {});
+}
+
 /**
  * Finish a connection: hand the host the code the hub returned, and the `state`
  * it started with.

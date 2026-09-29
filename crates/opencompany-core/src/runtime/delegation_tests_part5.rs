@@ -371,9 +371,12 @@ async fn a_tracked_instruction_still_delegates_under_a_claim() {
         "the hand-off, the desk turn and the relay all ran: {:?}",
         turns.calls()
     );
-    // Stand-down intact: the handler's card is the card, and this path,
-    // finding none on the board, opens none either (issue #463).
-    assert!(fx.cards().await.is_empty(), "no second card");
+    // The hand-off opens its own card — the one card for this message, since
+    // the chat handler no longer cards on the triage (the board is a tool
+    // call), and this hand-off IS the tool call.
+    let cards = fx.cards().await;
+    assert_eq!(cards.len(), 1, "one hand-off, one card: {cards:?}");
+    assert_eq!(cards[0].assignee, "engineer");
 }
 
 /// The third card path (issue #442 path one), which a triage layer looking
@@ -482,16 +485,10 @@ async fn a_desk_lead_hands_a_slice_to_the_teammate_the_operator_named() {
         cards.iter().any(|c| c.assignee == "seo_specialist"),
         "the hand-off must open a card owned by whoever actually did it: {cards:?}"
     );
-    // TWO cards, and that is the seam's existing shape rather than something
-    // #884 introduces: a desk lead asked directly gets a
-    // `open_direct_work_card` for the operator's own message (#442 path
-    // one), and the hand-off opens its own on top. The pre-#884 lead could
-    // not hand off at all, so this pairing is newly *reachable* — worth
-    // knowing, but it is the same rule the desk form has always followed.
-    assert!(
-        cards.iter().any(|c| c.assignee == "brand_strategist"),
-        "the lead's own direct card is unchanged: {cards:?}"
-    );
+    // ONE card: the hand-off's. A desk lead asked directly opens nothing for
+    // the operator's own message any more — tracking is its own tool call —
+    // so the specialist's card is the only one this exchange leaves.
+    assert_eq!(cards.len(), 1, "{cards:?}");
 }
 
 /// A teammate removed from the roster between the tool call and the drain

@@ -23,6 +23,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
     .expect("manifest");
     crate::store::FsCompanyStore::new(home.to_path_buf())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -290,6 +291,7 @@ async fn state_with_failing_secrets(home: &std::path::Path, refuse: &'static str
     .expect("manifest");
     crate::store::FsCompanyStore::new(home.to_path_buf())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

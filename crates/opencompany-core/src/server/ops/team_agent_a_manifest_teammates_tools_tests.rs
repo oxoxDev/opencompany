@@ -379,6 +379,7 @@ async fn a_turn_with_an_unreadable_message_still_answers() {
 #[test]
 fn the_grounding_is_this_teammate_and_its_neighbours() {
     let mut record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -472,6 +473,7 @@ fn the_grounding_is_this_teammate_and_its_neighbours() {
 /// nothing else from a running host.
 fn ceo_record() -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

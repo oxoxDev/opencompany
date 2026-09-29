@@ -27,24 +27,20 @@ fn an_out_of_allowlist_desk_is_refused_with_the_permitted_set() {
     );
 }
 
-/// `"*"` admits every desk; an empty allowlist admits none (fail-closed —
-/// though the tool is never wired in that state).
+/// `"*"` admits every desk, and so does an empty allowlist — the default for
+/// an agent whose manifest entry says nothing, which now carries the tool.
 #[test]
-fn the_wildcard_admits_every_desk_and_an_empty_allowlist_admits_none() {
+fn the_wildcard_and_an_empty_allowlist_both_admit_every_desk() {
     let record = record();
-    let wildcard = vec!["*".to_string()];
-    for desk in ["engineering", "content", "legal"] {
-        assert_eq!(
-            reject_out_of_allowlist_target(&record, &wildcard, desk),
-            None,
-            "`*` must admit {desk}"
-        );
+    for allowed in [vec!["*".to_string()], Vec::new()] {
+        for desk in ["engineering", "content", "legal"] {
+            assert_eq!(
+                reject_out_of_allowlist_target(&record, &allowed, desk),
+                None,
+                "{allowed:?} must admit {desk}"
+            );
+        }
     }
-    let message = reject_out_of_allowlist_target(&record, &[], "content").expect("rejected");
-    assert!(
-        message.contains("no other desk"),
-        "an empty allowlist must say so rather than offer an empty list: {message}"
-    );
 }
 
 #[test]

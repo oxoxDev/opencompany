@@ -19,6 +19,7 @@ fn projects_task_id_only_when_the_event_is_correlated() {
         agent_id: "ceo".into(),
         text: "on it".into(),
         steps: Vec::new(),
+        episode: None,
     }))
     .expect("agent_reply is an attention signal");
     assert_eq!(reply["taskId"], serde_json::json!("t-1"));

@@ -3,6 +3,9 @@ use serde_json::json;
 
 use super::inference_test_support::*;
 use super::*;
+use crate::ports::types::CompanyId;
+use crate::runtime::RuntimeBuilder;
+use crate::{AppConfig, AppState};
 
 #[tokio::test]
 async fn a_managed_manifest_also_inherits_the_platform_url() {
@@ -196,25 +199,112 @@ async fn harness_only_inference_reports_the_harness_provider_for_status_and_prob
     assert_ne!(body["code"], "not_configured");
 }
 
-#[cfg(feature = "openhuman")]
-#[test]
-fn platform_default_follows_the_injected_inference_url() {
-    use crate::app::config::MapEnv;
-
-    let env = MapEnv::new([
-        ("TINYHUMANS_API_KEY", "platform-key"),
-        ("OPENCOMPANY_INFERENCE_URL", STAGING_URL),
-    ]);
-    assert_eq!(
-        platform_default(&env).map(|d| d.base_url),
-        Some(STAGING_URL.to_string())
+/// The desktop pointed at staging: no instance credential in the
+/// environment, a company account key minted on staging, `api_url` on
+/// staging. Every managed surface must say staging — the LLM page's
+/// endpoint, the managed card, and the endpoint a turn would actually be
+/// sent to. Before the platform default followed `api_url` on its own,
+/// each of these fell back to the production constant the moment the
+/// environment held no `TINYHUMANS_API_KEY`, so the key was presented to
+/// a platform that had never issued it.
+#[tokio::test]
+async fn a_company_key_on_a_staging_host_is_presented_to_staging() {
+    const STAGING_API: &str = "https://staging-api.tinyhumans.ai";
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    save_record(&home, &id, &manifest()).await;
+    let config = AppConfig {
+        api_url: STAGING_API.to_string(),
+        ..AppConfig::default()
+    };
+    // Through `attach`, as `serve` and the desktop build their runtimes —
+    // that is where the host's `api_url` becomes the runtime's default.
+    let builder = crate::app::harness::attach(
+        RuntimeBuilder::new(home.clone(), manifest()).with_id(id.clone()),
+        &config,
     );
+    let runtime = builder.build().await.unwrap();
+    let state = AppState::new(config);
+    state
+        .registry()
+        .insert(id.clone(), std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
 
-    // A URL with no credential resolves to nothing — the same answer the
-    // harness gives, so the card never advertises an endpoint that would
-    // route nowhere.
-    let bare = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", STAGING_URL)]);
-    assert!(platform_default(&bare).is_none());
+    let expected = format!("{STAGING_API}/agent-integrations/openrouter");
+
+    // Nothing configured yet: the managed card already names the platform
+    // this host is on, not production.
+    let (status, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dto["managed"]["baseUrl"], expected, "{dto}");
+    assert_eq!(dto["managed"]["configured"], false, "{dto}");
+
+    // The company's own account key: what the desktop stores.
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "tiny_test_minted_on_staging" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dto["baseUrl"], expected, "{dto}");
+    assert_eq!(dto["managed"]["baseUrl"], expected, "{dto}");
+    assert_eq!(dto["managed"]["configured"], true, "{dto}");
+
+    // And the declaration a turn resolves — the same resolver the brain
+    // was built on — carries the same endpoint and the company key.
+    let runtime = state.registry().get(&id).unwrap();
+    let (manifest, _) = manifest_inference(&runtime).await.unwrap();
+    let decl = resolve_effective(
+        runtime.id(),
+        &manifest,
+        runtime.platform_default(),
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .unwrap()
+    .expect("a company key resolves managed inference");
+    assert_eq!(decl.base_url, expected);
+    assert!(decl.credential().configured());
+}
+
+/// A host with no instance credential and no company key still has a
+/// platform default — the endpoint — but it must not be mistaken for a
+/// source: nothing resolves, the company stays on the echo brain, and the
+/// card reports Managed unconfigured.
+#[tokio::test]
+async fn an_endpoint_without_a_credential_is_not_a_source() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    save_record(&home, &id, &manifest()).await;
+    let config = AppConfig::default();
+    let runtime = crate::app::harness::attach(
+        RuntimeBuilder::new(home.clone(), manifest()).with_id(id.clone()),
+        &config,
+    )
+    .build()
+    .await
+    .unwrap();
+    assert!(
+        runtime.platform_default().is_some(),
+        "every attached runtime carries the platform endpoint"
+    );
+    let (manifest, _) = manifest_inference(&runtime).await.unwrap();
+    let decl = resolve_effective(
+        runtime.id(),
+        &manifest,
+        runtime.platform_default(),
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .unwrap();
+    assert!(decl.is_none(), "an endpoint alone routes nowhere: {decl:?}");
 }
 
 #[tokio::test]

@@ -70,10 +70,10 @@ export function useCrossingRunning(rowId: string | undefined): boolean {
 /**
  * The crossing a desk is waiting on, for the surface that draws the desk.
  *
- * A hive desk renders its own deliberation header rather than the timeline's
- * working row, so that header is where a crossing has to say it is happening —
- * otherwise a room shows "turn 3 of 12" and nothing else while two of its seats
- * spend several model turns talking (#2341 live report).
+ * A desk answering as a room shows its round band rather than the timeline's
+ * working row, so the band is where a crossing has to say it is happening —
+ * otherwise a room shows its lanes and nothing else while a seat spends a
+ * model turn asking another desk (#2341 live report).
  */
 export function useDeskCrossing(deskId: string | undefined): ReferralWorking | undefined {
   const { byDesk } = useContext(RunningCrossings);

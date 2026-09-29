@@ -22,6 +22,7 @@ async fn a_post_rename_sync_failure_does_not_roll_the_manifest_back() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record_named = |name: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -94,6 +95,7 @@ async fn a_first_commit_sync_failure_still_lands_the_paired_metadata() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |name: &str, lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -174,6 +176,7 @@ async fn cancelling_a_save_during_the_first_commit_does_not_orphan_the_second() 
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |name: &str, lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -287,6 +290,7 @@ async fn abort_then_concurrent_update_does_not_race_the_orphaned_commit() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |name: &str, lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),
@@ -433,6 +437,7 @@ async fn a_racing_load_does_not_lose_an_orphaned_commits_update() {
     let bundle = Bundle::new(root.clone(), &id);
 
     let record = |name: &str, lifecycle: &str| CompanyRecord {
+        general_channel: Default::default(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         overlay_desk_hive: Vec::new(),

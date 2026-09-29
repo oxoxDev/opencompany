@@ -90,9 +90,9 @@ async function click(testId: string) {
 }
 
 /**
- * Gets past step 0 onto the model step, and is a no-op once already there.
+ * Gets past step 0 onto step 1, and is a no-op once already there.
  *
- * The flow opens on the setup-way choice, and the provider picker sits behind
+ * The flow opens on the setup-way choice, and step 1 sits behind
  * "Set it up yourself" — so a walk starting at the model step answers that
  * first, while one that has navigated back to it must not answer it again.
  */
@@ -103,23 +103,27 @@ async function chooseSelfManaged() {
 }
 
 /**
- * Answers the model step with "No model".
- *
- * The escape used to be a link under the step (`setup-skip-model`); it is the
- * provider picker's last option now, and the picker is a base-ui `Select`
- * whose popup portals onto `document.body` and does not exist until the
- * trigger opens it.
+ * Gets onto the managed step 1, which is where a credential is still typed and
+ * proved — the self-managed branch stages a provider instead.
  */
-async function skipModel() {
+async function connectManaged() {
+  await click("setup-way-managed");
+  await next();
+  await fill("setup-field-key", "th-not-a-real-key");
+  await click("setup-test-connection");
+}
+
+/**
+ * Gets past step 1 without connecting anything.
+ *
+ * The self-managed branch's step 1 is the real add-provider sequence now, and
+ * both of its connections are optional — so leaving it unanswered is the whole
+ * of skipping it, and Next is not gated. This presses the "set this up later"
+ * affordance rather than choosing a "No model" the step no longer offers.
+ */
+async function skipConnect() {
   await chooseSelfManaged();
-  await click("setup-provider-select");
-  const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
-    | HTMLElement
-    | null;
-  expect(none, "no No-model option").toBeTruthy();
-  await act(async () => {
-    none!.click();
-  });
+  await click("setup-provider-later");
 }
 
 function labelled(...wanted: string[]): HTMLButtonElement {
@@ -164,7 +168,7 @@ async function fill(testId: string, value: string) {
 
 /** model (skipped) -> business (answered) -> sign-in. */
 async function goToSignIn() {
-  await skipModel();
+  await skipConnect();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in
@@ -305,7 +309,7 @@ describe("the position survives the list changing under it", () => {
 describe("the questions a modelless run does not ask", () => {
   it("asks only what kind of company it is when there is no model", async () => {
     await show(clientWith(status()));
-    await skipModel();
+    await skipConnect();
     await next(); // -> business
 
     expect(find("setup-field-industry"), "the one question that still counts").toBeTruthy();
@@ -314,8 +318,8 @@ describe("the questions a modelless run does not ask", () => {
   });
 
   it("asks all three once a model answers for them", async () => {
-    // A passing test on the model step is what makes the design brief real, so
-    // this client has to answer the probe rather than the apply.
+    // A passing test on step 1 is what makes the design brief real, so this
+    // client has to answer the probe rather than the apply.
     const client = {
       scopeFor: () => "/api/v1/company",
       get: async () => status(),
@@ -325,9 +329,7 @@ describe("the questions a modelless run does not ask", () => {
           : { complete: true, config_path: "/data/config.toml", restart_required: [] },
     } as unknown as OpenCompanyClient;
     await show(client);
-    await chooseSelfManaged();
-    await fill("setup-field-key", "sk-works");
-    await click("setup-test-connection");
+    await connectManaged();
     await next(); // -> business
 
     expect(find("setup-field-industry")).toBeTruthy();
@@ -376,7 +378,7 @@ describe("what a modelless run asks the host for", () => {
 
   it("asks for the curated team outright, rather than by saying nothing", async () => {
     const body = await rosterRequestFrom(async () => {
-      await skipModel();
+      await skipConnect();
       await next(); // -> business
       await fill("setup-field-industry", "E-commerce — homeware");
       await next(); // -> sign-in
@@ -390,16 +392,16 @@ describe("what a modelless run asks the host for", () => {
   it("sends neither half of the design brief once there is no model to read it", async () => {
     const body = await rosterRequestFrom(async () => {
       // Answered first, then taken back: the drafts survive in state, and must
-      // not steer the curated pick they are no longer an answer to.
-      await chooseSelfManaged();
-      await fill("setup-field-key", "sk-works");
-      await click("setup-test-connection");
+      // not steer the curated pick they are no longer an answer to. Taking it
+      // back is now switching the way, which throws the verdict away.
+      await connectManaged();
       await next(); // -> business, with a model
       await fill("setup-field-industry", "E-commerce — homeware");
       await fill("setup-field-automate", "Meta ads, order dispatch");
       await fill("setup-field-teamHint", "someone chasing invoices");
-      await back(); // -> model
-      await skipModel();
+      await back(); // -> step 1
+      await back(); // -> the way
+      await skipConnect();
       await next(); // -> business
       await next(); // -> sign-in
       await click("auth-mode-none");
@@ -412,13 +414,11 @@ describe("what a modelless run asks the host for", () => {
   });
 
   it("does not submit a roster designed under an answer that has since changed", async () => {
-    // A model designed one, the operator went back and chose No model. The
+    // A model designed one, the operator went back and connected nothing. The
     // wizard designs only when it holds none, so the old one would otherwise
     // ride through Review under copy promising a standard team.
     const body = await rosterRequestFrom(async () => {
-      await chooseSelfManaged();
-      await fill("setup-field-key", "sk-works");
-      await click("setup-test-connection");
+      await connectManaged();
       await next(); // -> business
       await fill("setup-field-industry", "E-commerce — homeware");
       await next(); // -> sign-in
@@ -426,8 +426,9 @@ describe("what a modelless run asks the host for", () => {
       await next(); // -> review, designs with the model
       await back(); // -> sign-in
       await back(); // -> business
-      await back(); // -> model
-      await skipModel();
+      await back(); // -> step 1
+      await back(); // -> the way
+      await skipConnect();
       await next(); // -> business
       await next(); // -> sign-in
       await next(); // -> review, must design again
@@ -440,14 +441,14 @@ describe("what a modelless run asks the host for", () => {
 /**
  * A verdict is only true of the answers it was asked with.
  *
- * The picker stays live while a test is in flight, so an answer can land after
- * the operator has moved on. Selecting "No model" mid-test is the case that
- * bites: the settled `skipped` would be overwritten by an `ok`, putting the
- * design questions back and submitting the previous provider's connection data
- * under the pseudo-provider `none`, which the host does not know.
+ * The key field stays live while a test is in flight, so an answer can land
+ * after the operator has changed the thing it was asked about. Clearing the
+ * field mid-test is the case that bites: a late `ok` would release the step on
+ * a credential nobody supplied, and submit an empty one as the company's
+ * account key.
  */
 describe("a connection verdict that arrives after the question changed", () => {
-  it("is discarded when the operator has since chosen No model", async () => {
+  it("is discarded when the key it was asked about has been cleared", async () => {
     let release!: (value: unknown) => void;
     const inFlight = new Promise((resolve) => {
       release = resolve;
@@ -462,20 +463,17 @@ describe("a connection verdict that arrives after the question changed", () => {
     } as unknown as OpenCompanyClient;
 
     await show(client);
-    await chooseSelfManaged();
-    await fill("setup-field-key", "sk-works");
-    await click("setup-test-connection"); // in flight, unresolved
-    await skipModel();
+    await connectManaged(); // in flight, unresolved
+    await fill("setup-field-key", "");
 
-    // The late answer, for a provider that is no longer selected.
+    // The late answer, for a key that is no longer in the field.
     await act(async () => {
       release({ ok: true, baseUrl: "https://api.example/v1", model: "m" });
       await inFlight;
     });
 
-    // Still modelless: no key field came back, and the step still says so.
-    expect(find("setup-skipped"), "the No-model state should have survived").toBeTruthy();
-    expect(find("setup-field-key")).toBeNull();
-    expect(find("setup-test-connection")).toBeNull();
+    expect(find("setup-test-ok"), "a verdict about a cleared key must not land").toBeNull();
+    await next();
+    expect(find("setup-problem"), "and the step must still be held").toBeTruthy();
   });
 });

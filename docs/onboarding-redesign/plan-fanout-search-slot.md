@@ -17,7 +17,7 @@ after that check.
 `company_key/types.rs`'s `Slot` enum (`Composio, Inference, Provider,
 Default, Health`, `:22-28`) gains a `Search` variant. `fan_out.rs`'s write
 path gains a matching arm that stores `search/managed/key` the same way it
-stores `composio/managed/key` and `provider/tinyhumans/key` today — same
+stores `composio/tinyhumans/key` and `provider/tinyhumans/key` today — same
 "never overwrite a slot that already holds its own key" guard, no new
 priority system. `search/resolve.rs`'s `active()` gains a check for the
 company's `search/managed/key` before it falls through to the bare

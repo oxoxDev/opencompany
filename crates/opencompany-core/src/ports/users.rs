@@ -279,25 +279,28 @@ pub fn normalize_email(raw: &str) -> String {
     raw.trim().to_lowercase()
 }
 
-/// Whether `raw` is usable as a `[users].admins` entry.
+/// Whether `raw` is usable as a login — a `[users].admins` entry, or the
+/// address the first admin claims.
 ///
-/// The one definition, so the manifest validator and the first-run wizard cannot
-/// disagree about which addresses are acceptable. Pinned by
+/// The one definition, so the manifest validator, the first-run wizard and the
+/// claim route cannot disagree about which logins are acceptable. Pinned by
 /// `tests/fixtures/setup-admin-email.json`, which the console's own test reads —
 /// the console cannot call this, so a fixture is what keeps its
 /// re-implementation honest.
 ///
 /// Deliberately loose. It is not a mail-server-grade check and must not become
-/// one: the demand is only that the entry survives [`normalize_email`] as
-/// something [`LoginIdentity::parse`] reads as a mailbox. An entry with no `@`
-/// normalizes to a bare word, which parses as the `none`-mode **local owner**
-/// identity rather than the email admin it was meant to be — a bootstrapped user
-/// stored under that key is then a different principal than the manifest author
-/// intended. A stricter rule would reject addresses this host accepts everywhere
-/// else, which is its own bug.
+/// one, and it does **not** demand an `@`: on a host with no mail transport the
+/// login is a username, not a mailbox, and there is nothing to send to. The
+/// demands are only that the entry survives [`normalize_email`] as something
+/// non-empty with no whitespace inside it, and that [`LoginIdentity::parse`]
+/// reads it as an email rather than as the `wallet:` or `local:` scheme — an
+/// entry that normalized to `local:owner` would be stored under the `none`-mode
+/// local owner's own key and become a different principal than the one meant.
 pub fn is_usable_admin_email(raw: &str) -> bool {
     let normalized = normalize_email(raw);
-    !normalized.is_empty() && normalized.contains('@')
+    !normalized.is_empty()
+        && !normalized.chars().any(char::is_whitespace)
+        && matches!(LoginIdentity::parse(&normalized), LoginIdentity::Email(_))
 }
 
 /// The scheme prefix marking a [`LoginIdentity::Wallet`] key.
@@ -392,11 +395,12 @@ impl LoginIdentity {
     /// Mail paths must ask for an address through this rather than reading
     /// [`UserRecord::email`] directly: the column is an identity key, and a
     /// `wallet:7xKX…` handed to an SMTP transport is a bug that only shows up in
-    /// a bounce log.
+    /// a bounce log. An email identity with no `@` is a plain username — a
+    /// login on a host with no mail — and has no mailbox either.
     pub fn mailbox(&self) -> Option<&str> {
         match self {
-            Self::Email(address) => Some(address),
-            Self::Wallet(_) | Self::Local => None,
+            Self::Email(address) if address.contains('@') => Some(address),
+            Self::Email(_) | Self::Wallet(_) | Self::Local => None,
         }
     }
 

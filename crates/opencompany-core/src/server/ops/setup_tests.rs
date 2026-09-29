@@ -28,6 +28,7 @@ async fn state_with(home: &std::path::Path, company: &str) -> AppState {
     let id = CompanyId::new(company);
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),

@@ -5,8 +5,11 @@ single-pass cognition seam that turns an `OperatorMessage` into one channel
 response, with no network and no vendored-crate dependency. It keeps the whole
 kernel pipeline testable on the default build.
 
-`EchoBrain` is the Phase-1 stand-in for the hosted `HostedMedullaBrain` and the
-TinyAgents-backed `StubBrain` (feature `tiny`); see
+`EchoBrain` is the offline stand-in for the embedded harness brain
+(`harness::built_in::brain::HarnessBrain`, feature `openhuman`, whose chat
+cycle is `hive::dispatch` — see
+[`docs/modules/hive/README.md`](../hive/README.md)) and the hosted
+`HostedMedullaBrain`; see
 [`docs/spec/runtime/ports-cognition.md`](../../spec/runtime/ports-cognition.md)
 and
 [`docs/spec/integrations/medulla.md`](../../spec/integrations/medulla.md).

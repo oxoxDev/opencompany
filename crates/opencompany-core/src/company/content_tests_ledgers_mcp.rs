@@ -222,10 +222,13 @@ const SETUP_SEEDED_COMPANIES: [&str; 24] = [
 /// and `openhuman_demo` also declare their own `[[mcp_server]]` inline — so
 /// seeded cards and a second declaration of `deepwiki` would both perturb what
 /// they exist to pin down.
-const FIXTURE_COMPANIES: [&str; 4] = [
+const FIXTURE_COMPANIES: [&str; 5] = [
     "e2e_harness",
     "e2e_setup",
     "openhuman_demo",
+    // The hive-desks measurement fixture: `openhuman_demo` with one agent on
+    // two desks, asserted against exactly by `scripts/measure-coordination.*`.
+    "hive_demo",
     // A benchmark fixture: it proves a mechanism and is asserted against
     // exactly, by tau2's own `evaluation_criteria`. Seeded cards would be
     // work nobody asked for sitting in a company whose only job is to answer

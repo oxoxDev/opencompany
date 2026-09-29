@@ -162,6 +162,19 @@ impl AgentRunGql {
         self.record.node_id.clone().map(ID)
     }
 
+    /// The desk episode this attempt is a seat turn of (plan hive-desks), or
+    /// null for a card dispatch, a workflow node and an ordinary chat turn.
+    async fn episode_id(&self) -> Option<ID> {
+        self.record.episode_id.clone().map(ID)
+    }
+
+    /// The round revision inside that episode (raw, 0-based).
+    async fn round_revision(&self) -> Option<i32> {
+        self.record
+            .round_revision
+            .and_then(|revision| i32::try_from(revision).ok())
+    }
+
     /// When the row was opened.
     async fn created_at_millis(&self) -> f64 {
         self.record.created_at_millis as f64

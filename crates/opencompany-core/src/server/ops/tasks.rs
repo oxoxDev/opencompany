@@ -940,7 +940,7 @@ pub(crate) struct TimelineEntry {
     /// Epoch-millis the event was journaled.
     pub(crate) at_millis: u64,
     /// A stable wire word for what happened: `dispatched`, `reply`,
-    /// `tool_failed`, `approval`, or `completed`.
+    /// `tool_failed`, `approval`, `completed`, or `card`.
     pub(crate) kind: String,
     /// A short human label.
     pub(crate) label: String,
@@ -2143,6 +2143,17 @@ fn fold_page(
                     None,
                 ))
             }
+            CompanyEvent::TaskCardChanged {
+                task_id: id,
+                change,
+                column,
+            } if id == task_id => {
+                let label = match column {
+                    Some(column) => format!("Card {change} → {column}"),
+                    None => format!("Card {change}"),
+                };
+                Some(("card", label, None, None))
+            }
             // Id-correlated (#333), falling back to the window only for an
             // park that recorded neither key — see `approval_owner`.
             // The operator's identity is deliberately dropped: it can carry a
@@ -2649,6 +2660,10 @@ async fn steer_task(
 #[cfg(test)]
 #[path = "tasks_durations_tests.rs"]
 mod durations_test;
+
+#[cfg(test)]
+#[path = "tasks_card_timeline_tests.rs"]
+mod card_timeline_test;
 
 /// The redirect bound at the route boundary: an operator who typed too much is
 /// told so, and one who typed exactly the limit gets every character through.

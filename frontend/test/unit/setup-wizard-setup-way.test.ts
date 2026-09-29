@@ -205,21 +205,26 @@ describe("the setup-way choice", () => {
     ]);
 
     await next();
-    expect(find("setup-provider-select"), "the press should have reached step 1").toBeTruthy();
+    // The self-managed step-1 is Connections → LLM's own add-provider
+    // sequence, so what lands is its entry point rather than a picker of the
+    // wizard's own.
+    expect(find("setup-add-provider"), "the press should have reached step 1").toBeTruthy();
   });
 
   it("does not carry one branch's credential into the other", async () => {
-    // Back to step 0 and over to the other way. A key typed against one branch
-    // would otherwise be presented to the other, under a verdict earned
-    // somewhere else — the same invalidation a provider change already does.
+    // Out through the other way and back. A key typed against one branch would
+    // otherwise be presented to it again under a verdict that was thrown away
+    // in between — and the step would release on a tick nobody re-earned.
     await show(clientWith(status()));
-    await click("setup-way-self-managed");
+    await click("setup-way-managed");
     await next();
     await fill("setup-field-key", "th-not-a-real-key");
     await click("setup-test-connection");
     await settle();
     expect(find("setup-test-ok"), "the key should have passed").toBeTruthy();
 
+    await back();
+    await click("setup-way-self-managed");
     await back();
     await click("setup-way-managed");
     await next();
@@ -231,23 +236,24 @@ describe("the setup-way choice", () => {
   });
 
   it("ignores a connection test that settles after the way has changed", async () => {
-    // The test is asked under Self-managed, the operator backs out and picks
-    // Managed before it settles, and only then does the response arrive. The
-    // verdict is about a branch the operator already left, so it must not
-    // apply to the one they are on now.
+    // The test is asked under Managed, the operator backs out and picks Set it
+    // up yourself before it settles, and only then does the response arrive.
+    // The verdict is about a branch the operator already left, so it must not
+    // apply to the one they are on now — and the step's own staleness rule
+    // cannot catch this, because switching away unmounts the step with exactly
+    // the answers the test was asked with.
     let resolveTest!: (value: unknown) => void;
     const pending = new Promise((resolve) => {
       resolveTest = resolve;
     });
     await show(clientWith(status(), () => pending));
-    await click("setup-way-self-managed");
+    await click("setup-way-managed");
     await next();
     await fill("setup-field-key", "th-not-a-real-key");
     await click("setup-test-connection");
 
     await back();
-    await click("setup-way-managed");
-    await next();
+    await click("setup-way-self-managed");
 
     await act(async () => {
       resolveTest({ ok: true, baseUrl: "https://api.example/v1", model: "m" });
@@ -255,10 +261,17 @@ describe("the setup-way choice", () => {
     });
     await settle();
 
+    // Read off the consequence rather than the verdict, because the verdict is
+    // not on screen here: a live `ok` would mean this branch believes it has a
+    // model, and the Business step would ask for the design brief that only a
+    // model reads — from an operator who has connected nothing.
+    await next(); // -> step 1, nothing connected
+    await next(); // -> business
     expect(
-      find("setup-test-ok"),
+      find("setup-field-automate"),
       "a verdict asked under the abandoned branch must not land on this one",
     ).toBeNull();
+    expect(find("setup-field-teamHint")).toBeNull();
   });
 });
 
@@ -276,7 +289,7 @@ describe("a host the managed way cannot be completed on", () => {
       "step-account",
       "step-review",
     ]);
-    expect(find("setup-provider-select"), "it opens on step 1 instead").toBeTruthy();
+    expect(find("setup-add-provider"), "it opens on step 1 instead").toBeTruthy();
   });
 
   it("is offered it when the host will take a key", async () => {
@@ -304,7 +317,7 @@ describe("an instance that has already been configured", () => {
       "step-account",
       "step-review",
     ]);
-    expect(find("setup-provider-select"), "the model step is still reachable").toBeTruthy();
+    expect(find("setup-add-provider"), "step 1 is still reachable").toBeTruthy();
   });
 });
 

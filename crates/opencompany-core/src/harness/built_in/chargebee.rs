@@ -117,8 +117,8 @@ mod live {
         CreateCustomerArgs, GetCustomerArgs, GetInvoiceArgs, ListInvoicesArgs, SendInvoiceArgs,
     };
 
-    use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core as oh;
+    use tinytools::{PermissionLevel, Tool, ToolResult};
 
     /// Builds the five per-tenant Chargebee tools over a resolved connection.
     pub fn chargebee_tools(config: &TenantChargebee) -> Vec<Box<dyn Tool>> {

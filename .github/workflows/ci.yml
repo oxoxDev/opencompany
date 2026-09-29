@@ -111,6 +111,9 @@ permissions:
 # read `CARGO_*` only where they invoke cargo, so the value is inert elsewhere.
 env:
   CARGO_INCREMENTAL: "0"
+  # The console bundle defaults to the TinyHumans Sentry project when this is
+  # empty (`frontend/src/lib/crash-reporting.ts`); CI builds must not report.
+  VITE_SENTRY_DSN: "off"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 # Issue #251. Every cargo invocation below that resolves a dependency graph
@@ -267,11 +270,6 @@ jobs:
               # Same reasoning for the release-notes generator and its test,
               # which also run in `Console`.
               - 'scripts/release/**'
-              # And for the staging deploy. No filter listed this file at all,
-              # so a PR editing it selected no lane and ran nothing — while the
-              # gate inside it is the one thing a failed deploy on main is
-              # reported by. `test-tenant-landed-gate.sh` runs in `Console`.
-              - '.github/workflows/deploy-staging.yml'
             desktop:
               - '.github/workflows/ci.yml'
               - 'crates/opencompany-app/**'
@@ -533,7 +531,7 @@ jobs:
       # toolchain: `deploy-staging.yml` sets `submodules: false` and names its
       # vendored checkouts by hand, and it does not run on pull requests — so a
       # vendored path dependency missing from that list is green here and fails
-      # only on deploy. Cargo reads every path dependency's manifest during
+      # only on the post-merge image build. Cargo reads every path dependency's manifest during
       # resolution whatever the feature selection, so the break is the default
       # build, not the feature that added the crate.
       - name: Assert vendored path dependencies are checked out
@@ -685,15 +683,6 @@ jobs:
       # tree.
       - name: Test the export bundle
         run: scripts/ci/run-scoped-suite.sh "export bundle" export store::export
-
-      # `hivemind`: the `tinyhivemind` session adapter (`runtime::hivemind`).
-      # The feature gates one module and its tests, and nothing on the default
-      # path enables it — which is exactly the shape #770 was filed about, so it
-      # gets its lane in the same breath as the code rather than after somebody
-      # notices. Offline and dependency-free at this job's expense: the crate is
-      # already vendored and pure, so this costs one recompile of the lib.
-      - name: Test the hivemind session adapter
-        run: scripts/ci/run-scoped-suite.sh "hivemind adapter" hivemind runtime::hivemind
 
       # `imap`/`smtp`: the mail surface. One gated test runs here today — the
       # RFC822 parser — and it is a parser, which is precisely the kind of code
@@ -1160,16 +1149,31 @@ jobs:
       # process (the hazard the `[patch]` comment in the root `Cargo.toml` records). `-d` prints
       # duplicate versions of a package; any `tinymemory` line in that report
       # is the failure.
-      - name: Assert no duplicated tinymemory crates
+      #
+      # Widened to the whole OpenHuman family with the hive-desks work:
+      # `tinyhivemind-openhuman` names `openhuman-embed` by git URL and the root
+      # `[patch."https://github.com/tinyhumansai/openhuman"]` redirects it onto
+      # `vendor/openhuman`. If the tinyhivemind `rev` and our gitlink drift, or
+      # the patch entry is lost, cargo resolves a SECOND OpenHuman tree from the
+      # git source — two `openhuman_embed::Agent` types, two `RUNTIME_LIVE`
+      # flags — and this is the only place that reads as a failure rather
+      # than a confusing type mismatch three crates away.
+      - name: Assert no duplicated OpenHuman-family crates
         run: |
           # Two separate failures, checked separately: a broken resolve must
           # fail loudly, not read as "no duplicates" through an empty pipe.
-          if ! report="$(cargo tree --locked -p opencompany-core -e normal --features openhuman,tinymemory -d)"; then
+          if ! report="$(cargo tree --locked -p opencompany-core -e normal --features openhuman,mcp,tinymemory -d)"; then
             echo "::error::cargo tree failed to resolve the graph"
             exit 1
           fi
-          if grep -E "^tinymemory" <<< "$report"; then
-            echo "::error::duplicated tinymemory-* package in the resolve graph"
+          if grep -E "^(openhuman|tinymcp|tinyagents|tinyinference|tinymemory|tinyflows|tinybus)" <<< "$report"; then
+            echo "::error::duplicated OpenHuman-family package in the resolve graph"
+            exit 1
+          fi
+          # A git-sourced OpenHuman package means the patch did not apply.
+          if cargo metadata --locked --format-version 1 \
+              | jq -e '[.packages[] | select(.source != null and (.source | test("github.com/tinyhumansai/openhuman")))] | length > 0' >/dev/null; then
+            echo "::error::an OpenHuman package resolved from its git source instead of vendor/openhuman"
             exit 1
           fi
 
@@ -1249,6 +1253,7 @@ jobs:
         run: |
           scripts/ci/run-scoped-suite.sh "acp server" acp,runner,tinymemory server::acp
           scripts/ci/run-scoped-suite.sh "acp run turn" acp,runner,tinymemory harness::acp::run_turn
+          scripts/ci/run-scoped-suite.sh "acp lanes" acp,runner,tinymemory harness::lanes
 
       # Issue #788: Chargebee billing — the REST layer (`chargebee::`) and the
       # toolbelt bridge (`harness::chargebee`) in one filter, which selects both.
@@ -1395,6 +1400,20 @@ jobs:
       # `run-scoped-suite.sh` takes exactly one filter.
       - name: Test the MCP OAuth flow state
         run: scripts/ci/run-scoped-suite.sh "mcp oauth state" openhuman,mcp,media app::types
+
+      # Plan hive-desks, Phase 3. The `opencompany` MCP server the company
+      # agents speak and reach OpenCompany's tools on: `hive::mcp_server` boots
+      # it on a loopback port and drives it with `tinymcp::McpHttpClient` — the
+      # client OpenHuman itself uses — asserting the bearer gate, the one-action
+      # attribution rule, the refused `dm` wire shape the console's mock brain
+      # matches, and the approval park. `hive::tools` is the fold under it.
+      # Both are gated on `mcp` (an `AgentSpec::mcp` exists only there) and no
+      # other lane's filter reaches `hive::`, so each needs its own invocation.
+      - name: Test the hive MCP server
+        run: scripts/ci/run-scoped-suite.sh "hive mcp server" openhuman,mcp,media hive::mcp_server
+
+      - name: Test the hive MCP tool fold
+        run: scripts/ci/run-scoped-suite.sh "hive mcp tools" openhuman,mcp,media hive::tools
 
       # Issue #770. `composio` gated TWENTY-FOUR tests that ran nowhere — the
       # largest single pocket found. `src/harness/composio_catalog.rs` says so in
@@ -1731,6 +1750,13 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
+      # The wizard's provider dialogs come from `inference/`, never from
+      # `search-providers/`. Both directories ship files of those exact names
+      # and the wrong import type-checks, renders and builds — it is simply the
+      # wrong feature. Review alone has already been judged insufficient for
+      # this one; see the script.
+      - run: ./scripts/ci/assert-setup-inference-imports.sh
+
 
       # The release-notes generator, which is otherwise only ever exercised by a
       # `workflow_dispatch` release — the one moment nobody wants to discover a
@@ -1768,18 +1794,6 @@ jobs:
       # a second app added under `frontend/` would not have triggered that lane
       # at all.
       - run: ./scripts/ci/assert-single-tauri-app.sh
-
-      # The tenant landed-state gate in `deploy-staging.yml`, which decides
-      # whether a staging deploy passes or fails. It runs over ssh on the
-      # staging node, only on a push to main, so `main` is the first place a
-      # mistake in it can show — and because it lives inside a quoted heredoc,
-      # `actionlint` and `shellcheck` both read it as literal data. The script
-      # extracts its functions and drives them over kubectl fixtures.
-      #
-      # Rides `Console` for the reason the checks above do: bash and jq, no
-      # toolchain. The `frontend` path filter gains
-      # `.github/workflows/deploy-staging.yml` alongside this step.
-      - run: ./scripts/ci/test-tenant-landed-gate.sh
 
       # Issue #858. `pnpm-lock.yaml`, read by nothing until now.
       #
@@ -1982,7 +1996,7 @@ jobs:
       # data root under `target/e2e/`, and signing in against the harness
       # company. So this is the whole command.
       - name: Run the end-to-end suite
-        run: npm run e2e
+        run: npm run e2e && npm run e2e:analytics
         working-directory: frontend
 
       # A failed browser run is close to undiagnosable from a log alone. The

@@ -66,8 +66,8 @@ case "$PUBKEY" in
       cd frontend && ./node_modules/.bin/tauri signer generate -w ~/.tauri/opencompany.key
 
   Put the PUBLIC key it prints into plugins.updater.pubkey in $CONF, and the
-  PRIVATE key into the TAURI_SIGNING_PRIVATE_KEY repository secret — never into
-  a file in this repository. Full steps, and what to verify afterwards, are in
+  PRIVATE key into the TAURI_SIGNING_PRIVATE_KEY secret of the Production
+  environment — never into a file in this repository. Full steps, and what to verify afterwards, are in
   docs/spec/runtime/desktop-updates.md.
 EOF
     exit 1
@@ -75,7 +75,7 @@ EOF
 esac
 
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-  echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set, so the update artifacts cannot be signed and the release would carry a latest.json nothing can verify. Add it as a repository secret — see docs/spec/runtime/desktop-updates.md." >&2
+  echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set, so the update artifacts cannot be signed and the release would carry a latest.json nothing can verify. Add it as a secret of the Production environment — see docs/spec/runtime/desktop-updates.md." >&2
   exit 1
 fi
 

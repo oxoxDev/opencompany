@@ -127,9 +127,9 @@ pub(super) fn router() -> Router<AppState> {
 /// The type system is the mechanism: a shape that cannot be serialized cannot
 /// be put in a response body by a later edit that reaches for a convenience
 /// derive.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AddProvider {
+pub(crate) struct AddProvider {
     /// The catalogue slug chosen, the CLI option slug, or `custom`.
     kind: String,
     /// The operator's name for a custom provider. Ignored for a catalogue
@@ -223,7 +223,7 @@ struct SetDefault {
 /// A draft probe: an endpoint and a key that are **not stored**.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProbeDraft {
+pub(crate) struct ProbeDraft {
     base_url: String,
     #[serde(default)]
     key: Option<String>,
@@ -300,9 +300,9 @@ struct TestProvider {
 /// to reconcile a partial update against what it already had.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderMutation {
+pub(crate) struct ProviderMutation {
     status: InferenceStatusDto,
-    note: String,
+    pub(crate) note: String,
     /// The probe's verdict, when one was run.
     #[serde(skip_serializing_if = "Option::is_none")]
     probe: Option<ProbeResultDto>,
@@ -490,7 +490,29 @@ async fn add_provider(
     company: AdminScopedCompany,
     Json(body): Json<AddProvider>,
 ) -> Result<Json<ProviderMutation>, ApiError> {
-    let runtime = company.runtime.as_ref();
+    add_provider_inner(&state, company.runtime.as_ref(), body)
+        .await
+        .map(Json)
+}
+
+/// Connecting a provider, with its authority already settled.
+///
+/// The whole of the add: the `tinyhumans` slot guard, decision X1's
+/// first-provider default and its re-validation under `index_lock`,
+/// [`store::check_model_id`], the credential-then-record ordering with its
+/// [`clear_orphaned_key`]/[`restore_previous_key`] rollback pair, the
+/// destructive-class probe rollback, and [`auto_route_sole_provider`].
+///
+/// Split out so first-run setup lands a provider through *this*, rather than
+/// through a `put_provider` plus a secret write that would look equivalent and
+/// silently drop every one of those. The company runtime is the only thing the
+/// handler above contributes, and the extractor that produces it is the only
+/// thing this cannot do for itself.
+pub(crate) async fn add_provider_inner(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+    body: AddProvider,
+) -> Result<ProviderMutation, ApiError> {
     let secrets = runtime.secrets().as_ref();
     let kind = body.kind.trim().to_string();
 
@@ -539,7 +561,7 @@ async fn add_provider(
     let first_provider_ever = if existing.is_empty() {
         let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
         let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
-        let platform = super::platform_default(&crate::app::config::ProcessEnv);
+        let platform = super::platform_default(runtime);
         crate::company::inference::resolve_effective(
             runtime.id(),
             &manifest,
@@ -824,13 +846,13 @@ async fn add_provider(
         note
     };
 
-    Ok(Json(ProviderMutation {
-        status: effective_status(&state, runtime).await?,
+    Ok(ProviderMutation {
+        status: effective_status(state, runtime).await?,
         note,
         probe: probe_dto,
         affected_tiers: routed,
         used_by: None,
-    }))
+    })
 }
 
 /// Routes every workload to a provider that has just been added, **only when
@@ -1081,10 +1103,10 @@ fn plan_add(
         });
     }
     if let Some(cli) = catalogue::cli_login(kind) {
-        // Reachable only if a delegated credential ever becomes available here.
-        // On a server-side host the category is empty and the console says so,
-        // but refusing in the handler is the honest answer rather than storing a
-        // row for a login nothing holds.
+        // Permanent by design, not a placeholder. A CLI login has no key and no
+        // endpoint, so there is nothing a company-level row could hold; the
+        // console offers no add flow for the category, and a teammate binds to
+        // a harness on its own Model tab instead.
         return Err(invalid(format!(
             "{} is a credential held by a command-line tool on someone's own machine. \
              This host cannot reach one.",
@@ -2073,7 +2095,7 @@ async fn test_managed(
 
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
-    let platform = super::platform_default(&crate::app::config::ProcessEnv);
+    let platform = super::platform_default(runtime);
     let inference_key =
         inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
             .await
@@ -2464,7 +2486,19 @@ async fn test_provider(
 /// `AdminScopedCompany` in this signature, and [`probe::check_endpoint`] applied
 /// to the URL **and to every redirect target** inside the probe itself.
 async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) -> Response {
-    let _ = &company;
+    probe_draft_inner(company.runtime.id().as_ref(), body).await
+}
+
+/// The draft probe with its authority already settled, so a second caller under
+/// a different gate reaches the same probe rather than a copy of it.
+///
+/// `scope` names who asked, for the failure log only — the company scope makes
+/// no other difference here, which is what makes a second caller possible at
+/// all. Every refusal this probe owes is about the URL and the credential:
+/// [`catalogue::endpoint_has_credentials`] before the request, and
+/// [`probe::check_endpoint`] on the URL and on every redirect target inside it.
+/// Neither reads a company, and neither is weakened by the caller's gate.
+pub(crate) async fn probe_draft_inner(scope: &str, body: ProbeDraft) -> Response {
     let kind = body.kind.as_deref().unwrap_or("custom");
     // Refused before the request is made, not after. A draft is never stored, so
     // this is not about the store — it is that "probe this URL" would otherwise
@@ -2499,7 +2533,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         .into_response(),
         Err(failure) => {
             tracing::info!(
-                company = %company.runtime.id(),
+                company = %scope,
                 class = failure.class.as_str(),
                 detail = %failure.raw,
                 "draft inference probe failed",

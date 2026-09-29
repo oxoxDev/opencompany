@@ -7,11 +7,10 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalSummary } from "@/api/types";
 import { approvalThreadLink } from "@/components/approval-card";
 import type { DeskDto } from "@/api/types";
-import { GENERAL_CHANNEL } from "@/lib/desks";
-import { MAIN_THREAD_ID } from "@/lib/chat";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { threadsFromDesks } from "@/lib/threads";
-import { buildChannels } from "@/views/room/model";
+import { buildChannels, deskFromDto } from "@/views/room/model";
 
 /**
  * A company with no desks is shown as a company with no desks.
@@ -39,10 +38,10 @@ const FABRICATED = ["Strategy desk", "Creative studio", "Front desk"];
 const NO_MEMBERS: TeamMember[] = [];
 
 describe("a company with no desks (empty /desks answer)", () => {
-  it("gets the main line and nothing else in the chat list", () => {
+  it("gets #general and nothing else in the chat list", () => {
     const threads = threadsFromDesks([]);
 
-    expect(threads.map((t) => t.id)).toEqual([MAIN_THREAD_ID]);
+    expect(threads.map((t) => t.id)).toEqual([GENERAL_CHANNEL_ID]);
     for (const name of FABRICATED) {
       expect(threads.map((t) => t.contact.name)).not.toContain(name);
     }
@@ -58,30 +57,50 @@ describe("a company with no desks (empty /desks answer)", () => {
       },
     ];
 
-    expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([MAIN_THREAD_ID, "engineering"]);
+    expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([
+      GENERAL_CHANNEL_ID,
+      "engineering",
+    ]);
   });
 
-  it("builds a rail of #general and nothing beside it", () => {
-    const channels = buildChannels(NO_MEMBERS, []).flatMap((section) => section.channels);
+  it("lists #general once when the host supplies it", () => {
+    const desks: DeskDto[] = [
+      { id: "engineering", name: "Engineering desk", members: [] },
+      { id: "general", name: "General", kind: "general", members: [], mutable: false },
+    ];
 
-    expect(channels.map((c) => c.id)).toEqual([MAIN_THREAD_ID]);
+    expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([
+      GENERAL_CHANNEL_ID,
+      "engineering",
+    ]);
   });
 
-  it("keeps #general resolvable for an approval raised on the main line", () => {
-    // The empty list is an answer, so the one channel every company has can be
-    // named. While `[]` also meant "the read failed" this label was withheld.
+  it("builds an empty channel rail — #general comes from the host, never from here", () => {
+    const channels = buildChannels(NO_MEMBERS, [], {}).flatMap((section) => section.channels);
+
+    expect(channels).toEqual([]);
+  });
+
+  it("labels an approval raised in #general", () => {
     const approval = {
       id: "a1",
       kind: "runtime.unlabelled_effect",
       amount_usd: null,
       at_millis: 0,
       agent: null,
-      thread: MAIN_THREAD_ID,
+      thread: GENERAL_CHANNEL_ID,
     } as ApprovalSummary;
+    const general = deskFromDto({
+      id: "general",
+      name: "General",
+      kind: "general",
+      members: [],
+      mutable: false,
+    });
 
-    expect(approvalThreadLink(approval, [], NO_MEMBERS)).toEqual({
-      channelId: MAIN_THREAD_ID,
-      label: `#${GENERAL_CHANNEL}`,
+    expect(approvalThreadLink(approval, [general], NO_MEMBERS)).toEqual({
+      channelId: GENERAL_CHANNEL_ID,
+      label: "#general",
     });
   });
 
@@ -95,7 +114,7 @@ describe("a company with no desks (empty /desks answer)", () => {
       amount_usd: null,
       at_millis: 0,
       agent: null,
-      thread: MAIN_THREAD_ID,
+      thread: GENERAL_CHANNEL_ID,
     } as ApprovalSummary;
 
     expect(approvalThreadLink(approval, null, NO_MEMBERS)).toBeNull();
@@ -107,7 +126,9 @@ describe("no surface fabricates desks over an answered read", () => {
     const src = read("views/RoomView.tsx");
 
     expect(src).toContain("setDesks(dtos.map(deskFromDto));");
-    expect(src).not.toContain("dtos.length ? dtos.map(deskFromDto) : defaultDesks()");
+    expect(src).not.toContain(
+      "dtos.length ? dtos.map(deskFromDto) : defaultDesks()",
+    );
     // The 404 leg — a host with no `/desks` route at all — still stands in.
     expect(src).toContain("error.status === 404");
     expect(src).toContain("setDesks(defaultDesks());");
@@ -122,8 +143,12 @@ describe("no surface fabricates desks over an answered read", () => {
     // A per-item failure therefore cannot reach the whole-chain `.catch`
     // below, so the null check is what stands in for it — an answered-but-
     // empty array must still flow to `desks.map(deskFromDto)` untouched.
-    expect(src).toContain("const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);");
-    expect(src).not.toContain("desks.length ? desks.map(deskFromDto) : defaultDesks()");
+    expect(src).toContain(
+      "const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);",
+    );
+    expect(src).not.toContain(
+      "desks.length ? desks.map(deskFromDto) : defaultDesks()",
+    );
     // Its `.catch` leg is the one place the static set is still right: nothing
     // was answered there at all.
     expect(src).toContain("const fallbackDesks = defaultDesks();");
@@ -134,7 +159,9 @@ describe("no surface fabricates desks over an answered read", () => {
 
     // The import is the check, not a mention: the file still *explains* the
     // fabricated set in prose, and should.
-    expect(src).not.toMatch(/import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/);
+    expect(src).not.toMatch(
+      /import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/,
+    );
     expect(src).toContain(".catch(() => null)");
   });
 

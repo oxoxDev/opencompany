@@ -149,7 +149,10 @@ enum JournalRecord {
         /// "no channel owns this", and both are correct.
         ///
         /// `#[serde(default)]` is what lets a pre-#379 line replay.
-        #[serde(default)]
+        #[serde(
+            default,
+            deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt"
+        )]
         thread: Option<String>,
         /// Which **thread within that channel** produced the parking cycle
         /// (issue #435) — the root the raising message hangs off, as that

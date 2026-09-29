@@ -23,6 +23,7 @@ async fn state_with_two_companies(home: &std::path::Path) -> AppState {
         let manifest = super::graphql_test_support_1::manifest();
         store
             .save(&CompanyRecord {
+                general_channel: Default::default(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),

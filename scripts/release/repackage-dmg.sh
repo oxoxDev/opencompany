@@ -9,10 +9,11 @@
 # Usage:
 #   repackage-dmg.sh <app_path> <bundle_dir>
 #
-# Required environment variables:
-#   APPLE_ID
-#   APPLE_PASSWORD    (app-specific password)
-#   APPLE_TEAM_ID
+# Required environment variables (App Store Connect API key, the names Tauri's
+# bundler reads — see sign-and-notarize-macos.sh):
+#   APPLE_API_KEY         key id
+#   APPLE_API_ISSUER      issuer id
+#   APPLE_API_KEY_PATH    path to the decoded AuthKey_<id>.p8
 #
 # Why a full rebuild instead of mount-and-replace:
 #
@@ -27,6 +28,18 @@ set -euo pipefail
 
 APP_PATH="${1:?Usage: repackage-dmg.sh <app_path> <bundle_dir>}"
 BUNDLE_DIR="${2:?}"
+
+for var in APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH; do
+  if [ -z "${!var:-}" ]; then
+    echo "[dmg] ERROR: Missing required env var: $var" >&2
+    exit 1
+  fi
+done
+if [ ! -s "$APPLE_API_KEY_PATH" ]; then
+  echo "[dmg] ERROR: App Store Connect API key file not found at APPLE_API_KEY_PATH" >&2
+  exit 1
+fi
+NOTARY_AUTH=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
 
 # Resolve all bundle paths to absolute form — we cd into $MACOS_DIR below to
 # invoke bundle_dmg.sh, and relative paths would break after the cd.
@@ -129,9 +142,7 @@ echo "[dmg] Notarizing DMG..."
 DMG_SUBMIT_OUT="$(mktemp /tmp/notarize-dmg-XXXXXX.json)"
 set +e
 xcrun notarytool submit "$DMG_PATH" \
-  --apple-id "$APPLE_ID" \
-  --password "$APPLE_PASSWORD" \
-  --team-id "$APPLE_TEAM_ID" \
+  "${NOTARY_AUTH[@]}" \
   --output-format json \
   --wait > "$DMG_SUBMIT_OUT"
 DMG_SUBMIT_RC=$?
@@ -144,10 +155,7 @@ rm -f "$DMG_SUBMIT_OUT"
 
 if [ -n "$DMG_SUBMISSION_ID" ]; then
   echo "[dmg] Fetching notarytool developer log for $DMG_SUBMISSION_ID:"
-  xcrun notarytool log "$DMG_SUBMISSION_ID" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" || true
+  xcrun notarytool log "$DMG_SUBMISSION_ID" "${NOTARY_AUTH[@]}" || true
 fi
 
 if [ "$DMG_SUBMISSION_STATUS" != "Accepted" ] || [ "$DMG_SUBMIT_RC" -ne 0 ]; then

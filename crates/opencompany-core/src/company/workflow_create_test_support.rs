@@ -345,6 +345,7 @@ pub(super) fn manifest_with_assistant() -> CompanyManifest {
 
 pub(super) fn record(id: &CompanyId, manifest: CompanyManifest) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

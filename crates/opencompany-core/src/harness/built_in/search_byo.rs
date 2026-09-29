@@ -229,10 +229,10 @@ mod live {
         BraveImageSearchTool, BraveNewsSearchTool, BraveVideoSearchTool, BraveWebSearchTool,
         ExaFindSimilarTool, ExaGetContentsTool, ExaSearchTool, QueritSearchTool, SearxngSearchTool,
     };
-    use oh::tools::traits::{
+    use openhuman_core as oh;
+    use tinytools::{
         PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolTimeout,
     };
-    use openhuman_core as oh;
 
     use crate::harness::search::WEB_SEARCH_TOOL;
 

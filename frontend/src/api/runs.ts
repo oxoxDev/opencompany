@@ -117,6 +117,14 @@ export interface RunSummary {
   agentId: string;
   /** Which attempt at the card this is — **1-based**; the first run is `1`. */
   attempt: number;
+  /**
+   * The episode and round this turn ran for, when it was a seat's turn inside
+   * one. Both absent for a card dispatch, a workflow node, a DM or `#general`
+   * turn, and every row from a host predating episodes — which all read as
+   * "not a round", never as round zero.
+   */
+  episodeId?: string;
+  roundRevision?: number;
   status: RunStatus;
   /** `active` | `parked` | `terminal`. See {@link RunPhase} before using it. */
   phase: RunPhase;

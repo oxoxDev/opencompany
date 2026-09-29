@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::analytics::Event;
-use crate::analytics::config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, resolve};
+use crate::analytics::config::{CLIENT_ID_ENV, ENDPOINT_ENV, resolve};
 use crate::analytics::types::OpaqueId;
 use crate::app::config::MapEnv;
 use crate::app::deployment::{DEPLOYMENT_ENV, Deployment};
@@ -14,9 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Obviously-fake credentials. Never a real one, in a file or anywhere else.
+/// An obviously-fake client id. Never a real one, in a file or anywhere else.
 const TEST_CLIENT_ID: &str = "not-a-real-client-id";
-const TEST_CLIENT_SECRET: &str = "not-a-real-client-secret";
 
 /// A local collector that counts what it is sent.
 struct Collector {
@@ -100,11 +99,7 @@ fn envelope() -> Envelope {
 
 /// A reporting environment pointed at `endpoint`, which `pairs` overrides.
 fn env(endpoint: &str, pairs: &[(&str, &str)]) -> MapEnv {
-    let mut all = vec![
-        (CLIENT_ID_ENV, TEST_CLIENT_ID),
-        (CLIENT_SECRET_ENV, TEST_CLIENT_SECRET),
-        (ENDPOINT_ENV, endpoint),
-    ];
+    let mut all = vec![(CLIENT_ID_ENV, TEST_CLIENT_ID), (ENDPOINT_ENV, endpoint)];
     all.extend_from_slice(pairs);
     MapEnv::new(all)
 }
@@ -274,7 +269,7 @@ async fn a_cancelled_drain_reports_the_tail_it_lost() {
     // the concrete type and `build` hands back an `Arc<dyn Tracker>`.
     let tracker = HttpOpenPanelTracker::new(
         &collector.url,
-        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID),
         envelope(),
     )
     .expect("the client builds");
@@ -363,7 +358,7 @@ async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
         // not at send time.
         HttpOpenPanelTracker::new(
             &collector.url,
-            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID),
             envelope(),
         )
         .expect("the client builds")
@@ -381,7 +376,7 @@ async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
     assert_eq!(
         proxy.hits.load(Ordering::SeqCst),
         0,
-        "a loopback endpoint went through the system proxy, so the client secret \
+        "a loopback endpoint went through the system proxy, so the client id \
          left the host in cleartext and the loopback exception protects nothing"
     );
     assert_eq!(
@@ -403,7 +398,7 @@ async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
 /// route from outside. This closes the route from *inside*: a future caller
 /// in this crate that reaches past `resolve` with
 /// `http://collector.internal/track` would otherwise get a tracker that
-/// posts the client secret across a network in cleartext, with
+/// posts the client id across a network in cleartext, with
 /// `is_cleartext` politely turning off the proxy on the way.
 ///
 /// The assertion calls `config::is_secure_endpoint` rather than restating
@@ -414,7 +409,7 @@ async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
 async fn the_transport_refuses_an_endpoint_that_never_passed_resolve() {
     let _ = HttpOpenPanelTracker::new(
         "http://collector.internal/track",
-        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID),
         envelope(),
     );
 }
@@ -431,10 +426,7 @@ async fn the_transport_accepts_an_endpoint_resolve_would_have_allowed() {
         assert!(
             HttpOpenPanelTracker::new(
                 allowed,
-                &crate::analytics::config::ClientCredentials::new(
-                    TEST_CLIENT_ID,
-                    TEST_CLIENT_SECRET
-                ),
+                &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID),
                 envelope(),
             )
             .is_ok(),
@@ -454,7 +446,7 @@ async fn a_drain_that_finishes_reports_nothing_lost() {
     let collector = spawn_collector().await;
     let tracker = HttpOpenPanelTracker::new(
         &collector.url,
-        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
+        &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID),
         envelope(),
     )
     .expect("the client builds");
@@ -492,13 +484,13 @@ async fn a_drain_that_finishes_reports_nothing_lost() {
 /// ```text
 /// OPENCOMPANY_ANALYTICS_ENDPOINT=https://<host>/api/track \
 /// OPENCOMPANY_ANALYTICS_CLIENT_ID=<uuid> \
-/// OPENCOMPANY_ANALYTICS_CLIENT_SECRET=<secret> \
 ///   cargo test --features analytics -- --ignored --nocapture \
 ///   analytics::openpanel::test::a_real_collector_accepts_an_event
 /// ```
 ///
-/// Credentials come from the environment and are never written anywhere:
-/// not to a fixture, not to a log line, and not to this test's output,
+/// No client secret: the collector's clients run with "ignore CORS and
+/// secret". The client id comes from the environment and is never written
+/// anywhere: not to a fixture, not to a log line, and not to this test's output,
 /// which prints only the `profileId` it sent and the ids the collector
 /// returned — enough to find the event in the dashboard and nothing more.
 ///
@@ -521,12 +513,6 @@ async fn a_real_collector_accepts_an_event() {
             (
                 CLIENT_ID_ENV,
                 os_env.get(CLIENT_ID_ENV).expect("set the client id"),
-            ),
-            (
-                CLIENT_SECRET_ENV,
-                os_env
-                    .get(CLIENT_SECRET_ENV)
-                    .expect("set the client secret"),
             ),
             (ENDPOINT_ENV, endpoint.clone()),
         ]),
@@ -594,18 +580,18 @@ fn the_header_safety_check_is_a_subset_of_what_a_header_accepts() {
     use crate::analytics::config::Decision;
     use reqwest::header::HeaderValue;
 
-    // Every single byte, plus the multi-byte shapes a mangled secret
+    // Every single byte, plus the multi-byte shapes a mangled client id
     // actually arrives in.
     let mut candidates: Vec<String> = (1u8..=255)
         .map(|byte| format!("ok{}", byte as char))
         .collect();
     candidates.extend(
         [
-            "not-a-real-client-secret",
+            "not-a-real-client-id",
             "op_sk_9zQx-4Kd_7Yb2Lp0",
             "550e8400-e29b-41d4-a716-446655440000",
             "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=",
-            "wrapped\nsecret",
+            "wrapped\nclient-id",
             "tab\tseparated",
             "spaced out",
             "caf\u{e9}-latte",
@@ -620,10 +606,7 @@ fn the_header_safety_check_is_a_subset_of_what_a_header_accepts() {
             Deployment::HostedTenant,
             &env(
                 "https://collector.invalid/track",
-                &[
-                    (CLIENT_ID_ENV, candidate.as_str()),
-                    (CLIENT_SECRET_ENV, candidate.as_str()),
-                ],
+                &[(CLIENT_ID_ENV, candidate.as_str())],
             ),
         );
         if matches!(decision, Decision::Report { .. }) {

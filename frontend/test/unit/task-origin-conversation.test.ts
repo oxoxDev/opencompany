@@ -45,14 +45,15 @@ describe("where a card's origin conversation lives", () => {
     expect(originConversation("t1", undefined)).toEqual({ kind: "unreachable" });
   });
 
-  it("folds the General spellings the host echoes back", () => {
-    // Resolved through `channelForThread`, not a bare `map[originChatId]`: a
-    // card opened from a line addressed `MAIN` carries that casing, and a
-    // direct index misses it while the conversation plainly exists.
-    expect(originConversation("MAIN", { main: "general" })).toEqual({
+  it("finds #general for a card raised there", () => {
+    expect(originConversation("general", { general: "general" })).toEqual({
       kind: "channel",
       channelId: "general",
     });
+  });
+
+  it("no longer folds a legacy General spelling onto #general", () => {
+    expect(originConversation("MAIN", { general: "general" })).toEqual({ kind: "unreachable" });
   });
 
   it("carries the origin thread's own id, when the card was raised inside one", () => {

@@ -29,8 +29,12 @@ use crate::{app::types::AppConfig, runtime::RuntimeBuilder};
 ///
 /// Call this on any builder whose companies should be able to think.
 #[cfg(not(feature = "openhuman"))]
-pub fn attach(builder: RuntimeBuilder, _config: &AppConfig) -> RuntimeBuilder {
-    builder
+pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
+    // No harness to think with, but the platform this host is on is still a
+    // fact every managed surface reports — the LLM page's endpoint, the
+    // managed probe — and it follows `api_url` here as it does with the
+    // feature on.
+    builder.with_api_url(config.api_url.clone())
 }
 
 #[cfg(feature = "openhuman")]
@@ -40,7 +44,7 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     use crate::app::config::ProcessEnv;
     use crate::harness::HarnessPool;
     use crate::harness::provider::{
-        PlatformCredentialStatus, harness_inference_from_env_at, media_backend_from_env,
+        PlatformCredentialStatus, media_backend_from_env, platform_inference_default_at,
         search_backend_handle_from_env,
     };
 
@@ -69,11 +73,19 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     // base handle here makes its ledger shared by every harness lane and by
     // workflow tool calls.
     let builder = builder.with_search_backend(search_backend_handle_from_env(&ProcessEnv));
-    // The managed env default is an *optional*, lowest-precedence source; a
-    // BYOK-only tenant supplies none and still gets a harness brain from its
-    // manifest/runtime config.
-    match harness_inference_from_env_at(&ProcessEnv, Some(&config.api_url)) {
-        Some((config, model_override)) => builder.with_harness_inference(config, model_override),
-        None => builder,
-    }
+    // The managed default is the lowest-precedence source, and it is always
+    // present: the *endpoint* follows this host's `api_url` whether or not the
+    // environment holds an instance credential. A BYOK-only tenant, or a
+    // desktop whose identity is the company's own account key, gets a default
+    // whose credential is `Credential::None` — which every managed gate reads
+    // as "cannot think on the instance identity", exactly as an absent default
+    // did — but whose endpoint is the platform this host was configured for,
+    // so a company key minted on staging is presented to staging. Before this
+    // an absent credential meant an absent default, and an absent default
+    // meant the production constant.
+    let (inference, model_override) =
+        platform_inference_default_at(&ProcessEnv, Some(&config.api_url));
+    builder
+        .with_api_url(config.api_url.clone())
+        .with_harness_inference(inference, model_override)
 }

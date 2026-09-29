@@ -9,7 +9,10 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches sixteen tools, all wired only onto the orchestrator agent:
+//! It reaches sixteen tools, wired onto the orchestrator agent (three of them —
+//! the hand-off tools `spawn_task`, `delegate_to_desk` and
+//! `delegate_to_teammate` — also onto every other roster agent, scoped; see
+//! [`member_delegation_tools`]):
 //!
 //! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`],
 //!   recent [`EventLog`] history, and (issue #1859) a `## Board` summary of
@@ -73,9 +76,7 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use serde_json::{Value, json};
 
-use openhuman_core as oh;
-
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
@@ -95,7 +96,8 @@ use crate::ports::tasks::{
     TaskStore, column_label, is_board_column,
 };
 use crate::ports::types::{
-    CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
+    CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, SkillChange,
+    WorkflowNodeStatus,
 };
 use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
@@ -299,20 +301,19 @@ MOST MESSAGES ARE QUESTIONS OR QUICK READS. Answer them from whole-company conte
 nothing else. A question about state — what is on the board, what workflows exist, who is on the \
 team, what happened — is NEVER a card. Use `query_company`: it is the source of truth for the \
 company's durable facts, recent activity, saved workflows, team roster and desks, so consult it \
-before answering rather than guessing, then answer directly and concisely. A board write is the \
+before answering rather than guessing, then answer directly. A board write is the \
 exception and needs a reason. \
 When there IS work, two decisions come up and they are INDEPENDENT — do not collapse them into \
 one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, hand it to that desk \
-with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks; when it names \
-one PERSON, hand it to them with `delegate_to_teammate`, naming them by a roster id `query_company` \
-lists under Team — a desk id is not a person and a person is not a desk, so pick the tool that \
-matches the target; when it is yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
-tool in order to influence it. Anything substantial handed to a desk is opened as a board card \
-automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
-hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
-and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
-that belongs on the board but must NOT start in this turn: something for later, or for somebody \
-else. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
+with `delegate_to_desk`; when it names one PERSON, hand it to them with `delegate_to_teammate`; \
+either way pass the id listed beside the name under Your team — a desk is not a person, \
+so pick the tool that matches the target; when it is yours to answer, answer it. Your teammates \
+are one call away: never say you cannot reach one. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
+tool in order to influence it. Anything substantial handed to a desk or a teammate is opened as a board card \
+automatically — the hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` \
+for the same work. Nothing else said in chat is tracked unless an agent tracks it: reach for \
+`spawn_task` for work that belongs on the board but must NOT start in this turn — something for \
+later, or for somebody else — and for real work you take on yourself that outlasts this reply. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
 nothing. When you cannot proceed without something only the operator can give you, call \
 `escalate_to_human` with the question; the work parks and their answer restarts it. \
 WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
@@ -469,10 +470,9 @@ pub enum DelegationScope {
     /// under the cycle lock, so one bucket is all they have ever needed and
     /// their behaviour is unchanged by this scoping.
     ///
-    /// Deliberately **not** an error, for the same reason
-    /// [`ApprovalScope::Unscoped`](crate::harness::policy::ApprovalScope)
-    /// is not: a claimant added later that forgets to name a scope degrades to
-    /// today's behaviour rather than to a silently dropped delegation.
+    /// Deliberately **not** an error: a claimant added later that forgets to
+    /// name a scope degrades to today's behaviour rather than to a silently
+    /// dropped delegation.
     #[default]
     Unscoped,
     /// One workflow run, keyed by its run id.
@@ -1050,6 +1050,16 @@ impl DelegationQueue {
             .get(&Self::current_scope())
             .map_or(0, Vec::len)
     }
+
+    /// Whether the calling scope has work staged for another bounded drain
+    /// pass. Used after a concurrent conversation-dispatch layer completes.
+    pub(crate) fn has_queued(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("delegation queue")
+            .get(&Self::current_scope())
+            .is_some_and(|bucket| !bucket.is_empty())
+    }
 }
 
 /// What happened when a tool offered a delegation to the queue (issues #419,
@@ -1333,6 +1343,20 @@ impl QueryCompanyTool {
     }
 }
 
+/// What a person calls roster entry `id`: its display name, else its role,
+/// else the id itself when it is not on the roster.
+fn roster_name<'a>(roster: &'a [(String, Option<String>, String)], id: &'a str) -> &'a str {
+    roster
+        .iter()
+        .find(|(entry, _, _)| entry == id)
+        .map_or(id, |(_, name, role)| {
+            name.as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(role.trim())
+        })
+}
+
 #[async_trait]
 impl Tool for QueryCompanyTool {
     fn name(&self) -> &str {
@@ -1541,7 +1565,7 @@ impl Tool for QueryCompanyTool {
         } else {
             for (id, name) in &workflows {
                 md.push_str(&format!(
-                    "- **{}** (`{}`) — run with `run_workflow`\n",
+                    "- **{}** (id `{}` for tool calls) — run with `run_workflow`\n",
                     name.trim(),
                     id
                 ));
@@ -1550,19 +1574,10 @@ impl Tool for QueryCompanyTool {
 
         // Team roster: manifest agents plus operator-added overlay teammates
         // (the ones `add_agent` persists), so a freshly added teammate is
-        // visible on the next query instead of looking unpersisted.
-        //
-        // **Every row leads with the id**, because this column is the one the
-        // orchestrator's brief and `delegate_to_teammate`'s own description
-        // send the model to for a hand-off target. An overlay teammate used to
-        // be listed under `overlay.name` while a manifest agent was listed
-        // under `agent.id` — two namespaces rendered identically, and since
-        // `mint_agent_id` slugs the display name (`"Dana Designer"` →
-        // `dana_designer`) the name was a token the delegation tools could not
-        // ground. The model did exactly what it was told and was refused
-        // (issue #1162). The display name follows as a label, in the shape
-        // `workflow_build::roster_line` (#813) already uses for the roster it
-        // shows the same model, so the two surfaces cannot drift apart.
+        // visible on the next query instead of looking unpersisted. Each row
+        // leads with the name a person knows and carries the id the
+        // delegation tools ground, the shape `workflow_build::roster_line`
+        // also shows this model.
         let mut roster: Vec<(String, Option<String>, String)> = Vec::new();
         if let Some(record) = &record {
             // Resolved through the record: a teammate the operator removed is not
@@ -1588,12 +1603,13 @@ impl Tool for QueryCompanyTool {
         if roster.is_empty() {
             md.push_str("_Roster unavailable._\n");
         } else {
-            for (id, name, role) in &roster {
-                md.push_str(&format!("- **{}** — {}", id, role.trim()));
-                if let Some(name) = name {
-                    md.push_str(&format!(" (known as {})", name.trim()));
+            for (id, _, role) in &roster {
+                let name = roster_name(&roster, id);
+                md.push_str(&format!("- **{name}**"));
+                if !name.eq_ignore_ascii_case(role.trim()) {
+                    md.push_str(&format!(", {}", role.trim()));
                 }
-                md.push('\n');
+                md.push_str(&format!(" (id `{id}` for tool calls)\n"));
             }
         }
 
@@ -1616,13 +1632,16 @@ impl Tool for QueryCompanyTool {
             .unwrap_or_default();
         md.push_str("\n## Desks\n");
         if desks.is_empty() {
-            md.push_str("_No desks. Answer directly rather than delegating._\n");
+            md.push_str("_No desks._\n");
         } else {
             for (id, lead) in &desks {
+                let label = record.as_ref().map_or_else(
+                    || id.clone(),
+                    |r| crate::company::team_brief::desk_label(r, id),
+                );
+                md.push_str(&format!("- **{label}** (id `{id}` for tool calls) — "));
                 match lead {
-                    Some(lead) => md.push_str(&format!(
-                        "- **{id}** — lead: {lead} (delegate with `delegate_to_desk` desk=`{id}`)\n"
-                    )),
+                    Some(lead) => md.push_str(&format!("lead: {}\n", roster_name(&roster, lead))),
                     // A leadless answer is two different facts (issue #1835):
                     // an `auto` channel has members but no lead by design —
                     // "cannot be handed work" would be a lie about a staffed
@@ -1632,13 +1651,9 @@ impl Tool for QueryCompanyTool {
                         .as_ref()
                         .is_some_and(|r| !r.desk_responder_mode(id).is_lead()) =>
                     {
-                        md.push_str(&format!(
-                            "- **{id}** — channel without a lead; who answers is picked per message. `delegate_to_desk` cannot target it — use `delegate_to_teammate` with one of its members\n"
-                        ))
+                        md.push_str("channel without a lead; who answers is picked per message\n")
                     }
-                    None => md.push_str(&format!(
-                        "- **{id}** — no member on the roster, so it cannot be handed work\n"
-                    )),
+                    None => md.push_str("no member on the roster, so it cannot be handed work\n"),
                 }
             }
         }
@@ -2409,6 +2424,12 @@ fn summarize_event(event: &CompanyEvent) -> String {
         // carry.
         CompanyEvent::TurnStarted { turn_id, .. } => format!("turn accepted: {turn_id}"),
         CompanyEvent::TurnFailed { turn_id, .. } => format!("turn unanswered: {turn_id}"),
+        CompanyEvent::TurnSettled {
+            turn_id, agent_id, ..
+        } => match agent_id {
+            Some(agent) => format!("turn answered by {agent}: {turn_id}"),
+            None => format!("turn answered: {turn_id}"),
+        },
         // Issue #1015. Structural only: the minted id and the status word, a
         // fixed vocabulary. The failure reason is our own prose about the host
         // and is tenant-scoped, so it stays off this surface exactly as
@@ -2534,13 +2555,34 @@ fn summarize_event(event: &CompanyEvent) -> String {
             added.len(),
             removed.len()
         ),
-        CompanyEvent::DeskHiveConfigured { reset, .. } => {
+        CompanyEvent::DeskRoutingConfigured { reset, .. } => {
             if *reset {
-                "desk move grammar restored".into()
+                "desk routing restored".into()
             } else {
-                "desk move grammar installed".into()
+                "desk routing configured".into()
             }
         }
+        CompanyEvent::SkillChanged { slug, change, .. } => {
+            let what = match change {
+                SkillChange::Installed => "installed",
+                SkillChange::Updated => "updated",
+                SkillChange::Removed => "removed",
+            };
+            format!("skill {what}: {slug}")
+        }
+        // Plan hive-desks: the episode ledger. Structural only — ids and
+        // counts, never an utterance — for the same reason every arm here is.
+        CompanyEvent::EpisodeOpened { .. } => "episode opened".into(),
+        CompanyEvent::RoundStarted { .. } => "episode round started".into(),
+        CompanyEvent::RoundCommitted { .. } => "episode round committed".into(),
+        CompanyEvent::BroadcastRouted { .. } => "episode broadcast routed".into(),
+        CompanyEvent::DmDelivered { .. } => "episode dm delivered".into(),
+        CompanyEvent::ConversationOpened { .. } => "episode conversation opened".into(),
+        CompanyEvent::ConversationConcluded { .. } => "episode conversation concluded".into(),
+        CompanyEvent::EpisodeSeatParked { .. } => "episode seat waiting on the operator".into(),
+        CompanyEvent::EpisodeSeatResumed { .. } => "episode seat resumed".into(),
+        CompanyEvent::EpisodeCompleted { .. } => "episode completed".into(),
+        CompanyEvent::EpisodeStateSaved { .. } => "episode state saved".into(),
         // Issue #276. This one-liner is folded into the orchestrator's
         // recent-activity context, so it is read by a model — and the arms
         // around it drop free text and actor ids for that reason. Name and id
@@ -2706,7 +2748,7 @@ impl Tool for SpawnTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Open a task card on the company's board for work that should NOT start in this turn — something for later, for somebody else, or waiting on a person. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand to a desk with `delegate_to_desk` already opens its own card, and calling both for the same work opens two."
+        "Open a task card on the company's board. Nothing said in chat is tracked unless an agent tracks it, so use this when an ask is real work that should be visible and followed up — something you are taking on that outlasts this reply, something for later, or something for somebody else. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand off with `delegate_to_desk` or `delegate_to_teammate` already opens its own card, and calling both for the same work opens two."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3014,7 +3056,7 @@ impl Tool for DelegateToDeskTool {
     }
 
     fn description(&self) -> &str {
-        "Hand a turn to a desk's lead member so a specialist answers. Provide the `desk` (its id or name) and the `instruction` to carry out. A substantial hand-off is opened as a tracked board card automatically, assigned to that lead — you do not need to call `spawn_task` as well."
+        "Hand a turn to a desk's lead member so a specialist answers, and get their reply back in this turn. Provide the `desk` (the id listed beside its name under Your team; its name also works) and the `instruction` to carry out. A substantial hand-off is opened as a tracked board card automatically, assigned to that lead — you do not need to call `spawn_task` as well."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3236,7 +3278,7 @@ impl Tool for DelegateToTeammateTool {
     }
 
     fn description(&self) -> &str {
-        "Hand a turn to one named teammate so the person who actually owns that specialism answers — including somebody on your own desk. Provide the `teammate` (their roster id, as `query_company` lists them under Team) and the `instruction` to carry out. Use this instead of `delegate_to_desk` whenever a specific person is wanted rather than whoever leads a desk. A substantial hand-off is opened as a tracked board card automatically, assigned to them — you do not need to call `spawn_task` as well."
+        "Hand a turn to one named teammate so the person who actually owns that specialism answers — including somebody on your own desk. Provide the `teammate` (the id listed beside their name under Your team, for this call only; call them by name when you write) and the `instruction` to carry out. Use this instead of `delegate_to_desk` whenever a specific person is wanted rather than whoever leads a desk. A substantial hand-off is opened as a tracked board card automatically, assigned to them — you do not need to call `spawn_task` as well."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3639,11 +3681,13 @@ pub fn delegation_tools(
     ]
 }
 
-/// The delegation tools a desk member gets when its manifest entry names a
-/// `delegates_to` allowlist (issue #176): `spawn_task`, a `delegate_to_desk`
-/// narrowed to that allowlist, and — since #884 — a `delegate_to_teammate`
-/// narrowed to its own desk-mates plus the members of the desks that allowlist
-/// permits.
+/// The delegation tools every **non-orchestrator** roster agent gets:
+/// `spawn_task`, a `delegate_to_desk` and a `delegate_to_teammate`, both
+/// scoped by its manifest `delegates_to` — unrestricted when that list is
+/// empty (the ordinary case), narrowed to the named desks (and, for the
+/// teammate tool, its own desk-mates plus those desks' members) when it is not.
+/// Issue #176 wired these only onto a member that opted in with a list; a
+/// specialist with none had no way to reach the colleague beside it.
 ///
 /// Deliberately a subset of [`delegation_tools`] rather than the same list.
 /// `assign_task`, `review_task`, `query_company`, `run_workflow`,
@@ -3688,40 +3732,54 @@ pub fn member_delegation_tools(
     ]
 }
 
-/// The persona brief appended for a desk member that may re-delegate (issue
-/// #176).
+/// The hand-off and tracking brief appended to every **non-orchestrator**
+/// teammate's persona, after the team section
+/// ([`team_brief::team_section`](crate::company::team_brief::team_section))
+/// that lists who it may hand work to.
 ///
 /// It exists because a refusal costs a whole turn. A model handed
-/// `delegate_to_desk` with no idea that its reach is narrowed, or that the chain
-/// it is running inside is nearly at its bound, spends turns discovering both
-/// one refusal at a time — and the depth refusal in particular is not
-/// retryable, so a model that has not been told will burn every remaining call
-/// on it. Naming the allowlist and the shape of the bound up front is cheaper
-/// than the refusals it avoids.
+/// `delegate_to_desk` with no idea that the chain it is running inside is
+/// nearly at its bound spends turns discovering that one refusal at a time —
+/// and the depth refusal in particular is not retryable, so a model that has
+/// not been told will burn every remaining call on it. Naming the shape of the
+/// bound up front is cheaper than the refusals it avoids.
 ///
 /// The bound is stated qualitatively rather than as a number. The number lives
 /// on the live company record and is read at call time; baking a snapshot of it
 /// into a persona that is cached with the belt would be a claim that goes stale
 /// the moment an operator edits the manifest — and a *confidently wrong* bound
 /// is worse guidance than an honest "there is one".
-pub fn member_delegation_brief(desks: &[String]) -> String {
-    let reach = match desks.iter().any(|d| d.trim() == "*") {
-        true => "any desk in the company".to_string(),
-        false => desks.join(", "),
-    };
-    format!(
-        "\n\n## Handing work on\n\nYou can pass a slice of your work to another desk with \
-`delegate_to_desk`, to one named person with `delegate_to_teammate` — including somebody on your \
-own desk — and open a tracked card for anything that should be followed up later with \
-`spawn_task`. The desks you may hand work to: {reach}. When a request names a specific teammate, \
-hand it to THAT PERSON with `delegate_to_teammate` rather than declining it as not \
-yours.\n\nHand on only the part somebody else is genuinely better placed to do, and do the rest \
-yourself — every hand-off costs another turn. The chain is bounded: if you are told the work has \
-already been handed on as far as this company allows, that is final, so do what you can and say \
-plainly what is left rather than calling the tool again. You cannot hand work back to a desk it \
-already came from, to a desk you lead yourself, or to somebody the work already passed \
-through.\n"
-    )
+///
+/// # The board is a tool call
+///
+/// The second paragraph is the tracking rule, and it is here because the
+/// runtime no longer decides it. A message typed into a desk or a DM used to
+/// become a board card by construction — the REST handler carded anything that
+/// led with an action verb, and the runtime carded anything "substantial" said
+/// to a desk lead — so the agent answering was never asked whether the ask was
+/// work at all, and the board filled with cards nobody had commissioned. Now
+/// nothing said in chat is tracked unless an agent tracks it, and this is where
+/// the agent is told so, and told what `spawn_task` is for.
+///
+/// Reach — who this agent may hand work to — is deliberately **not** stated
+/// here: the team section renders it from the same rule the tools enforce, so
+/// there is one place for it to be right.
+pub fn member_delegation_brief() -> String {
+    "\n\n## Handing work on, and tracking it\n\nDo what is yours yourself. When a slice of the ask \
+belongs to a teammate's specialism — a design question to the designer, a security check to the \
+security engineer — and you are in a room with them, `ask` them for it. Asking ends your turn: \
+their answer reaches you in a later brief, not this one. So say you have asked and what you are \
+waiting on; never write as though you already had the answer. When it arrives, fold it in and \
+relay what they said rather than saying you asked. Ask for the part somebody else is genuinely \
+better placed to answer, not the whole ask, and never decline something as \"not mine\" when a \
+teammate who owns it is one question away.\n\nNothing said to you in chat is on \
+the board unless somebody puts it there — a card exists because an agent or the operator opened \
+one, never because a message was sent. Answer questions, discussion and quick asks directly, \
+with no card. When an ask is real work that should be visible and followed up — something you \
+are taking on that outlasts this reply, something for later, or something for somebody else — \
+open a card for it with `spawn_task` (a title, a note with the brief, and the roster id of \
+whoever will do it) and say that you did.\n"
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -4060,7 +4118,7 @@ impl Tool for AddAgentTool {
             model: None,
             harness: None,
         };
-        record.overlay_agents.push(agent);
+        let general_delta = record.hire_overlay_agent(agent);
         self.store.save(&record).await?;
 
         // The audit row for one agent creating another.
@@ -4088,6 +4146,12 @@ impl Tool for AddAgentTool {
                 .await
         {
             tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+        }
+        if let Some(events) = &self.events
+            && let Some(event) = general_delta.into_event(None)
+            && let Err(err) = events.append(&self.company, event).await
+        {
+            tracing::warn!(error = %err, "#general membership change could not be journaled");
         }
 
         // Issue #619: the mint is observable — the minter, the teammate, and

@@ -236,6 +236,7 @@ async fn toggling_a_company_disabled_global_is_not_found() {
     .unwrap();
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

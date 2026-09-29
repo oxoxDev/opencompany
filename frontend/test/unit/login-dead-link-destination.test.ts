@@ -34,7 +34,7 @@ afterEach(() => {
   container.remove();
 });
 
-/** A host answering `/auth/config` and `/auth/hub`, recording every `get`/`post`. */
+/** A host answering `/auth/config`, recording every `get`/`post`. */
 function hostReporting(
   config: Record<string, unknown>,
   post: ReturnType<typeof vi.fn>,
@@ -42,7 +42,6 @@ function hostReporting(
   const get = vi.fn().mockImplementation(async (path: string) => {
     const base = path.split("?")[0];
     if (base.endsWith("/auth/config")) return config;
-    if (base.endsWith("/auth/hub")) return { providers: [] };
     throw new Error(`unexpected GET ${path}`);
   });
   return { scopeFor: () => "/api/v1/company", get, post } as unknown as OpenCompanyClient & {
@@ -85,12 +84,6 @@ describe("the dead-link recovery path", () => {
     const post = vi.fn().mockResolvedValue({ sent: true });
     const client = hostReporting({ mode: "email", passwords: true, magicLink: true }, post);
     await render(client);
-
-    // The ecosystem buttons are asked for with the same destination, so a
-    // "Continue with …" click from this form lands on the roster the link
-    // promised rather than on Overview with the welcome free to open.
-    const hubFetch = client.get.mock.calls.find(([path]) => path.startsWith("/api/v1/company/auth/hub"));
-    expect(hubFetch?.[0]).toBe("/api/v1/company/auth/hub?from=setup");
 
     await sendLinkRequest();
 

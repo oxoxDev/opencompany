@@ -316,18 +316,6 @@ async fn park_thread_less_blocker(runtime: &Arc<CompanyRuntime>, task_id: &str) 
 
 /// A blocker that names no conversation is pending in **no**
 /// conversation — `#general` least of all.
-///
-/// The bug (B-059): `pending_blocker_groups` matched through
-/// `same_conversation`, which reads a missing chat id as "unaddressed,
-/// therefore General". A thread-less park therefore read as pending in
-/// the company-wide line, and the founder's next top-level message there
-/// was consumed as its *answer* — accepted, settled in milliseconds with
-/// no cycle and no reply, and indistinguishable in the console from a
-/// message being worked on.
-///
-/// All four General spellings are asserted because the fold admits all
-/// four (`is_general_chat`), so fixing only the console's `"main"` would
-/// leave the same drop reachable from a host addressing `"General"`.
 #[tokio::test]
 async fn a_thread_less_blocker_is_pending_in_no_conversation() {
     let (runtime, _home) = runtime().await;

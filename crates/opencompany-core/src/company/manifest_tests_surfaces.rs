@@ -414,3 +414,112 @@ fn discover_prefers_company_toml() {
     assert!(!located.legacy);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- `[group_chat.routing]` (plan hive-desks, Phase 4) ---------------------
+
+#[test]
+fn a_routing_block_parses_and_its_zero_keys_are_refused() {
+    let manifest = parse(
+        r#"
+        [company]
+        name = "X"
+        [[agent]]
+        id = "a"
+        role = "A"
+        [[agent]]
+        id = "b"
+        role = "B"
+        [[group_chat]]
+        id = "desk"
+        name = "Desk"
+        members = ["a", "b"]
+        [group_chat.routing]
+        round_width = 2
+        max_rounds = 4
+        [group_chat.routing.referral]
+        enabled = true
+        max_hops = 1
+        returns = true
+        "#,
+    );
+    assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    let desk = &manifest.group_chats[0];
+    assert_eq!(desk.hive.round_width, Some(2));
+    assert_eq!(desk.hive.max_rounds, Some(4));
+    assert_eq!(
+        desk.hive
+            .referral
+            .as_ref()
+            .and_then(|referral| referral.max_hops),
+        Some(1)
+    );
+    // Round-trips under the `routing` key, never `hive`.
+    let rendered = toml::to_string(&manifest).expect("serializes");
+    assert!(rendered.contains("[group_chat.routing]"), "{rendered}");
+    assert!(!rendered.contains("[group_chat.hive]"), "{rendered}");
+
+    let broken = parse(
+        r#"
+        [company]
+        name = "X"
+        [[agent]]
+        id = "a"
+        role = "A"
+        [[group_chat]]
+        id = "desk"
+        name = "Desk"
+        members = ["a"]
+        [group_chat.routing]
+        round_width = 0
+        turn_timeout_secs = 0
+        "#,
+    );
+    let problems = broken.validate();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("`routing.round_width = 0`")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("`routing.turn_timeout_secs = 0`")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_stale_hive_block_is_refused_with_a_migration_hint() {
+    let text = r#"
+        [company]
+        name = "X"
+        [[agent]]
+        id = "a"
+        role = "A"
+        [[group_chat]]
+        id = "desk"
+        name = "Desk"
+        members = ["a"]
+        [group_chat.hive]
+        quorum = 2
+        "#;
+    let problem = CompanyManifest::legacy_hive_block(text).expect("refused");
+    assert!(problem.contains("group chat `desk`"), "{problem}");
+    assert!(problem.contains("[group_chat.routing]"), "{problem}");
+    assert!(problem.contains("docs/spec/runtime/hive.md"), "{problem}");
+    let dir = std::env::temp_dir().join(format!(
+        "oc-stale-hive-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("company.toml");
+    std::fs::write(&path, text).unwrap();
+    let err = CompanyManifest::from_file(&path).expect_err("a stale block does not load");
+    assert!(err.to_string().contains("[group_chat.routing]"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        CompanyManifest::legacy_hive_block("[company]\nname = \"X\"\n[[group_chat]]\nid = \"d\"\nname = \"D\"\n[group_chat.routing]\nround_width = 1\n").is_none()
+    );
+}

@@ -132,13 +132,25 @@ addressing forms — the platform `…/companies/{id}/…` form and the single-c
 namespace under `harness/<id>/`. The read path is complete. The write path has no
 caller. See "The migration constraint" below.
 
-**Per process, at the floor.** The `EnvDefault` is host-wide. One injected
-endpoint, shared by every company that host serves. It reaches a request only
-through `resolve_endpoint`, and only for the managed kind or a keyless
-`openrouter` with no base-URL override — a keyless `openrouter` that *does*
-override the endpoint is deliberately denied the platform credential, because
-sending the platform token to an arbitrary URL would leak it. There is a test
-named for exactly that.
+**Per process, at the floor.** The `EnvDefault` is host-wide, and it is
+**always present**: `app::harness::attach` builds it for every runtime from
+the host's resolved `api_url` (`harness::provider::platform_inference_default_at`),
+and the runtime keeps it (`CompanyRuntime::platform_default`) so the console's
+reads and the brain's turns resolve against one value. Its *endpoint* is
+`OPENCOMPANY_INFERENCE_URL`, else `{api_url}/agent-integrations/openrouter`;
+its *credential* is the instance identity when the environment holds one
+(`OPENCOMPANY_INFERENCE_KEY`, else the TinyHumans token source), else
+`Credential::None`. The two were once one question — no credential meant no
+default — and every resolver then fell back to the production constant, so a
+desktop pointed at staging with only a company key presented that key to
+production. Presence therefore never means a credential: what decides whether
+a company can think is `credential.configured()`, which `managed_source` and
+the legacy chain's step 3 both test. It reaches a request only through
+`resolve_endpoint`, and only for the managed kind or a keyless `openrouter`
+with no base-URL override — a keyless `openrouter` that *does* override the
+endpoint is deliberately denied the platform credential, because sending the
+platform token to an arbitrary URL would leak it. There is a test named for
+exactly that.
 
 ### The catalog cache is scoped too, and it has already bitten
 

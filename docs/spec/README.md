@@ -31,7 +31,7 @@ L4  Surfaces        Axum HTTP (operator API, A2A, webhooks), CLI, future UI
 L3  Company Brain   cycle loop, approvals, effect routing, feedback loop
 L2  Kernel ports    Brain, CompanyStore, EventLog, MemoryStore, ContextStore,
                     ChannelAdapter, ToolProvider, AgentEconomy, ApprovalGate
-L1  Adapters        hosted-medulla | openhuman-rpc | tinyagents |
+L1  Adapters        hosted-medulla | openhuman (embedded) | tinyhivemind |
                     hosted-memory | tinyplace | fs (default)
 L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 ```
@@ -40,7 +40,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | --- | --- | --- |
 | Cognition (orchestrate / delegate / dispatch) | Medulla | called via the `Brain` port; never reimplemented |
 | Model access, tier→SKU mapping, billing | TinyHumans backend | sends tier names + credential; never sees SKUs |
-| Tools, channels, credentials, policy tiers | OpenHuman | consumed via JSON-RPC; gaps go upstream as PRs |
+| Tools, agents, sessions, credentials | OpenHuman | embedded as a library (`openhuman_embed`); gaps go upstream as PRs |
+| Desk deliberation: episodes, rounds, speech, Jev routing, referral | tinyhivemind | hosted over the embedded agents (`tinyhivemind-openhuman`); the host commits, the library folds |
 | In-process LLM sub-work | TinyAgents | embedded library behind `ToolProvider` |
 | Long-term memory | TinyCortex (candidate) | behind `MemoryStore`; default is file-based |
 | Identity, discovery, payments, A2A | tiny.place | behind `AgentEconomy` |
@@ -91,17 +92,15 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
-| [runtime/hivemind.md](runtime/hivemind.md) | Hive-mind desks: when a `[[group_chat]]` answers as a deliberating room rather than through one responder, the episode loop, the trace grammar, and the `hive` manifest keys |
-| [runtime/hivemind-deliberation.md](runtime/hivemind-deliberation.md) | The four mechanisms that make a hive desk deliberate rather than vote: the per-member move grammar and its enforcement, desk memory, speaker diversity, and what happens when a member's turn fails |
-| [runtime/hivemind-referral.md](runtime/hivemind-referral.md) | Cross-desk referral: when a deliberating desk may put one question to another desk, how the answer comes home without carrying a vote with it, and the `hive.referral` manifest keys |
-| [runtime/hivemind-asides.md](runtime/hivemind-asides.md) | Private asides: when two members of one desk may say something the rest of it cannot read, why the row is elided rather than removed, and the `hive.aside` manifest keys |
-| [runtime/speech.md](runtime/speech.md) | One agent, one session: the watermark that replaced the per-chat clear-and-reseed, the channel cue that makes a merged transcript readable, and the `[speech]` block that turns talking into a tool call |
+| [runtime/hive.md](runtime/hive.md) | Hive desks: one `OpenHumanHive` per `[[group_chat]]` over the embedded OpenHuman runtime — when a room opens, the episode of concurrent rounds, speaking through the `opencompany` MCP server, Jev routing over the TinyHumans proxy with the lead fallback, cross-desk referral, what lands in the journal, and the `[group_chat.routing]` keys |
+| [runtime/speech.md](runtime/speech.md) | One agent, one session: the one stable OpenHuman session per agent, the delta a turn is handed, and talking as a tool call — `post`, `broadcast`, `dm`, `complete_episode`, `read` |
 | [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
 | [../key-reworks/README.md](../key-reworks/README.md) | The keys rework plan (issue #2306): provider + model everywhere, company default and agent pairs, Composio and search key names, routing removal — phased, slice by slice |
 | [../onboarding-redesign/README.md](../onboarding-redesign/README.md) | Onboarding redesign plan: a setup-way branch point, both paths reusing the real Connections fan-out instead of a separate wizard mechanism, and the post-build checklist removed — depends on issue #2342 |
 | [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
+| [../modules/skills.md](../modules/skills.md) | Skills: the `SKILL.md` an agent reads, the four sources and the effective-set fold, the admin write routes, per-agent materialization, the three read tools, and why execution is deliberately not wired |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/ledgers.md](runtime/ledgers.md) | Dynamic ledgers: declared record shapes, the append-only fold, who may delete, the `derived/` folder |

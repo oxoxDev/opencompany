@@ -50,8 +50,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
-use openhuman_core as oh;
+use tinytools::{PermissionLevel, Tool, ToolResult};
 
 use crate::ports::ContextStore;
 use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};

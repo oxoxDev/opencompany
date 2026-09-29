@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatHistoryMessageDto } from "@/api/types";
 import {
-  MAIN_THREAD_ID,
+  GENERAL_CHANNEL_ID,
   dispatchMarkerPlacement,
   dispatchMarkerText,
   fromHistory,
@@ -111,22 +111,31 @@ describe("where a settled dispatch's marker goes", () => {
     expect(dispatchMarkerPlacement(terminal({ chatId: undefined }), CHANNELS)).toBeNull();
   });
 
-  /**
-   * **An empty origin is the General thread, not a missing one.**
-   *
-   * The host's `is_general_chat` folds `""`, `"main"` and `"General"` into one
-   * conversation, and the chat route takes `chat` straight off the request body
-   * without normalising it — so `chat: ""` stores `origin_chat_id: Some("")`
-   * and the projection emits `chatId: ""`. Reading that as absent dropped the
-   * live marker while `chat/history` still served the rehydrated twin: the
-   * marker appeared only after a reload, which is exactly the live-vs-history
-   * split the identity-dedupe exists to close.
-   */
-  it("into the main thread when the origin is the empty string", () => {
+  /** An unaddressed message lands in `#general`, so an empty origin is `#general`. */
+  it("into #general when the origin is the empty string", () => {
     const placement = dispatchMarkerPlacement(terminal({ chatId: "" }), CHANNELS);
 
     expect(placement).not.toBeNull();
-    expect(placement?.threadId).toBe(MAIN_THREAD_ID);
+    expect(placement?.threadId).toBe(GENERAL_CHANNEL_ID);
+  });
+
+  it("into #general for a card raised there", () => {
+    const placement = dispatchMarkerPlacement(terminal({ chatId: "general" }), {
+      ...CHANNELS,
+      general: "general",
+    });
+
+    expect(placement?.threadId).toBe("general");
+    expect(placement?.channelId).toBe("general");
+  });
+
+  it("nowhere for a legacy `main` origin, which no longer folds onto #general", () => {
+    const placement = dispatchMarkerPlacement(terminal({ chatId: "main" }), {
+      ...CHANNELS,
+      general: "general",
+    });
+
+    expect(placement?.channelId).toBeNull();
   });
 
   /**

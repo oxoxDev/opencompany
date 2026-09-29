@@ -21,9 +21,10 @@
 //!   every roster agent carries, and none of the orchestrator's `query_company`
 //!   / `spawn_task` / `delegate_to_desk`. It cannot read the board, the roster,
 //!   the workspace tree, another workflow, an MCP server, the web, or a file.
-//! * **No company memory.** Its [`Memory`] is backed by [`ConfinedContext`], an
-//!   in-process store that holds nothing and answers every read empty, so the
-//!   company [`ContextStore`] is not reachable through recall. The pool
+//! * **No company memory.** No memory tool is wired, and [`ConfinedContext`]
+//!   — an in-process store that holds nothing and answers every read empty —
+//!   is what any later memory seam must be pointed at, so the company
+//!   [`ContextStore`] is not reachable through recall. The pool
 //!   additionally skips the retrieve→inject step and the memory writeback for a
 //!   confined turn, so no prior task outcome is prepended to the message and the
 //!   exchange leaves nothing behind for a later turn to retrieve.
@@ -48,23 +49,16 @@
 //! Compiled only under `feature = "openhuman"`, with the rest of the harness.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use openhuman_core as oh;
 
-use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
-use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
-use oh::agent::{Agent, AgentBuilder};
-use oh::memory::Memory;
-use oh::tools::Tool;
+use tinytools::Tool;
 
-use crate::error::OpenCompanyError;
 use crate::harness::HarnessDeps;
-use crate::harness::build::{ensure_agent_workspace, model_for_tier};
-use crate::harness::memory::OcMemory;
-use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
+use crate::harness::build::{AgentBlueprint, ensure_agent_workspace, model_for_tier};
+use crate::harness::policy::ApprovalPolicy;
 use crate::ports::ContextStore;
 use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta, CompanyId, ContextChunk};
 
@@ -104,7 +98,7 @@ impl Confinement {
 
 /// A [`ContextStore`] that stores nothing and finds nothing.
 ///
-/// Stands in for the company's real store so a confined agent's [`Memory`] is
+/// Stands in for the company's real store so a confined agent's memory is
 /// structurally present (openhuman requires one) and substantively empty. Reads
 /// answer empty rather than erroring: a confined turn that *fails* on recall
 /// would be a turn whose confinement is visible to the model as a fault, and
@@ -263,7 +257,7 @@ pub fn build_confined_agent(
     company_name: &str,
     confinement: &Confinement,
     deps: &HarnessDeps,
-) -> crate::Result<Agent> {
+) -> crate::Result<AgentBlueprint> {
     // Its own sandbox directory, so nothing here can resolve into another
     // agent's workspace. Best-effort exactly as on the roster path: an agent
     // with no file tools runs a perfectly good turn without the directory, and
@@ -280,30 +274,6 @@ pub fn build_confined_agent(
         }
     };
 
-    // An empty memory, not the company's. `OcMemory` over `ConfinedContext`
-    // rather than a bespoke `Memory` impl, so this path shares the adapter the
-    // rest of the harness uses and cannot drift from its semantics.
-    let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
-        company.clone(),
-        CONFINED_AGENT_ID,
-        Arc::new(ConfinedContext) as Arc<dyn ContextStore>,
-    ));
-
-    // Same transport rule as the roster path: a provider that advertises native
-    // tool calling gets the native dispatcher, everything else the attribute-
-    // tolerant XML one. It matters even with no tools, because the dispatcher
-    // also decides how a response is parsed.
-    let native_tools = deps
-        .provider
-        .profile()
-        .map(|profile| profile.tool_calling)
-        .unwrap_or(false);
-    let tool_dispatcher: Box<dyn ToolDispatcher> = if native_tools {
-        Box::new(NativeToolDispatcher)
-    } else {
-        Box::new(AttrTolerantXmlDispatcher::default())
-    };
-
     // The conversational workload, not the orchestrator's agentic one: this turn
     // explains a graph it was handed and calls nothing. A host-wide
     // `model_override` still wins, exactly as it does for the roster.
@@ -312,35 +282,33 @@ pub fn build_confined_agent(
         .clone()
         .unwrap_or_else(|| model_for_tier(None));
 
+    // An empty belt renders as an empty `ToolScopeSpec::Named`, so the runtime
+    // offers the model nothing — the boundary [`ConfinedToolPolicy`] enforced
+    // in-process is now the runtime's own tool scope, and the confined
+    // context store is simply never wired (no memory tool reaches this turn).
+    // The policy type stays for the Phase 3 tool handler, which is where a
+    // host-served tool would otherwise reach this turn.
     let tools: Vec<Box<dyn Tool>> = Vec::new();
+    let policy = ApprovalPolicy::new(&crate::company::Policy::default(), None)
+        .with_policy_hitl_disabled()
+        .with_requests(deps.approval_requests.clone())
+        .with_agent(CONFINED_AGENT_ID.to_string());
 
     super::tool_posture::declare();
-    AgentBuilder::default()
-        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
-        .memory(memory)
-        .tools(tools)
-        .tool_dispatcher(tool_dispatcher)
-        .tool_policy(Arc::new(ConfinedToolPolicy::new(confinement.clone())))
-        .prompt_builder(SystemPromptBuilder::for_subagent(
-            confined_persona(company_name, confinement),
-            /* omit_identity */ true,
-            /* omit_safety_preamble */ false,
-        ))
-        .model_name(model)
-        .workspace_dir(workspace)
-        // Named like every other session (see `build_agent`'s own note). The
-        // copilot does not come off the roster, so it does not inherit that
-        // call — and an unnamed session here would put the one turn that runs
-        // under a *confinement* back on the shared `standalone` id, which is
-        // the last turn anybody wants to lose in the crowd.
-        .event_context(
-            crate::harness::session_key::openhuman_session_key(company, CONFINED_AGENT_ID),
-            crate::harness::session_key::SESSION_CHANNEL,
-        )
-        .agent_definition_name(CONFINED_AGENT_ID.to_string())
-        .auto_save(false)
-        .build()
-        .map_err(|e| OpenCompanyError::Harness(format!("build the confined agent: {e}")))
+    Ok(AgentBlueprint {
+        // A confined turn delegates nothing; nothing to withhold.
+        unadvertised: Vec::new(),
+        system_prompt: confined_persona(company_name, confinement),
+        tools,
+        native_tool_names: Vec::new(),
+        #[cfg(feature = "mcp")]
+        company_mcp_servers: Vec::new(),
+        chat_model: deps.provider.clone(),
+        model,
+        workspace,
+        policy: std::sync::Arc::new(policy),
+        definition_name: CONFINED_AGENT_ID.to_string(),
+    })
 }
 
 #[cfg(test)]

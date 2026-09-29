@@ -24,12 +24,12 @@ import { agentDmHref } from "@/views/TeamView";
  * - `dmChannelId(m)` is always `dm:<id>` — the console-local channel id, and so
  *   the address the hash router resolves.
  * - `dmThreadId(m)` is the bare `<id>` — the *host* thread a DM is journaled
- *   under — except when the teammate's own id spells General, where the host
- *   folds the bare key onto the company-wide line.
+ *   under — except when the teammate's own id is `general`, where the bare key
+ *   addresses the company-wide channel.
  *
  * So a card that routed on `dmThreadId` would work for every agent a test
  * roster usually contains, and send an operator who clicked the one teammate
- * called `main` to the company's General channel instead of that teammate's DM
+ * called `general` to the company-wide channel instead of that teammate's DM
  * (the class of bug behind issue #1743). Nothing in the types separates the two
  * — both are strings — and in a browser the failure reads as "the console
  * opened the wrong chat", not as a wrong function call. Hence this test.
@@ -75,14 +75,14 @@ describe("the Agent board's Message address", () => {
     expect(agentDmHref(ada)).toBe(`#/chat/${encodeURIComponent(dmChannelId(ada))}`);
   });
 
-  it("keeps a teammate whose id spells General on their own DM", () => {
+  it("keeps a teammate whose id is `general` on their own DM", () => {
     // The one teammate for whom the two builders disagree. Routing on
-    // `dmThreadId` here would address the company-wide line instead.
-    const main = member({ id: "main", name: "Main" });
+    // `dmThreadId` here would address the company-wide channel instead.
+    const general = member({ id: "general", name: "Gen" });
 
-    expect(dmThreadId(main)).not.toBe(main.id);
-    expect(agentDmHref(main)).toBe("#/chat/dm%3Amain");
-    expect(agentDmHref(main)).toBe(`#/chat/${encodeURIComponent(dmChannelId(main))}`);
+    expect(dmThreadId(general)).not.toBe(general.id);
+    expect(agentDmHref(general)).toBe("#/chat/dm%3Ageneral");
+    expect(agentDmHref(general)).toBe(`#/chat/${encodeURIComponent(dmChannelId(general))}`);
   });
 
   it("survives an id that needs escaping in an address", () => {

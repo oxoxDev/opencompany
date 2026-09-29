@@ -114,8 +114,8 @@ async fn without_an_evaluator_an_abstention_keeps_the_deterministic_answer() {
     );
 }
 
-/// The defect, at the seam that produced it: a card opened for a rambling
-/// ask is named after the **work**, not after the message.
+/// The defect, at the seam that still opens cards by construction: the card
+/// a hand-off opens is named after the **work**, not after the instruction.
 ///
 /// The assertion that matters is the negative one. A card titled
 /// `hey can you take a look at the pricing page, I think the tiers are…` is
@@ -123,7 +123,7 @@ async fn without_an_evaluator_an_abstention_keeps_the_deterministic_answer() {
 /// them read as — a chat log. Asserting only the expected string would still
 /// pass if the title were an excerpt that happened to match.
 #[tokio::test]
-async fn a_card_is_named_after_the_work_not_the_message_that_asked_for_it() {
+async fn a_hand_off_card_is_named_after_the_work_not_the_instruction() {
     let rambling = "hey can you take a look at the pricing page, I think the tiers are \
                     confusing and we should probably reword the middle one";
     let fx = Fixture::new();
@@ -132,51 +132,46 @@ async fn a_card_is_named_after_the_work_not_the_message_that_asked_for_it() {
 
     fx.runner(&turns)
         .with_titler(&titler)
-        .handle_operator_message("engineer", rambling, Some("engineer"))
+        .run_delegation(handoff(rambling), None, MessageContext::default())
         .await
-        .expect("operator message handled");
+        .expect("delegation runs");
 
     let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+    assert_eq!(cards.len(), 1, "one hand-off, one card: {cards:?}");
     assert_eq!(cards[0].title, "Reword the middle pricing tier");
     assert!(
         !rambling.starts_with(cards[0].title.trim_end_matches('…')),
         "the headline is still an excerpt of the request: {}",
         cards[0].title
     );
-    // The full ask is not lost — it moved to where the detail belongs.
+    // The full instruction is not lost — it moved to where the detail belongs.
     assert!(
         cards[0]
             .note
             .as_deref()
             .is_some_and(|note| note.contains("the tiers are confusing")),
-        "the operator's words must survive on the card: {:?}",
+        "the instruction must survive on the card: {:?}",
         cards[0].note
     );
-    // The pass saw the operator's words, not the open-work briefing the
-    // cycle appends to a desk-addressed message.
     assert_eq!(titler.asked(), vec![rambling.to_string()]);
 }
 
 /// No titler wired — an offline company, a default build — still opens the
-/// card, named the way every card was named before.
+/// hand-off card, named the way every card was named before.
 #[tokio::test]
-async fn without_a_titler_a_card_is_still_opened_and_still_named() {
-    // The same message the test above names semantically — one the lexical
-    // layer does not recognise, so the direct-card path is the one that
-    // opens it rather than standing down for the chat handler.
+async fn without_a_titler_a_hand_off_card_is_still_opened_and_still_named() {
     let request = "hey can you take a look at the pricing page, I think the tiers are \
                    confusing and we should probably reword the middle one";
     let fx = Fixture::new();
     let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
 
     fx.runner(&turns)
-        .handle_operator_message("engineer", request, Some("engineer"))
+        .run_delegation(handoff(request), None, MessageContext::default())
         .await
-        .expect("operator message handled");
+        .expect("delegation runs");
 
     let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+    assert_eq!(cards.len(), 1, "one hand-off, one card: {cards:?}");
     assert_eq!(
         cards[0].title,
         crate::ports::tasks::TaskTitle::truncated(request)

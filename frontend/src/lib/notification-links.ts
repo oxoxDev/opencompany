@@ -25,20 +25,14 @@ import { renderedChannelIdForContext } from "@/lib/mention-badge";
  * the id is a chat message id, and the console addresses *channels*, not
  * messages. `context` is the channel the host recorded for exactly this reason
  * ("so a badge lands without the transcript being loaded"), and it is resolved
- * through [`renderedChannelIdForContext`] rather than used raw — the same
- * resolution the mention badge and the shell's thread re-read already share, so
- * a legacy general-chat spelling lands on the rendered main channel here too
- * instead of on a channel id that does not exist (issue #65).
+ * through [`renderedChannelIdForContext`], the same resolution the mention
+ * badge and the shell's thread re-read share.
+ *
+ * A `workflow` row opens the workflows list unless its `context` is a DM: a
+ * `workflow_report` is journaled into the responsible agent's DM and names it
+ * there, as `dm:<id>` or as the bare teammate id, and the row opens that DM.
  */
-export function notificationHref(
-  notification: NotificationDto,
-  channels: {
-    /** The channel ids the rail is actually rendering. */
-    rendered: ReadonlySet<string>;
-    /** The rendered main channel, for a legacy general-chat `context`. */
-    mainChannelId: string | undefined;
-  },
-): string | null {
+export function notificationHref(notification: NotificationDto): string | null {
   const id = notification.subjectId;
   switch (notification.subjectKind) {
     case "task":
@@ -55,13 +49,9 @@ export function notificationHref(
       // which would be a lie about the row that sent you there.
       return "#/approvals";
     case "workflow":
-      return "#/workflows";
+      return workflowReportDm(notification) ?? "#/workflows";
     case "message": {
-      const channel = renderedChannelIdForContext(
-        notification.context,
-        channels.mainChannelId,
-        channels.rendered,
-      );
+      const channel = renderedChannelIdForContext(notification.context);
       if (!channel) return null;
       // The line, not just the room. A mention's `subject.id` is the host's own
       // sequence for the message (`company/runtime.rs` writes
@@ -86,6 +76,14 @@ export function notificationHref(
     default:
       return null;
   }
+}
+
+function workflowReportDm(notification: NotificationDto): string | null {
+  const context = notification.context?.trim();
+  if (!context) return null;
+  if (context.startsWith("dm:")) return `#/chat/${context}`;
+  if (notification.kind === "workflow_report") return `#/chat/dm:${context}`;
+  return null;
 }
 
 /** Newest first, the order the host documents its own feed in. */

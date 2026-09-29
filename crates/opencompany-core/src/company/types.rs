@@ -569,38 +569,6 @@ pub struct CompanyManifest {
     /// How this company relates to the global baseline ([`crate::globals`]).
     #[serde(default)]
     pub globals: Globals,
-    /// `[speech]` — whether this company's agents speak by tool call.
-    #[serde(default)]
-    pub speech: Speech,
-}
-
-/// `[speech]` — whether talking is a tool call rather than a turn's return text.
-///
-/// # Why this is company-level and not per-desk
-///
-/// [`hive.aside`](GroupChatHive) and `hive.referral` are nested under a desk
-/// because they are properties of a *deliberation on that desk*. Speech is a
-/// property of an agent's **session**, which since the session became
-/// continuous spans every desk it sits on plus its DM plus the company's
-/// General line. A per-desk knob would let one agent speak by tool call on one
-/// desk and by return text on another inside one unbroken session — which is
-/// exactly the incoherence the continuous session exists to remove.
-///
-/// # Off by default, and never silencing
-///
-/// A company that does not set this behaves byte-for-byte as it did. A company
-/// that does still has the old path underneath it: an agent that answers
-/// without calling a speech tool has its return text journaled as before, and
-/// the omission is counted rather than dropped. Going quiet because a model
-/// forgot to call a tool is not an acceptable failure mode, so it is not one
-/// this knob can produce.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Speech {
-    /// Whether `desk_post` / `desk_dm` / `desk_close` / `desk_read` are
-    /// registered on every agent's belt.
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 /// `[globals]` — this company's relationship to the global baseline.
@@ -644,20 +612,9 @@ pub struct Company {
     /// Company logo as a self-contained data:image/... URL (issue: operator-set brand logo).
     #[serde(default)]
     pub logo_url: Option<String>,
-    /// The desk that owns the company's own line — the General channel.
-    ///
-    /// Unset (the default) keeps the historical behaviour: General resolves to
-    /// no desk, so a message there is answered by a single responder off the
-    /// fallback ladder.
-    ///
-    /// **The named desk must not itself be called General.** tinyhivemind
-    /// refuses a hive episode on a desk whose id *or name* is a General
-    /// spelling (`reserved desk identity`), and that refusal lands in the turn
-    /// rather than at load — a company that names one boots clean and then
-    /// fails every message on its main thread. This key exists precisely so the
-    /// company line can reach a room without any desk having to be called
-    /// General: the channel is General, the desk it resolves to is not.
-    #[serde(default)]
+    /// Retired: #general is built in. Kept only so manifest validation can
+    /// name the key when a manifest still sets it.
+    #[serde(default, skip_serializing)]
     pub general_desk: Option<String>,
 }
 
@@ -748,16 +705,24 @@ pub struct Agent {
     pub tools: Option<Vec<String>>,
     /// Desks this agent may hand work on to (issue #176).
     ///
-    /// Empty (the default) means **no delegation tools at all** — the behaviour
-    /// every manifest had before this field existed, and the reason adding it is
-    /// a no-op for an existing company. A non-empty list wires
-    /// `spawn_task` + `delegate_to_desk` + `delegate_to_teammate` (issue #884)
-    /// onto this agent (never the orchestrator's roster/workflow/lifecycle
-    /// authority), narrows `delegate_to_desk` to the desks named here, and lets
-    /// `delegate_to_teammate` reach any member of any desk this agent sits on
-    /// (deliberately unconditional — the enable switch is opting in at all, not
-    /// which desk is named) plus every member of the desks named here. `"*"` is
-    /// a wildcard for "every desk the company has" on both tools.
+    /// Every roster agent carries `spawn_task` + `delegate_to_desk` +
+    /// `delegate_to_teammate` (issue #884) — never the orchestrator's
+    /// roster/workflow/lifecycle authority — and this list is what **narrows**
+    /// where the two hand-off tools may reach. Empty (the default, and every
+    /// manifest written before it existed) is **unrestricted**, on the same
+    /// convention as an omitted [`tools`](Self::tools) grant or an omitted
+    /// `ledgers` list: `delegate_to_teammate` reaches everybody on the roster
+    /// and `delegate_to_desk` every desk. A non-empty list narrows
+    /// `delegate_to_desk` to the desks named here, and `delegate_to_teammate`
+    /// to any member of any desk this agent sits on plus every member of the
+    /// desks named here. `"*"` is a wildcard for "every desk the company has"
+    /// on both tools, and so equivalent to leaving the list empty.
+    ///
+    /// It used to be an opt-in — empty meant no hand-off tool at all — which
+    /// left a specialist with no line unable to reach the colleague beside it,
+    /// and left the runtime carding every message on its behalf because it
+    /// could not track anything itself. See `company::team_brief` for what
+    /// each agent is now told about its reach.
     ///
     /// Entries are **desk** ids or names, not teammate ids: desks are
     /// OpenCompany's delegation address space, and `delegate_to_desk` already
@@ -1101,18 +1066,25 @@ pub struct GroupChat {
     /// [`agent_scoped_grants`](crate::runtime::builder::agent_scoped_grants).
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether this desk answers as a **room** rather than through one
-    /// responder, and how far it may go doing so (`[[group_chat]].hive`).
+    /// How this desk routes and paces the episodes it opens, and whether it
+    /// may refer across desks (`[group_chat.routing]`).
     ///
-    /// Every key is optional and every default is derived from the desk's own
-    /// membership, so an omitted section is not a no-op the way `tools` is: a
-    /// desk that grew to two members starts deliberating, which is the point.
-    /// A desk that should keep answering through its lead says
-    /// `hive = { enabled = false }`, and a desk of one is unaffected either way
-    /// — there is nobody to deliberate with. See
-    /// [`crate::hivemind`] and `docs/spec/runtime/hivemind.md`.
-    #[serde(default)]
-    pub hive: crate::hivemind::HiveConfig,
+    /// Every key is optional and every default is the library's, so an
+    /// omitted section is a no-op the way `tools` is: a desk of two runs
+    /// rounds of up to five, routes by Jev when the host has a TinyHumans
+    /// key and by its lead otherwise, and asks nobody outside the room. See
+    /// [`crate::hive::routing`] and `docs/spec/runtime/hive.md`.
+    ///
+    /// The field is named `hive` because it replaced the trace-grammar block
+    /// of that name in place and ~30 fixtures spell it; the manifest key is
+    /// `routing`, and a stale `[group_chat.hive]` is refused by the loader
+    /// with a migration hint.
+    #[serde(
+        default,
+        rename = "routing",
+        skip_serializing_if = "crate::hive::routing::RoutingConfig::is_default"
+    )]
+    pub hive: crate::hive::routing::RoutingConfig,
 }
 
 /// A `[[connection]]` entry — an integration to prioritize wiring. This is

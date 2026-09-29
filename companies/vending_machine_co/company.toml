@@ -81,6 +81,7 @@ enabled = true
 # The webhook lane the simulator drives. `scripts/vending-sim.py` posts each
 # day's triggers here — a machine down, a stockout, a contract clock — which is
 # what makes this a live environment rather than a scripted demo.
+
 [channels.email]
 enabled = true
 
@@ -94,6 +95,7 @@ enabled = true
 # and fall through to `chat-v1`. That is a cost decision, not an oversight:
 # neither is asked to reason about a trade-off, and buying the strongest model
 # for "what does the telemetry say" is money spent on nothing.
+
 [inference]
 models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "max-reasoning", "vision-v1" = "flash" }
 
@@ -119,83 +121,16 @@ name = "Operations desk"
 description = "One day's van at a time: who gets visited, what goes on the shelf, and what breaks if we are wrong."
 members = ["route_planner", "fleet_tech", "stock_controller", "field_realist"]
 
-[group_chat.hive]
-enabled = true
-# Four members x three turns: an opening position, a reply to the room, and a
-# commit. Small on purpose — conformity in a group of language models rises
-# with interaction time, so a longer episode buys correlated error rather than
-# a better route.
-turn_budget = 12
-quorum = 2
-blind_round = true
-# A `!support` with no `^citation` does not count. In this desk that bites
-# hardest on the stock controller: "we have enough stock" is a claim about a
-# number the warehouse tool will actually print, and a support that cannot
-# cite it is a guess wearing a marker.
-require_evidential = true
-refutation_cap = 2
-# `dominance_cap` is a **percent of the room's grounded share**, not a turn
-# count: the library damps a member when `share * 100 > total * cap`. 40 is the
-# lower of the two values the benchmark sweeps and the one its best policy for a
-# four-seat desk uses; the library's own default is 50.
-#
-# This said `3` until the sweep caught it, copied from `hive_math_lab` along
-# with a comment describing a supporter count. Three *percent* means every
-# member that has said anything grounded exceeds the cap and takes the
-# dominance penalty on every later bid — which damps the whole room instead of
-# its loudest seat, the exact opposite of the knob's purpose.
-dominance_cap = 40
-repetition_cap = 2
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-# Only the planner proposes; the two constraint-holders ground or refuse.
-# `commit`, `question` and `defer` are never gated by the runtime whatever a
-# list says — they are written out here for readability only.
-[group_chat.hive.moves]
-route_planner = ["propose", "support", "commit", "question", "defer"]
-fleet_tech = ["evidence", "support", "object", "refute", "question"]
-stock_controller = ["evidence", "support", "object", "refute", "pin"]
-field_realist = ["object", "refute", "question", "evidence", "defer"]
-
-# Private asides: the *other* agent-to-agent seam, and the one that stays
-# inside this desk.
-#
-# The pair this exists for is the fleet technician and the stock controller.
-# "Is VM-301's chiller reliable enough to put sandwiches back in it" is a
-# question those two can settle between them in two lines, and settling it on
-# the floor costs the room two of its twelve turns watching a conversation that
-# has no bearing on the route until it has an answer.
-#
-# `max_members = 1` — a pair, never a caucus. `must_surface` — whatever they
-# conclude is owed back to the room in the open, because an aside carries
-# information and never support: a `!support` written privately moves nothing
-# towards a decision, so a pair that never surfaces has spent two turns on
-# nothing.
-#
-# It is on here and off everywhere else in this repo on purpose. Upstream
-# measured the mechanism and it lost on answer quality
-# (`docs/spec/runtime/hivemind-asides.md`), so enabling it is a decision about
-# *this* desk — four members, two of whom hold constraints the other two do not
-# — rather than a default anybody inherits.
-[group_chat.hive.aside]
-enabled = true
-max_members = 1
-max_messages = 2
-must_surface = true
-
-# Cross-desk referral: this is the agent-to-agent seam that leaves the desk.
-#
-# `reach = "desks"` lets a member mid-episode put a question to `@#commercial`
-# or `@#intel`. `returns = true` carries the answer home — a question whose
-# answer never comes back is a turn spent for nothing. `peer_cap = 2` bounds
-# how *wide* an episode may go: the library bounds depth (`max_hops`) and
-# deliberately bounds nothing about width, because only a host knows what a
-# turn costs it.
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 2
 
 # ---------------------------------------------------------------------------
 # The commercial desk.
@@ -212,33 +147,16 @@ name = "Commercial desk"
 description = "What each line and each host site is actually worth, and what we are prepared to sign."
 members = ["account_manager", "pricing_analyst", "contract_counsel"]
 
-[group_chat.hive]
-enabled = true
-turn_budget = 9
-quorum = 2
-blind_round = true
-require_evidential = true
-refutation_cap = 2
-# A share, not a count — see the operations desk above.
-dominance_cap = 40
-repetition_cap = 2
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-# Two seats may propose here, unlike ops, because a commercial question has two
-# genuinely different framings — "what do we charge" and "what do we sign" —
-# and forcing both through one seat produces a plan that is only ever one of
-# them. Counsel proposes nothing and may refute anything: its whole job is to
-# be the seat that says no with a citation.
-[group_chat.hive.moves]
-account_manager = ["propose", "support", "evidence", "commit", "question"]
-pricing_analyst = ["propose", "support", "evidence", "object", "pin"]
-contract_counsel = ["object", "refute", "evidence", "question", "defer"]
-
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 2
 
 # ---------------------------------------------------------------------------
 # The signals desk.
@@ -257,45 +175,16 @@ name = "Signals desk"
 description = "What the market did this week, and which of it should change a plan."
 members = ["market_scout", "demand_analyst"]
 
-[group_chat.hive]
-enabled = true
-# Eight, not six. See the evidential note below: this desk was the most
-# constrained in the company and spent its budget without deciding in almost
-# every live run.
-turn_budget = 8
-# Two members, so a quorum of two is unanimity — correct here. A room of two
-# that could carry on one supporter is a room where either member decides
-# alone, which is a single responder with extra steps.
-quorum = 2
-blind_round = true
-# **No `require_evidential` here, unlike the other two desks**, and this is the
-# one knob in the bundle set from measurement rather than from argument.
-#
-# Stacking it on a two-member desk whose quorum is already unanimity means a
-# decision needs *both* seats to file a citation that chains to a stated fact.
-# The deliberation benchmark
-# (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`) puts numbers
-# on it: at `--agents 2`, `require_evidential` takes the decided rate from
-# 91.6% to **36.2%** and correctness from 63.6% to 30.7% over 2000 seeded
-# rooms. Live runs of this company agreed — the signals desk spent its budget
-# without reaching a decision in nearly every episode it opened.
-#
-# The other two desks keep it. They are larger, and their seats read hard
-# figures off the `vending` MCP on almost every turn, so a citation that
-# reaches a fact is cheap there in a way it is not here: this desk's whole job
-# is to weigh a signal nobody has measured yet.
-repetition_cap = 2
+[group_chat.routing]
+# Completion-driven episodes (`docs/spec/runtime/hive.md`): the desk's seats run
+# in concurrent rounds until every assigned seat calls `complete_episode`.
+# Round width, round cap and turn timeout take the library defaults here.
 
-[group_chat.hive.moves]
-market_scout = ["evidence", "propose", "question", "pin", "defer"]
-demand_analyst = ["support", "object", "refute", "evidence", "commit"]
-
-[group_chat.hive.referral]
+[group_chat.routing.referral]
 enabled = true
 reach = "desks"
 max_hops = 2
 returns = true
-peer_cap = 1
 
 # ---------------------------------------------------------------------------
 # Cadence. This is what makes the company run rather than wait.

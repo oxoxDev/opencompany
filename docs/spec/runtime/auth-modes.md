@@ -5,12 +5,14 @@ picks one of three modes, and the one it picks is the only one its host serves.
 
 | Mode | Who signs in | How | Bootstrap list |
 |---|---|---|---|
-| `email` (default) | an invited address | magic link, optional password, ecosystem hub | `[users].admins` |
+| `email` (default) | an invited address, or a username | password; a magic link where the host mails; the first-admin claim | `[users].admins`, or the first person in |
 | `wallet` | an invited base58 wallet | a signed challenge | `[users].wallets` |
 | `none` | nobody | there is no sign-in | — |
 
 `email` is the default and is exactly what every company did before this was
 configurable, so a manifest that names no mode is unaffected by this existing.
+The "email" in the name is the identity key, not a requirement: on a host with
+no mail transport a login is a plain username, and nothing is ever sent to it.
 
 Everything downstream of *identification* is shared between `email` and
 `wallet`. Both converge on the same `eligibility` → `upsert_from_eligibility` →
@@ -188,8 +190,8 @@ field — three keyspaces cannot collide, whereas one keyspace plus a check is o
 as good as every caller remembering the check.
 
 There is **no password path and no mailbox** in a wallet company: no magic link,
-no invite mail, no ecosystem buttons (a hub sign-in resolves to an email address
-and would apply an email roster this company does not have). An admin still
+no invite mail, no first-admin claim (the key list is the bootstrap). An admin
+still
 invites a base58 address exactly as they would invite a mailbox; the invitee
 learns of it out of band, and the invite reports its delivery as `no_mailbox` —
 not a failure and not a missing transport, but the honest statement that there
@@ -293,7 +295,7 @@ a replacement for it.
 ## What the console is told
 
 `GET …/auth/config` →
-`{"mode": "email"|"wallet"|"none", "name": string, "passwords": bool, "magicLink": bool}`.
+`{"mode": "email"|"wallet"|"none", "name": string, "passwords": bool, "magicLink": bool, "claimable": bool}`.
 
 Unauthenticated by construction, like every other login route: the console asks
 before anyone has a credential, because it cannot choose a screen otherwise. It
@@ -311,13 +313,20 @@ knows this for certain; publishing it discloses no membership, exactly as the
 mode does not. A console talking to a host that omits it draws the bare
 "Sign in" it drew before the field existed.
 
-`magicLink` is whether a link asked for here reaches anybody: a wired mail
-transport, or a loopback host that hands the code back in the response. It is
-false on a routable host with no transport, and the console must say so instead
-of drawing the form — `auth/request` answers `sent: true` there exactly as it
-does on a host that delivered, deliberately, so nothing about the response
-itself tells the person their link went nowhere. A host predating the field is
-assumed `true`, matching the `email` default above.
+`magicLink` is whether a link asked for here reaches a mailbox: a wired mail
+transport, and nothing else. It is false on any host with no transport — the
+loopback echo of the code (`dev_code`) is a developer convenience on the API
+and deliberately does not count — and the console then draws the password form
+alone rather than the link form: `auth/request` answers `sent: true` there
+exactly as it does on a host that delivered, deliberately, so nothing about the
+response itself tells the person their link went nowhere. A host predating the
+field is assumed `true`, matching the `email` default above.
+
+`claimable` is whether nobody has joined this company yet, so the first person
+in may pick the admin login and a password (`POST …/auth/claim`,
+[users.md](users.md#first-admin)). Only ever true in `email` mode, and only
+until the first user exists. A host predating the field is assumed `false` —
+it has no claim route to send anyone to.
 
 ## Related
 

@@ -92,13 +92,14 @@ use oh::security::{
     AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
 };
 use oh::tools::{
-    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, Tool,
-    WebFetchTool, WorkspaceStateTool,
+    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, WebFetchTool,
+    WorkspaceStateTool,
 };
+use tinytools::Tool;
 
 use crate::harness::policy::PolicyMode;
 
-use oh::tools::traits::{
+use tinytools::{
     PermissionLevel, ToolCallOptions, ToolCategory, ToolResult, ToolRunContext, ToolScope,
     ToolSpec, ToolTimeout,
 };
@@ -325,7 +326,9 @@ impl ShellTool {
 impl ToolGuard for HighRiskCommands {
     fn timeout_policy(&self, inner: ToolTimeout) -> ToolTimeout {
         match inner {
-            ToolTimeout::Secs(secs @ 1..=3600) => ToolTimeout::Secs(secs),
+            // The vocabulary moved from seconds to milliseconds at the 1ecf1b0
+            // pin; the bound is the same hour.
+            ToolTimeout::Millis(ms @ 1..=3_600_000) => ToolTimeout::Millis(ms),
             _ => ToolTimeout::Inherit,
         }
     }
@@ -717,7 +720,9 @@ pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
         brief.push_str(
             "Read and write it with `file_read`, `file_write`, `edit`, `list`, `glob` and \
              `grep`. Subdirectories are created for you on write, and an absolute path or a \
-             `../` escape is refused by these tools.\n",
+             `../` escape is refused by these tools. A file you write or edit this way also \
+             lands in the company workspace under your own `agents/` folder, so your reply can \
+             point at it and anyone can open it.\n",
         );
     }
     if shell {
@@ -754,6 +759,56 @@ pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
          approval before it runs. That is a pause, not a failure: you will be told the outcome. \
          Until you are, do not report the work as done.",
     );
+    brief
+}
+
+/// Describe the live public-web surface without promising a search backend the
+/// deployment did not wire.
+///
+/// URL fetch and URL discovery are deliberately separate grants/backends. That
+/// distinction must be visible to the model: otherwise a research agent that
+/// lacks `web_search` repeatedly searches the company workspace, even though it
+/// can still verify known official URLs with `web_fetch`.
+pub fn web_brief(fetch: bool, search: bool) -> String {
+    if !fetch && !search {
+        return String::new();
+    }
+
+    let mut brief = String::from("\n\n## Public web\n");
+    if fetch {
+        brief.push_str(
+            "Use `web_fetch` to read and cite a public URL you already know. Use `http_request` \
+             for an API or a non-GET request, and `curl` only when you need to download a file \
+             into your sandbox. These fetch tools do not discover URLs.\n",
+        );
+    }
+    if search {
+        if fetch {
+            brief.push_str(
+                "Use `web_search` to discover current sources, then open the strongest results \
+                 with `web_fetch` before making claims.\n",
+            );
+        } else {
+            brief.push_str(
+                "Use `web_search` to discover current sources. URL fetching is not granted for \
+                 this turn, so ground claims in the search results and do not invent page \
+                 contents you could not open.\n",
+            );
+        }
+        brief.push_str(
+            "If `web_search` reports an authentication, expired-session, missing-credential, or \
+             unavailable-provider error, stop after that one call and report the exact blocker. \
+             A different query cannot repair credentials, so do not retry it or substitute local \
+             workspace reads for the missing public sources.\n",
+        );
+    } else {
+        brief.push_str(
+            "No `web_search` provider is connected for this turn. For research, verify official \
+             URLs you know with `web_fetch`; if discovery is essential, say specifically that a \
+             Search provider must be connected. Do not substitute repeated workspace or ledger \
+             reads for public-web discovery.\n",
+        );
+    }
     brief
 }
 
@@ -883,24 +938,26 @@ impl MediaBackend {
 /// managed credential is present; the generate tools additionally park for
 /// operator approval through the [`ApprovalPolicy`](crate::harness::policy).
 ///
-/// * `media_generate_image` / `media_generate_video` — submit → poll → persist,
-///   billed by the backend.
+/// * `media_generate_image` / `media_generate_video` — submit → poll → persist
+///   (each saved file also filed as a workspace artifact), billed by the
+///   backend.
 /// * `media_list_models` — read-only catalog GET (needs no `action_dir`).
 ///
 /// Gated on the `media` feature; enabling it necessarily enables
 /// `openhuman_core/media`, so the upstream tool types are in scope.
 #[cfg(feature = "media")]
 pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool>> {
-    use oh::integrations::IntegrationClient;
-    use oh::media::generation::{
-        MediaGenerateImageTool, MediaGenerateVideoTool, MediaListModelsTool,
+    use oh::media::generation::{MediaGenerators, OPENROUTER_PROXY_PATH, media_tools_from};
+    use tinyagents_harness::tinyinference_image::{
+        MediaAuth, MediaTransport, OpenRouterImageGenerator,
     };
+    use tinyagents_harness::tinyinference_video::{OpenRouterVideoGenerator, WaitPolicy};
 
-    // Fail closed on any backend that is not exactly HTTPS: the client attaches
-    // the managed platform token and the backend charges real money on submit,
-    // so an `http://` override would ship the credential over the wire. The
-    // default (`https://api.tinyhumans.ai`) passes; a misconfigured host gets
-    // no media tools at all, loudly, rather than a client that leaks.
+    // Fail closed on any backend that is not exactly HTTPS: the transport
+    // attaches the managed platform token and the backend charges real money
+    // on submit, so an `http://` override would ship the credential over the
+    // wire. The default (`https://api.tinyhumans.ai`) passes; a misconfigured
+    // host gets no media tools at all, loudly, rather than a client that leaks.
     if !backend.is_https() {
         tracing::warn!(
             backend_url = %backend.backend_url,
@@ -909,21 +966,41 @@ pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool
         return Vec::new();
     }
 
-    // The Config-free seam: `IntegrationClient::new(backend_url, auth_token)`
-    // takes the managed credential directly, with no OpenHuman global `Config`.
-    let client = Arc::new(IntegrationClient::new(
-        backend.backend_url.clone(),
-        backend.auth_token.clone(),
-    ));
-    let action_dir = workspace.to_path_buf();
-    vec![
-        Box::new(MediaGenerateImageTool::new(
-            Arc::clone(&client),
-            action_dir.clone(),
-        )),
-        Box::new(MediaGenerateVideoTool::new(Arc::clone(&client), action_dir)),
-        Box::new(MediaListModelsTool::new(client)),
-    ]
+    // The Config-free seam. OpenHuman's own `build_media_tools` resolves the
+    // endpoint and credential from a global `Config`; this host has neither,
+    // so it builds the same OpenRouter generators over the backend's
+    // `/agent-integrations/openrouter` proxy with the managed credential it
+    // was handed, and lets upstream's `media_tools_from` bind them under the
+    // pinned tool names (`media_generate_image` / `media_generate_video` /
+    // `media_list_models`) the approval policy parks on.
+    crate::harness::backend_transport::ensure_installed();
+    let http = match oh::util::tls::tls_client_builder()
+        .default_headers(openhuman_tinyhumans::backend::product_identity_headers())
+        .build()
+    {
+        Ok(http) => http,
+        Err(error) => {
+            tracing::warn!(%error, "[toolbelt] media tools skipped: HTTP client build failed");
+            return Vec::new();
+        }
+    };
+    let base = openhuman_core::util::url::join_url(&backend.backend_url, OPENROUTER_PROXY_PATH);
+    let transport = MediaTransport::new(MediaAuth::ApiKey(backend.auth_token.clone()))
+        .with_client(http)
+        .with_base_url(&base);
+    let generators = MediaGenerators {
+        image: Arc::new(OpenRouterImageGenerator::with_transport(transport.clone())),
+        video: Arc::new(OpenRouterVideoGenerator::with_transport(transport)),
+    };
+    media_tools_from(
+        generators,
+        workspace,
+        workspace,
+        WaitPolicy::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(600),
+        ),
+    )
 }
 
 /// The `subagent` namespace — **reserved and empty in v1**.

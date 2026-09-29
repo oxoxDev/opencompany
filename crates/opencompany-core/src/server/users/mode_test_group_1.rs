@@ -151,12 +151,12 @@ async fn auth_config_reports_a_magic_link_that_cannot_arrive() {
     );
 }
 
-/// The two ways a link does reach the person: mailed, or — on a loopback host —
-/// handed straight back in the response. The second is the laptop case, and
-/// treating it as "no magic link" would take the form away from the only host
-/// where it needs no configuration at all.
+/// Only a wired transport makes the link real. A loopback host with no
+/// transport still echoes the code on the API for tooling, but the sign-in
+/// screen must not offer "email me a link" on a host that will email nothing:
+/// the password is the way in there, and the screen says so.
 #[tokio::test]
-async fn auth_config_reports_a_magic_link_that_is_mailed_or_echoed() {
+async fn auth_config_reports_a_magic_link_only_where_mail_is_wired() {
     let dir = home();
     let mailed = state_in_mode_on(
         dir.path(),
@@ -184,9 +184,31 @@ async fn auth_config_reports_a_magic_link_that_is_mailed_or_echoed() {
         .unwrap();
     let body = body_json(response).await;
     assert_eq!(
-        body["magicLink"], true,
-        "a loopback host hands the code back: {body}"
+        body["magicLink"], false,
+        "a loopback host with no transport offers no link form: {body}"
     );
+}
+
+/// `claimable` is the sign-in screen's cue to offer the first admin claim. It
+/// is true on an email company nobody has joined, and never in another mode —
+/// a wallet company bootstraps from its key list and a `none` company has no
+/// accounts at all.
+#[tokio::test]
+async fn auth_config_reports_claimable_only_on_an_empty_email_company() {
+    for (mode, expected) in [
+        (AuthMode::Email, true),
+        (AuthMode::Wallet, false),
+        (AuthMode::None, false),
+    ] {
+        let dir = home();
+        let state = state_in_mode(dir.path(), mode, None).await;
+        let response = router(state)
+            .oneshot(get("/api/v1/company/auth/config"))
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        assert_eq!(body["claimable"], expected, "({}) {body}", mode.as_str());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,14 +246,6 @@ async fn a_wallet_company_refuses_every_email_route() {
         // itself rather than telling somebody their address was wrong.
         assert_eq!(body["mode"], "wallet", "{uri}");
     }
-
-    // No ecosystem buttons either — a hub sign-in resolves to an email address
-    // and would apply an email roster this company does not have.
-    let response = app.oneshot(get("/api/v1/company/auth/hub")).await.unwrap();
-    assert_eq!(
-        body_json(response).await["providers"],
-        serde_json::json!([])
-    );
 }
 
 /// An email company has no wallet door.

@@ -3,9 +3,9 @@
 // Every other tab on this page describes what a teammate *is* — its
 // instructions, its toolbelt, its model — and `AgentRuns` says what it has
 // *done*. This one says what it has **said and heard**: your DMs with it, its
-// lines on every desk it sits on, the private asides it was party to, the
-// questions it put to another desk, and the tool calls behind each answer, in
-// the order it experienced them.
+// lines on every desk it sits on, the desk DMs it was party to, the questions
+// it put to another desk, and the tool calls behind each answer, in the order
+// it experienced them.
 //
 // # Why this is one stream and not a channel picker
 //
@@ -26,9 +26,10 @@
 //
 // # The operator sees more than the agent does
 //
-// Deliberately. Asides are narrowed for a peer agent and never for a person —
-// privacy there is a deliberation device, not a security boundary — so this
-// page shows every one in full. See `docs/spec/runtime/hivemind-asides.md`.
+// Deliberately. A desk `dm` is narrowed for a peer agent and never for a person
+// — audience there is a coordination device, not a security boundary — so this
+// page shows every one in full, with its recipients on the chip. See
+// `docs/spec/runtime/events.md`, "Hive episodes and rounds".
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Braces, Loader2, MessageSquare, MessagesSquare } from "lucide-react";
@@ -43,11 +44,8 @@ import { useHashFlag } from "@/hooks/use-hash-flag";
 import { fromHistory, type ChatMessage } from "@/lib/chat";
 import { cn } from "@/lib/utils";
 import { RawTurns } from "@/views/room/RawTurns";
-import {
-  AsideConversation,
-  ReferralConversation,
-  StepTimeline,
-} from "@/views/room/StepTimeline";
+import { ReferralConversation, StepTimeline } from "@/views/room/StepTimeline";
+import { UtteranceChip } from "@/components/episode/UtteranceChip";
 
 /** How many lines one page of the session carries. */
 const SESSION_PAGE = 200;
@@ -62,7 +60,7 @@ interface SessionLine {
    * renders **this** and not `message`.
    *
    * `fromHistory` is a rendering decision: it resolves `from` against the
-   * viewer, prefixes ids, and lifts referrals and asides onto the bubble. All
+   * viewer, prefixes ids, and lifts referrals and episodes onto the bubble. All
    * of that is exactly what somebody asking for the raw turns is asking to see
    * past. Rendering the raw view from the mapped shape would make it a second
    * opinion about the transcript rather than the transcript.
@@ -77,11 +75,13 @@ export function AgentSession({
   company,
   agentId,
   agentName,
+  agentNames,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   agentId: string;
   agentName: string;
+  agentNames?: Readonly<Record<string, string>>;
 }) {
   const [lines, setLines] = useState<SessionLine[]>([]);
   const [load, setLoad] = useState<Load>("loading");
@@ -102,9 +102,9 @@ export function AgentSession({
   // the same guard `AgentRuns` carries, for the same reason (issue #1671).
   const generationRef = useRef(0);
 
-  const read = useCallback(async () => {
+  const read = useCallback(async (quiet = false) => {
     const generation = ++generationRef.current;
-    setLoad("loading");
+    if (!quiet) setLoad("loading");
     try {
       const rows: AgentSessionMessageDto[] = await client.agentSession(agentId, company, {
         limit: SESSION_PAGE,
@@ -112,7 +112,7 @@ export function AgentSession({
       if (generation !== generationRef.current) return;
       // `fromHistory` is the room's own mapping, reused whole: it is what
       // prefixes host ids, resolves `from`, and carries `referralConversation`
-      // and `asideConversation` through untouched. Mapping these rows by hand
+      // and `episode` through untouched. Mapping these rows by hand
       // would be a second answer to "what is a chat line" that would drift from
       // the room's.
       //
@@ -150,6 +150,16 @@ export function AgentSession({
   useEffect(() => {
     void read();
   }, [read]);
+
+  // Raw turns is the live diagnostic surface now that chat deliberately hides
+  // tool-call rows. Refresh without replacing the populated view with a loader;
+  // the accepted message appears first, then its durable steps arrive when the
+  // turn settles.
+  useEffect(() => {
+    if (!raw) return;
+    const timer = window.setInterval(() => void read(true), 2_000);
+    return () => window.clearInterval(timer);
+  }, [raw, read]);
 
   if (load === "loading") {
     return (
@@ -218,7 +228,7 @@ export function AgentSession({
         ) : (
           <ol className="space-y-4" data-testid="agent-session">
             {lines.map((line) => (
-              <SessionRow key={line.message.id} line={line} agentId={agentId} />
+              <SessionRow key={line.message.id} line={line} agentId={agentId} agentNames={agentNames} />
             ))}
           </ol>
         )}
@@ -267,7 +277,15 @@ function ViewToggle({
 }
 
 /** One line of the session, badged with where it was said. */
-function SessionRow({ line, agentId }: { line: SessionLine; agentId: string }) {
+function SessionRow({
+  line,
+  agentId,
+  agentNames,
+}: {
+  line: SessionLine;
+  agentId: string;
+  agentNames?: Readonly<Record<string, string>>;
+}) {
   const { message, channel } = line;
   // Who is speaking, from the reader's point of view. `from` is resolved
   // host-side against the *viewer*, so "you" here means the operator reading
@@ -310,8 +328,8 @@ function SessionRow({ line, agentId }: { line: SessionLine; agentId: string }) {
         {message.referralConversation && (
           <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
         )}
-        {message.asideConversation && (
-          <AsideConversation aside={message.asideConversation} />
+        {message.episode && (
+          <UtteranceChip episode={message.episode} audience={message.audience} agentNames={agentNames} />
         )}
       </div>
     </li>

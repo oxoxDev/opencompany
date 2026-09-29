@@ -30,12 +30,12 @@ An Operator boots a real company from a manifest and works with it daily.
   mapped to OpenHuman policy tiers; cron schedules; the
   [feedback loop](feedback-loop/README.md) files its first GitHub issues.
   **Delivered by a revised route:** rather than `ToolProvider`/`ChannelAdapter`
-  over JSON-RPC to `openhuman-core serve`, the harness embeds `openhuman_core`
-  as a **library** (`AgentBuilder`) — one openhuman `Agent` per manifest
-  `[[agent]]`, with memory, inference provider, tools, skills, and approval
-  policy injected through the builder's seams
+  over JSON-RPC to `openhuman-core serve`, the harness embeds OpenHuman as a
+  **library** (`openhuman_embed`) — one process-wide `Runtime`, one `Agent`
+  per manifest `[[agent]]` from an `AgentSpec`, with the company's own tools
+  served to it over MCP
   ([integrations/openhuman.md](integrations/openhuman.md)). The JSON-RPC
-  launcher/wire path is legacy (behind `openhuman-rpc`).
+  launcher/wire path (`openhuman-rpc`) has been removed.
 
 ## Stage 2 — Public Company
 

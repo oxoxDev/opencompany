@@ -113,3 +113,30 @@ impl Drop for EnvVarGuard {
         }
     }
 }
+
+/// A company id unique to the calling thread — in libtest, unique to the
+/// calling test.
+///
+/// Since plan hive-desks Phase 2 every turn test in this binary runs on the
+/// one process-wide OpenHuman runtime, whose thread transcripts are keyed by
+/// `(company, agent)`. Two fixtures both naming `acme`/`ceo` resume each
+/// other's transcript, system prompt included, and assert on the wrong turn.
+/// A fixture that builds its record once passes a fresh `uuid` inline; one
+/// whose helpers re-derive the id in several places (`company()`, a store
+/// lookup after the run) reads it from here so every call in the test agrees.
+///
+/// Per thread rather than per call because libtest runs each test on its own
+/// thread; a fixture that spawns a thread and calls this from it gets a
+/// different id, which is the one way to misuse it.
+#[cfg(feature = "openhuman")]
+pub(crate) fn per_test_company_id(prefix: &str) -> crate::ports::types::CompanyId {
+    thread_local! {
+        static ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    let nonce = ID.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(|| uuid::Uuid::new_v4().simple().to_string())
+            .clone()
+    });
+    crate::ports::types::CompanyId::new(format!("{prefix}-{nonce}"))
+}

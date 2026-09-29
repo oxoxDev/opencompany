@@ -61,6 +61,6 @@ deployment that had a cookie available.
 
 A login link is built by the host out of its own base URL, so following one
 opens that host's own console rather than the hub. Within the hub, the working
-sign-in paths are password, wallet, and ecosystem sign-in. Redirecting a link
+sign-in paths are password and wallet. Redirecting a link
 back to a hub origin would require the host to know that origin, which nothing
 tells it today.

@@ -64,6 +64,11 @@ function sentrySourceMapUpload(): PluginOption | null {
     url: process.env.SENTRY_URL,
     org: process.env.SENTRY_ORG,
     project: process.env.SENTRY_PROJECT,
+    // The plugin otherwise reports an upload error but lets Vite exit zero.
+    // A release whose stack traces cannot be symbolicated is not complete.
+    errorHandler(error) {
+      throw error;
+    },
     release: {
       name: RELEASE,
       // The bundle already carries this release through the
@@ -79,7 +84,10 @@ function sentrySourceMapUpload(): PluginOption | null {
       // Dockerfile, `scripts/desktop-dev.sh`. The only symptom is a
       // "Didn't find any matching sources for debug ID upload" line in a log
       // nobody reads, and un-symbolicated stack traces weeks later.
-      assets: [path.resolve(__dirname, "dist/**/*.js"), path.resolve(__dirname, "dist/**/*.map")],
+      assets: [
+        path.resolve(__dirname, "dist/**/*.js"),
+        path.resolve(__dirname, "dist/**/*.map"),
+      ],
       // Never ship raw maps to a browser: the upload keeps a copy server-side
       // for symbolication and the bundle goes out without them.
       filesToDeleteAfterUpload: [path.resolve(__dirname, "dist/**/*.map")],
@@ -91,7 +99,9 @@ function sentrySourceMapUpload(): PluginOption | null {
 const sentryPlugin = sentrySourceMapUpload();
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), sentryPlugin].filter(Boolean) as PluginOption[],
+  plugins: [react(), tailwindcss(), sentryPlugin].filter(
+    Boolean,
+  ) as PluginOption[],
   define: {
     // One release string for the bundle and for the upload. See
     // `src/vite-env.d.ts` for why this is a define and not a `VITE_*`.

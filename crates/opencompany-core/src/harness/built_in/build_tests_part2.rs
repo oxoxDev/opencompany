@@ -204,8 +204,9 @@ fn workspace_search_rides_the_workspace_grant_and_not_the_metered_search_grant()
 /// `*` grant. Any tool added to or removed from a dispatched agent flips
 /// this snapshot and fails CI — the whole point of the pin. The set is the
 /// curated exec subset (shell / code / web) plus the intrinsic memory + file
-/// tools; it contains NO delegation tool and NO deferred family, and — the
-/// #238 addition — no `web_search`, because a bare `*` does not confer the
+/// tools and the three hand-off tools every roster agent carries; it
+/// contains NO orchestrator authority and NO deferred family, and — the #238
+/// addition — no `web_search`, because a bare `*` does not confer the
 /// `search` grant. Nor does it contain `mcp_registry_list_tools` /
 /// `mcp_registry_tool_call`, for the identical reason: those two ride the
 /// explicit `mcp_registry` grant, never the wildcard — see the
@@ -242,6 +243,14 @@ fn dispatched_desk_agent_tool_belt_is_pinned() {
         // to hit something only the operator can answer, and its
         // alternatives are guessing or going quiet.
         "escalate_to_human",
+        // The hand-off tools, on every roster agent's belt whatever its
+        // `delegates_to` says (an empty list is unrestricted, not unwired):
+        // a teammate that cannot reach the colleague beside it, and cannot
+        // open a card, is one the runtime had to card *for* — which is how
+        // every desk message became a task nobody asked for.
+        "delegate_to_desk",
+        "delegate_to_teammate",
+        "spawn_task",
     ];
     // The global baseline installs skills in every company (issue: global
     // agents/skills/workflows), so the three skill read tools are on every
@@ -350,13 +359,12 @@ fn mcp_registry_tools_fail_closed_with_no_registry_home() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        policy,
+        std::sync::Arc::new(policy),
         &deps,
         &grants,
         &[],
         &[],
         None,
-        false,
         false,
     )
     .expect("agent builds");
@@ -419,19 +427,18 @@ fn every_built_agent_states_a_raised_tool_iteration_cap() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
+        std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
         &deps,
         &[],
         &[],
         &[],
         None,
         false,
-        /* speech_enabled */ false,
     )
     .expect("agent builds");
 
     assert_eq!(
-        agent.agent_config().max_tool_iterations,
+        agent.max_tool_iterations(),
         MAX_TOOL_ITERATIONS,
         "the built agent is not running on the cap this crate states"
     );
@@ -444,73 +451,19 @@ fn every_built_agent_states_a_raised_tool_iteration_cap() {
     );
 }
 
-/// (b) The **default** depth cap (issues #178, #176): a dispatched desk
-/// agent that named no `delegates_to` must NEVER receive a delegation tool,
-/// while the orchestrator agent MUST. Building both from the same grant and
-/// contrasting them is the registration check that an ordinary dispatched
-/// turn cannot re-delegate.
+/// (b) A dispatched desk agent carries the three **hand-off** tools and
+/// none of the orchestrator's **authority**; the orchestrator carries both.
+/// Building both from the same grant and contrasting them is the
+/// registration check that a desk lead can reach a colleague without
+/// becoming a second CEO.
 ///
-/// #176 made this the default rather than the only possibility — the
-/// opt-in case is pinned by
-/// [`a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools`], and
-/// the belt above is unchanged for every agent that does not opt in.
+/// Issue #176 wired the hand-off tools only onto a member that opted in
+/// with `delegates_to`; they are now on every belt, and the list only
+/// narrows where they reach — see [`a_narrowed_member_gets_the_same_belt`].
 #[test]
-fn dispatched_agent_has_no_delegation_tools_but_orchestrator_does() {
-    let delegation = [
-        "query_company",
-        "spawn_task",
-        "delegate_to_desk",
-        // Issue #884: the new hand-off is opt-in on exactly the same terms —
-        // an ordinary dispatched agent must not silently gain the ability to
-        // run somebody else's turn.
-        "delegate_to_teammate",
-    ];
-
-    let dispatched = built_tool_names(&["*"], false);
-    for tool in delegation {
-        assert!(
-            !dispatched.contains(&tool.to_string()),
-            "dispatched desk agent must NOT receive delegation tool `{tool}`: {dispatched:?}"
-        );
-    }
-
-    let orchestrator = built_tool_names(&["*"], true);
-    for tool in delegation {
-        assert!(
-            orchestrator.contains(&tool.to_string()),
-            "orchestrator agent MUST receive delegation tool `{tool}`: {orchestrator:?}"
-        );
-    }
-}
-
-/// (b2) Issue #176: a member the manifest opted in with `delegates_to` gets
-/// **exactly the hand-off tools** more than it had — `spawn_task`,
-/// `delegate_to_desk`, and (issue #884) `delegate_to_teammate` — and not one
-/// tool of the orchestrator's authority.
-///
-/// Expressed as a delta against the un-opted-in belt rather than as a second
-/// flat literal, so the feature-aware snapshot above stays the single place
-/// the dispatched belt is written down. What this pins is the thing #176
-/// could get wrong: reaching for `orchestrator_tools` and handing a desk
-/// lead `add_agent`, `assign_task` and `review_task` along with the hand-off
-/// it actually needs.
-#[test]
-fn a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools() {
-    let plain = built_tool_names(&["*"], false);
-    let delegating = built_tool_names_delegating(&["*"], false, &["research"]);
-
-    let added: Vec<&String> = delegating.iter().filter(|t| !plain.contains(t)).collect();
-    assert_eq!(
-        added,
-        vec!["delegate_to_desk", "delegate_to_teammate", "spawn_task"],
-        "a delegating member's belt must differ from the plain one by exactly the \
-         hand-off tools: {delegating:?}"
-    );
-    assert!(
-        plain.iter().all(|t| delegating.contains(t)),
-        "opting in must ADD tools, never remove any: {delegating:?}"
-    );
-    for authority in [
+fn dispatched_agent_has_the_hand_off_tools_but_not_the_orchestrators_authority() {
+    let hand_off = ["spawn_task", "delegate_to_desk", "delegate_to_teammate"];
+    let authority = [
         "query_company",
         "assign_task",
         "review_task",
@@ -518,29 +471,60 @@ fn a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools() {
         "run_workflow",
         "create_workflow",
         "read_run_output",
-    ] {
+    ];
+
+    let dispatched = built_tool_names(&["*"], false);
+    for tool in hand_off {
         assert!(
-            !delegating.contains(&authority.to_string()),
-            "a desk member must NOT receive orchestrator authority `{authority}`: \
-             {delegating:?}"
+            dispatched.contains(&tool.to_string()),
+            "dispatched desk agent MUST receive hand-off tool `{tool}`: {dispatched:?}"
+        );
+    }
+    for tool in authority {
+        assert!(
+            !dispatched.contains(&tool.to_string()),
+            "dispatched desk agent must NOT receive orchestrator authority `{tool}`: \
+             {dispatched:?}"
+        );
+    }
+
+    let orchestrator = built_tool_names(&["*"], true);
+    for tool in hand_off.iter().chain(authority.iter()) {
+        assert!(
+            orchestrator.contains(&tool.to_string()),
+            "orchestrator agent MUST receive `{tool}`: {orchestrator:?}"
         );
     }
 }
 
-/// (b3) Issue #176: the wiring is inert for an agent that named no
-/// allowlist, and the orchestrator's own belt is untouched by the feature.
-///
-/// The empty-allowlist half is what makes #176 a no-op for every manifest
-/// written before it; the orchestrator half is what proves the `else if`
-/// really is exclusive, since a second narrowed `delegate_to_desk` beside
-/// the orchestrator's unrestricted one would put two tools of the same name
-/// on one belt.
+/// (b2) A member whose manifest names a `delegates_to` allowlist gets the
+/// **same belt** as one that names none: the list narrows where the hand-off
+/// tools reach (checked at call time against the live record), it does not
+/// decide whether they are wired. Expressed as an equality against the
+/// pinned belt, so that snapshot stays the single place the dispatched belt
+/// is written down.
 #[test]
-fn an_empty_allowlist_wires_nothing_and_the_orchestrator_belt_is_unchanged() {
+fn a_narrowed_member_gets_the_same_belt() {
+    let plain = built_tool_names(&["*"], false);
+    let narrowed = built_tool_names_delegating(&["*"], false, &["research"]);
+    assert_eq!(
+        narrowed, plain,
+        "`delegates_to` narrows reach, never the belt: {narrowed:?}"
+    );
+}
+
+/// (b3) An empty allowlist and an absent one build the same belt, and the
+/// orchestrator's own belt is untouched by `delegates_to`.
+///
+/// The orchestrator half is what proves the `else` really is exclusive,
+/// since a second scoped `delegate_to_desk` beside the orchestrator's
+/// unrestricted one would put two tools of the same name on one belt.
+#[test]
+fn an_empty_allowlist_and_the_orchestrator_belt_are_unchanged() {
     assert_eq!(
         built_tool_names_delegating(&["*"], false, &[]),
         built_tool_names(&["*"], false),
-        "an empty `delegates_to` must produce the pre-#176 belt byte-for-byte"
+        "an empty `delegates_to` must produce the ordinary belt byte-for-byte"
     );
 
     let orchestrator = built_tool_names(&["*"], true);

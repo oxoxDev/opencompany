@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/lib/chat";
+import { migrateLegacyGeneralId, type ChatMessage } from "@/lib/chat";
 import type { ReadMarker } from "@/api/types";
 
 /**
@@ -20,7 +20,8 @@ import type { ReadMarker } from "@/api/types";
  * operator just cleared.
  *
  * A channel the host said nothing about keeps whatever this tab had, and a
- * channel this tab has never opened adopts the stored floor outright.
+ * channel this tab has never opened adopts the stored floor outright. A floor
+ * stored under a legacy `#general` id (`main`, `General`) is read as `general`'s.
  */
 export function mergeReadFloors(
   viewed: Readonly<Record<string, number>>,
@@ -28,7 +29,8 @@ export function mergeReadFloors(
 ): Record<string, number> {
   const merged = { ...viewed };
   for (const m of markers) {
-    merged[m.channelId] = Math.max(merged[m.channelId] ?? 0, m.lastReadAt);
+    const channelId = migrateLegacyGeneralId(m.channelId);
+    merged[channelId] = Math.max(merged[channelId] ?? 0, m.lastReadAt);
   }
   return merged;
 }

@@ -11,6 +11,7 @@ async fn append_ledger_grows_without_rewrite() {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),
@@ -77,6 +78,7 @@ async fn a_damaged_ledger_line_is_skipped_and_left_on_disk() {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),

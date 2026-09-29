@@ -265,6 +265,53 @@ async fn a_yesterday_stamped_spend_does_not_refuse_todays_dispatch() {
     );
 }
 
+#[tokio::test]
+async fn a_pooled_teammate_reads_its_conversation_by_name_on_its_own_belt() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = Arc::new(MockContext::default());
+    let rec = capped_record();
+    let mut deps = deps_with_plan(dir.path(), context, None, None);
+    deps.events = Some(Arc::new(crate::hive::test_support::MemoryLog::default()));
+    let pool = HarnessPool::new();
+    pool.ensure(&rec, &deps).await.expect("ensure");
+    let agent = pool.agent(&rec.id, "ceo").await.expect("ceo");
+    assert!(
+        agent
+            .tools()
+            .iter()
+            .any(|tool| tool.name() == crate::hive::tools::READ_TOOL),
+        "`read` rides the belt"
+    );
+    assert!(
+        agent.served_catalogue().is_empty(),
+        "nothing is left for an MCP brief to name"
+    );
+}
+
+#[tokio::test]
+async fn a_pooled_teammate_without_an_events_log_keeps_a_refusing_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = Arc::new(MockContext::default());
+    let rec = capped_record();
+    let deps = deps_with_plan(dir.path(), context, None, None);
+    let pool = HarnessPool::new();
+    pool.ensure(&rec, &deps).await.expect("ensure");
+    let agent = pool.agent(&rec.id, "ceo").await.expect("ceo");
+    let read = agent
+        .tools()
+        .iter()
+        .find(|tool| tool.name() == crate::hive::tools::READ_TOOL)
+        .cloned()
+        .expect("`read` stays on the belt");
+    let refused = read.execute(serde_json::json!({})).await.unwrap();
+    assert!(refused.is_error);
+    assert!(
+        refused.output().contains("no conversation journal"),
+        "{}",
+        refused.output()
+    );
+}
+
 /// **The mechanism issue #443 asks for.** Every tool this crate can put in
 /// front of an agent must be classified in
 /// [`crate::policy::consequence`], or this fails.
@@ -316,7 +363,7 @@ fn every_registered_tool_is_declared() {
         "file_read",
         "describe_skill",
         #[cfg(feature = "mcp")]
-        "mcp_list_servers",
+        "mcp_list_tools",
         #[cfg(feature = "mcp")]
         "mcp_call_tool",
     ] {
@@ -349,7 +396,7 @@ fn every_registered_tool_is_declared() {
 /// `ReadOnly` claim is ignored.
 #[test]
 fn nothing_that_declares_itself_executable_is_internal_or_grantable() {
-    use oh::tools::traits::PermissionLevel;
+    use tinytools::PermissionLevel;
     let dir = tempfile::tempdir().expect("tempdir");
     let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
     let manifest_agent = ManifestAgent {
@@ -377,14 +424,13 @@ fn nothing_that_declares_itself_executable_is_internal_or_grantable() {
         &CompanyId::new("acme"),
         "Acme",
         &manifest_agent,
-        ApprovalPolicy::new(&Policy::default(), None),
+        std::sync::Arc::new(ApprovalPolicy::new(&Policy::default(), None)),
         &deps,
         &["*".to_string()],
         &[],
         &[],
         None,
         true,
-        /* speech_enabled */ false,
     )
     .expect("agent builds");
     let args = serde_json::json!({});

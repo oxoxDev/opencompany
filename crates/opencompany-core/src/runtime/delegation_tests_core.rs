@@ -424,6 +424,7 @@ members = ["engineer"]
     )
     .expect("valid manifest");
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -603,7 +604,7 @@ impl Fixture {
         }
     }
 
-    pub(super) fn runner<'a>(&'a self, turns: &'a ScriptedTurns) -> DelegationRunner<'a> {
+    pub(super) fn runner<'a>(&'a self, turns: &'a dyn RunTurn) -> DelegationRunner<'a> {
         DelegationRunner::new(
             turns,
             &self.record,

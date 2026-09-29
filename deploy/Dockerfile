@@ -3,7 +3,7 @@
 # ── builder ────────────────────────────────────────────────────────────────
 # Compiles the `opencompany` host binary. `FEATURES` selects optional cargo
 # features (e.g. "medulla tinyplace sqlite"); empty = the small default build.
-FROM rust:1-slim-bookworm AS builder
+FROM docker.io/library/rust:1-slim-bookworm AS builder
 ARG FEATURES=""
 # The revision this image is built from, read by `build.rs` (see
 # `src/build_stamp.rs`). It has to be passed in here: `deploy/Dockerfile.dockerignore` excludes
@@ -30,7 +30,7 @@ WORKDIR /build
 #     run here). These are no-ops for the default/mongodb builds.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       pkg-config ca-certificates libssl-dev \
+       pkg-config ca-certificates curl libssl-dev \
        libx11-dev libxi-dev libxtst-dev libxrandr-dev libxcb1-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -55,6 +55,7 @@ COPY crates/opencompany-core ./crates/opencompany-core
 COPY crates/opencompany-tui ./crates/opencompany-tui
 COPY vendor ./vendor
 COPY companies ./companies
+COPY scripts/upload-sentry-symbols.sh ./scripts/upload-sentry-symbols.sh
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
@@ -66,6 +67,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi; \
     install -Dm755 target/release/opencompany /out/opencompany
 
+# Upload symbols from the shared target cache. The token is a BuildKit secret,
+# never a build argument, image layer, or final-image environment value.
+ARG SENTRY_URL=""
+ARG SENTRY_ORG=""
+ARG SENTRY_PROJECT_RUST=""
+RUN --mount=type=cache,target=/build/target \
+    --mount=type=secret,id=sentry_auth_token \
+    set -eu; \
+    if [ -s /run/secrets/sentry_auth_token ] && [ -n "$SENTRY_URL" ] && [ -n "$SENTRY_ORG" ] && [ -n "$SENTRY_PROJECT_RUST" ]; then \
+      curl --fail --silent --show-error --location \
+        https://github.com/getsentry/sentry-cli/releases/download/3.4.1/sentry-cli-Linux-x86_64 \
+        --output /usr/local/bin/sentry-cli; \
+      chmod +x /usr/local/bin/sentry-cli; \
+      SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token)" \
+      SENTRY_PROJECT="$SENTRY_PROJECT_RUST" \
+        scripts/upload-sentry-symbols.sh target/release; \
+      rm /usr/local/bin/sentry-cli; \
+    fi
+
 # ── console builder ────────────────────────────────────────────────────────
 # Builds the Vite/React operator console (frontend/) into a static bundle that
 # the runtime image serves at `/` (same-origin, no separate nginx container).
@@ -76,8 +96,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # `dist/pages-sdk/`, nested inside the same `dist/` the console itself builds
 # to, so the single `COPY --from=console /console/dist /app/console` below
 # already carries it into the runtime image with no second COPY needed.
-FROM node:22-slim AS console
+FROM docker.io/library/node:22-slim AS console
 WORKDIR /console
+
+# `node:22-slim` ships no CA bundle. Node itself carries its own roots, but the
+# native `sentry-cli` that `@sentry/vite-plugin` runs during `npm run build`
+# uses the system store, and without it every call (`releases new`, sourcemap
+# upload) dies with "unable to get local issuer certificate" and fails the build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Console crash reporting (`docs/spec/runtime/crash-reporting.md`).
 #
@@ -87,9 +115,11 @@ WORKDIR /console
 # them there is no path for a console DSN to reach a hosted tenant at all, and
 # setting one on the StatefulSet is a silent no-op.
 #
-# Both default to empty, which is the shipped behaviour: `resolveCrashReporting`
-# builds no client without a DSN, and `sentryRelease()` falls back to the bare
-# version without a commit. A local `docker build` therefore needs neither.
+# Both default to empty. An empty `VITE_SENTRY_DSN` makes the production bundle
+# report to the compiled-in TinyHumans console project
+# (`DEFAULT_CONSOLE_SENTRY_DSN`); pass `VITE_SENTRY_DSN=off` for a silent one
+# (`deploy/docker-compose.yml` does). `sentryRelease()` falls back to the bare
+# version without a commit.
 #
 # `VITE_SENTRY_ENVIRONMENT` has to be passed for the same reason, and is easy to
 # miss because both surfaces default to something plausible and different: the
@@ -124,18 +154,28 @@ ARG VITE_SENTRY_DSN=""
 ARG VITE_BUILD_COMMIT=""
 ARG VITE_SENTRY_ENVIRONMENT=""
 ARG VITE_SENTRY_TRACES_SAMPLE_RATE=""
+ARG SENTRY_URL=""
+ARG SENTRY_ORG=""
+ARG SENTRY_PROJECT_REACT=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
     VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT \
     VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
     VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE
 
 COPY frontend/ ./
-RUN npm run build && npm run build:pages-sdk
+RUN --mount=type=secret,id=sentry_auth_token \
+    set -eu; \
+    if [ -s /run/secrets/sentry_auth_token ]; then \
+      export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token)"; \
+    fi; \
+    export SENTRY_PROJECT="$SENTRY_PROJECT_REACT"; \
+    npm run build
+RUN npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
 # Used by deploy/docker-compose.dev.yml. The repository is bind-mounted over
 # /workspace; cargo-watch rebuilds and restarts the host after local edits.
-FROM rust:1-slim-bookworm AS development
+FROM docker.io/library/rust:1-slim-bookworm AS development
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl pkg-config \
     && rm -rf /var/lib/apt/lists/* \
@@ -145,7 +185,7 @@ ENV OPENCOMPANY_BIND=0.0.0.0:8080 \
     OPENCOMPANY_DATA_DIR=/data
 
 # ── runtime ────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 # libssl3 + the X11 runtime shared libraries satisfy the dynamic linker for the
 # openssl-sys/native-tls and rdev/arboard links the `openhuman` feature pulls in
 # (the desktop-automation code paths never run in a headless tenant, but the .so

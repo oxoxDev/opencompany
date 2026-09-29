@@ -1411,6 +1411,10 @@ struct Meta {
     /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
     #[serde(default)]
     activation_gate_seen: bool,
+    /// The company-wide `#general` channel. Absent on meta files written
+    /// before it was stored; the builder backfills it.
+    #[serde(default)]
+    general_channel: Option<crate::ports::types::GeneralChannel>,
 }
 
 impl Default for Meta {
@@ -1440,6 +1444,7 @@ impl Default for Meta {
             activation_completed_at: None,
             created_at_millis: None,
             activation_gate_seen: false,
+            general_channel: None,
         }
     }
 }
@@ -1546,6 +1551,7 @@ impl FsCompanyStore {
             activation_completed_at: record.activation_completed_at,
             created_at_millis: record.created_at_millis,
             activation_gate_seen,
+            general_channel: Some(record.general_channel.clone()),
         };
         // Write order depends on whether the bundle already exists (issue
         // #1828 review, second round).
@@ -1844,6 +1850,7 @@ impl CompanyStore for FsCompanyStore {
             name_confirmed: meta.name_confirmed,
             activation_completed_at: meta.activation_completed_at,
             created_at_millis: meta.created_at_millis,
+            general_channel: meta.general_channel.unwrap_or_default(),
         }))
     }
 

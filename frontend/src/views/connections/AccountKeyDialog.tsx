@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { ExternalLink, Loader2, Sparkles } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { TINYHUMANS_API_KEYS_URL } from "@/lib/links";
+import { cn } from "@/lib/utils";
 import { ModelField } from "@/inference/ModelField";
 import {
   COMPOSIO_PAGE_HREF,
@@ -56,15 +56,36 @@ interface Props {
   /** Needed only by step two's {@link ModelField}, which takes list mode and fetches nothing. */
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Starts the one-click grant (`hubLink` on the status): the person signs in
+   * on the hub and the key arrives without being copied. `null` on a host with
+   * no hub, or for someone who may not change the credential — the dialog then
+   * offers the paste field alone, exactly as before the button existed.
+   */
+  onConnect: (() => void) | null;
+  /** Whether a grant is in flight — the button waits, the field stays usable. */
+  connecting: boolean;
+  /**
+   * The API-keys page of the hub this host is on, from the status
+   * (`account.manageKeysUrl`). Where a key is minted by hand; never a
+   * production constant, because a key minted there would be refused by a
+   * staging host. `null` when the host derives no site, and then the paste
+   * field carries no link.
+   */
+  keysUrl: string | null;
 }
 
 /**
  * "Connect to TinyHumans" — the Account page's API-key option.
  *
- * The same ask the setup wizard makes for Managed: a key field and, for the
- * operator who has none, a link to where one is created
- * ({@link TINYHUMANS_API_KEYS_URL}, shared with the wizard so the two cannot
- * point at different pages).
+ * The same ask the setup wizard makes for Managed — a key field and, for the
+ * operator who has none, a link to where one is created — plus what the
+ * wizard cannot offer: the one-click grant, which needs a company to scope
+ * the key to and this page has one. The link is the hub **this host is on**
+ * (`keysUrl`, from the status), not a constant: the console used to send a
+ * staging host's operator to mint a key on production
+ * (`TINYHUMANS_API_KEYS_URL` in `@/lib/links` survives only as the wizard's fallback for
+ * a host too old to report its own).
  *
  * Deliberately minimal (operator request, 2026-09-14): a heading, the field,
  * the "Get an API key" link, Save and Cancel, and an error only when a save
@@ -99,6 +120,9 @@ export function AccountKeyDialog({
   onSubmitModel,
   client,
   company,
+  onConnect,
+  connecting,
+  keysUrl,
 }: Props) {
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
@@ -198,8 +222,40 @@ export function AccountKeyDialog({
                 onSubmit(key.trim());
               }}
             >
+              {/* The one-click way first, where the host can offer it: the
+                  same PKCE grant the wizard cannot run (no company yet), which
+                  this page has. The key is minted for this company and stored
+                  by the host — nothing to copy, nothing shown. */}
+              {onConnect && (
+                <div className="space-y-2" data-testid="account-key-connect">
+                  <Button
+                    type="button"
+                    className="w-full"
+                    disabled={busy || connecting}
+                    onClick={onConnect}
+                    data-testid="connect-tinyhumans"
+                  >
+                    {connecting ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="size-4" />
+                    )}
+                    {replacing ? "Reconnect with TinyHumans" : "Connect with TinyHumans"}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Sign in to TinyHumans and this company gets its key automatically — nothing
+                    to copy.
+                  </p>
+                  <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+                    or
+                  </p>
+                </div>
+              )}
+
               <div className="grid gap-1.5">
-                <Label htmlFor="company-credential">Add your API key</Label>
+                <Label htmlFor="company-credential">
+                  {onConnect ? "Paste an API key" : "Add your API key"}
+                </Label>
                 <Input
                   id="company-credential"
                   type="password"
@@ -210,19 +266,21 @@ export function AccountKeyDialog({
                   onChange={(event) => setKey(event.target.value)}
                   data-testid="account-key-input"
                 />
-                <p className="text-xs text-muted-foreground">
-                  Don&apos;t have an API key?{" "}
-                  <a
-                    href={TINYHUMANS_API_KEYS_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="account-key-get-link"
-                    className="inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-4"
-                  >
-                    Get an API key
-                    <ExternalLink className="size-3" />
-                  </a>
-                </p>
+                {keysUrl && (
+                  <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                    Don&apos;t have an API key?
+                    <a
+                      href={keysUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="account-key-get-link"
+                      className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+                    >
+                      Get an API key
+                      <ExternalLink className="size-3.5" />
+                    </a>
+                  </p>
+                )}
                 {fillLine && (
                   <p className="text-xs text-muted-foreground" data-testid="account-key-fill-line">
                     {/* `llmShown` matches `accountFillLine`'s own `llm` gate

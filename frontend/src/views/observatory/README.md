@@ -46,10 +46,11 @@ This is also why `app-shell.tsx`'s `onTurnEvent` gained a counter. A workflow
 | --- | --- |
 | `hash.ts` | the address grammar — **pure** |
 | `waterfall.ts` | lane packing, placement, concurrency — **pure** |
+| `model.ts` | spans from attempts and steps, totals, per-agent and per-node folds, and `roundsFromRuns`: attempts sharing an `episodeId` + `roundRevision` folded into one band — **pure** |
 | `model.ts` | attempts → spans, totals, per-agent and per-node rollups — **pure** |
 | `clamp.ts` | bounding what a step body renders — **pure** |
 | `ObservatoryView.tsx` | fetch, poll, tab and agent selection |
-| `WaterfallLens.tsx` | the timeline and the concurrency strip |
+| `WaterfallLens.tsx` | the timeline, the round bands above the lanes, and the concurrency strip ("peak N concurrent") |
 | `AttemptCard.tsx` | one attempt, collapsed until opened |
 | `StepRow.tsx` | one step, with its unredacted half behind a fold |
 | `AnalyticsLens.tsx` | the four cross-run charts |
@@ -81,3 +82,15 @@ A step carries both halves and the panes label which is which. `detail` and
 always safe. `deep` is raw arguments and raw output. Note that redaction is by
 **key name**: `runtime::approval_display`'s own docs say an unlisted key holding
 a secret is not masked. See `docs/spec/runtime/deep-trace.md`.
+
+## Rounds
+
+An attempt that was a seat's turn inside a desk episode carries `episodeId` and
+`roundRevision` (REST `GET /runs` and the GraphQL `AgentRun` alike; a host
+predating the fields is queried once more without them, so the view still
+loads). The seats of one round ran **together**, which is the claim a flat list
+of overlapping bars cannot make — a relay race and a concurrent round look the
+same until the seats of a round are drawn as one thing — so `roundsFromRuns`
+folds them into one band per round, placed above the lanes from the first
+seat's start to the last seat's finish, still-open while any seat is, and the
+header counts them beside the peak.

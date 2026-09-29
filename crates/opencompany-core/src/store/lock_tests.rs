@@ -59,7 +59,14 @@ fn an_existing_lock_file_is_reused_rather_than_truncated() {
     drop(acquire(dir.path()).unwrap());
     std::fs::write(dir.path().join(LOCK_FILE), b"marker").unwrap();
 
-    let _lock = acquire(dir.path()).unwrap();
+    let lock = acquire(dir.path()).unwrap();
+    // Released before reading. On Windows a byte-range lock is *mandatory*
+    // rather than advisory, so reading the file while the lock is held fails
+    // with a sharing violation (os error 33) — the read this used to do was
+    // asking the platform for something it forbids, not observing anything
+    // about the lock. Dropping first checks the same property: the content was
+    // still there after the acquire, so the acquire did not truncate it.
+    drop(lock);
     assert_eq!(
         std::fs::read(dir.path().join(LOCK_FILE)).unwrap(),
         b"marker"

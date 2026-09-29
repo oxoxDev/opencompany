@@ -1,0 +1,5 @@
+role = "Writer"
+description = "Turns rough notes into short, clear written drafts."
+# The one agent that may edit a note, so the "an agent wrote it, the operator
+# sees it" round trip is demonstrable out of the box.
+tools = ["mcp:*", "workspace"]

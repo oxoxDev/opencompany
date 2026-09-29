@@ -356,12 +356,11 @@ async fn the_null_tracker_is_a_no_op() {
 /// `openpanel.rs`; this is the same decision asserted where every lane runs it.
 #[test]
 fn the_default_build_chooses_silence_for_desktop_and_self_hosted() {
-    use crate::analytics::config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, Silence};
+    use crate::analytics::config::{CLIENT_ID_ENV, ENDPOINT_ENV, Silence};
     use crate::app::config::MapEnv;
 
     let env = MapEnv::new([
         (CLIENT_ID_ENV, "not-a-real-client-id"),
-        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
         (ENDPOINT_ENV, "https://collector.invalid/track"),
     ]);
     for deployment in [Deployment::Desktop, Deployment::SelfHosted] {

@@ -118,6 +118,32 @@ describe("what the stream adds", () => {
     expect(g.edges).toHaveLength(base.edges.length);
   });
 
+  it("draws who spoke to whom inside an episode as its own edge kind", () => {
+    // A broadcast the router carried to a seat, a desk DM, a referral to a
+    // desk: each is an agent reaching someone, watched happen, and merged by
+    // endpoint pair like a hand-off — three DMs are one thicker edge.
+    const g = applyObservations(base, [
+      { kind: "spoke", from: "planner", to: "scribe", via: "dm", atMillis: 1 },
+      { kind: "spoke", from: "planner", to: "scribe", via: "broadcast", atMillis: 2 },
+      { kind: "spoke", from: "scribe", to: "records", via: "referral", atMillis: 3 },
+    ]);
+    const spoke = g.edges.filter((e) => e.kind === "spoke");
+    expect(spoke.map((e) => `${e.from}->${e.to}:${e.count}:${e.label}`)).toEqual([
+      "agent:planner->agent:scribe:2:broadcast",
+      "agent:scribe->desk:records:1:referral",
+    ]);
+    expect(spoke.every((e) => !e.provisional)).toBe(true);
+    // Structure is untouched: the member and may-delegate edges still count zero.
+    expect(g.edges.filter((e) => e.kind !== "spoke").every((e) => e.count === 0)).toBe(true);
+  });
+
+  it("draws a seat talking to itself as nothing", () => {
+    const g = applyObservations(base, [
+      { kind: "spoke", from: "planner", to: "planner", via: "broadcast", atMillis: 1 },
+    ]);
+    expect(g.edges.filter((e) => e.kind === "spoke")).toEqual([]);
+  });
+
   it("leaves the structural graph untouched", () => {
     // The fold must not mutate its input, or a re-render with the same base
     // would keep accumulating counts.

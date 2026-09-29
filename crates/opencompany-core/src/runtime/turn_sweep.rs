@@ -73,9 +73,12 @@ pub async fn sweep_interrupted_turns(events: &Arc<dyn EventLog>, company: &Compa
         }
     };
 
-    // One pass keyed on turn id: a start inserts, a failure removes. Whatever is
-    // left was accepted and never settled. `HashMap` rather than a set because
-    // the log line names the desk, which lives only on the start.
+    // One pass keyed on turn id: a start inserts, a settlement — either way it
+    // ended — removes. Whatever is left was accepted and never settled.
+    // `HashMap` rather than a set because the log line names the desk, which
+    // lives only on the start. `TurnSettled` closes a bracket exactly as
+    // `TurnFailed` does (plan hive-desks, Phase 2): a seat turn that answered
+    // is not one the host died under.
     let mut open: HashMap<String, String> = HashMap::new();
     for stored in stored {
         match stored.event {
@@ -84,7 +87,8 @@ pub async fn sweep_interrupted_turns(events: &Arc<dyn EventLog>, company: &Compa
             } => {
                 open.insert(turn_id, chat_id);
             }
-            CompanyEvent::TurnFailed { turn_id, .. } => {
+            CompanyEvent::TurnFailed { turn_id, .. }
+            | CompanyEvent::TurnSettled { turn_id, .. } => {
                 open.remove(&turn_id);
             }
             _ => {}
@@ -113,6 +117,11 @@ pub async fn sweep_interrupted_turns(events: &Arc<dyn EventLog>, company: &Compa
                 CompanyEvent::TurnFailed {
                     turn_id: turn_id.clone(),
                     error: TURN_INTERRUPTED_BY_RESTART.to_string(),
+                    agent_id: None,
+                    chat_id: Some(chat_id.clone()),
+                    episode_id: None,
+                    round_revision: None,
+                    outcome: None,
                 },
             )
             .await

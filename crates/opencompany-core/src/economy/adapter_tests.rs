@@ -16,6 +16,7 @@ async fn seeded_store(company: &CompanyId) -> (tempfile::TempDir, Arc<dyn Compan
         toml::from_str("[company]\nname = \"Acme\"\nhandle = \"acme\"\n").expect("manifest");
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             id: company.clone(),

@@ -10,14 +10,25 @@
 use crate::app::config::EnvSource;
 use crate::app::deployment::Deployment;
 
-/// The Sentry DSN. **Configuration, never a compiled-in constant.**
-///
-/// A DSN baked into a GPL-3.0 binary is a DSN every reader of the source can
-/// post to, and the cost of that is not abstract: an ingest endpoint anyone can
-/// write to is somebody's quota. It also decides *which organisation* an
-/// install's crashes go to, which is not a decision this repository is entitled
-/// to make on an operator's behalf.
+/// The Sentry DSN. Configuration that always wins over
+/// [`DEFAULT_HOSTED_TENANT_DSN`].
 pub const DSN_ENV: &str = "OPENCOMPANY_SENTRY_DSN";
+
+/// The TinyHumans `opencompany-core` project's DSN, used **only** by a
+/// [`Deployment::HostedTenant`] whose `OPENCOMPANY_SENTRY_DSN` is unset or
+/// blank.
+///
+/// Compiled in so the hosted-tenant image reports without anything injecting
+/// it. It is gated to the hosted-tenant deployment, not merely to the
+/// `crash-reporting` feature, because the feature is *not* tenant-only: the
+/// desktop app compiles it (and has its own project and DSN, see
+/// `opencompany-app/src/crash.rs`), and a self-hoster can compile it into
+/// `deploy/Dockerfile` through `OPENCOMPANY_FEATURES`. Neither of those may
+/// report to TinyHumans' project on a default nobody chose, so for them an
+/// absent DSN is still [`Silence::NoDsn`]. A DSN's public key only authorizes
+/// writes to this one project, and it already ships in the tenant image.
+pub const DEFAULT_HOSTED_TENANT_DSN: &str =
+    "https://ef2ebd38c55bc102fd7fd06a1a6eb867@sentry.tinyhumans.ai/10";
 
 /// Operator override: `off` forbids reporting and outranks everything else.
 ///
@@ -113,8 +124,8 @@ impl std::fmt::Debug for Dsn {
 pub enum Silence {
     /// The operator set `OPENCOMPANY_SENTRY=off`.
     OptedOut,
-    /// No DSN is configured. **The default**, and the only state a fresh
-    /// install or a CI runner is ever in.
+    /// No DSN is configured and this is not a hosted tenant. **The default**
+    /// for desktop, self-hosted and CI runs.
     NoDsn,
     /// `OPENCOMPANY_SENTRY` was set to something this does not recognise.
     ///
@@ -341,12 +352,13 @@ pub(crate) fn parse_dsn_for_test(raw: &str) -> Option<Dsn> {
 /// 1. `OPENCOMPANY_SENTRY=off` — silence, whatever else is set;
 /// 2. an `OPENCOMPANY_SENTRY` value that is neither `on` nor `off` — silence,
 ///    naming the value as unreadable rather than guessing at it;
-/// 3. no DSN — silence, and this is the default every install starts in;
+/// 3. no DSN — [`DEFAULT_HOSTED_TENANT_DSN`] for a hosted tenant, silence for
+///    every other deployment (desktop and self-hosted start here);
 /// 4. a DSN that is not usable — silence, naming that;
 /// 5. otherwise, report.
 ///
-/// Unlike `analytics::config::resolve`, the deployment kind does not gate
-/// anything. It only names the `environment` tag. Analytics reports to a
+/// Unlike `analytics::config::resolve`, the deployment kind gates only the
+/// compiled-in default DSN; otherwise it names the `environment` tag. Analytics reports to a
 /// collector *this* project runs, so who is allowed to report is the whole
 /// question there; a crash report goes to an endpoint the operator configured
 /// in their own organisation, and a self-hoster who sets a DSN has asked for
@@ -368,8 +380,19 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         },
     }
 
+    // An unset or blank DSN falls back to the compiled-in default for a hosted
+    // tenant only — see [`DEFAULT_HOSTED_TENANT_DSN`] for why nothing else gets
+    // it. A DSN that is set but unreadable or malformed is the operator's and
+    // is reported, never papered over by the default.
+    let fallback = || match deployment {
+        Deployment::HostedTenant => parse_dsn(DEFAULT_HOSTED_TENANT_DSN)
+            .map_or(Decision::Silent(Silence::UnusableDsn), |dsn| {
+                report(dsn, deployment, env)
+            }),
+        _ => Decision::Silent(Silence::NoDsn),
+    };
     let Some(raw) = env.get_os(DSN_ENV) else {
-        return Decision::Silent(Silence::NoDsn);
+        return fallback();
     };
     let Some(raw) = raw.to_str() else {
         // Bytes this process cannot read are a *misconfigured* DSN, not an
@@ -377,12 +400,16 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         return Decision::Silent(Silence::UnusableDsn);
     };
     if raw.trim().is_empty() {
-        return Decision::Silent(Silence::NoDsn);
+        return fallback();
     }
     let Some(dsn) = parse_dsn(raw) else {
         return Decision::Silent(Silence::UnusableDsn);
     };
+    report(dsn, deployment, env)
+}
 
+/// The reporting decision for an accepted DSN.
+fn report(dsn: Dsn, deployment: Deployment, env: &dyn EnvSource) -> Decision {
     Decision::Report {
         dsn,
         environment: environment(deployment, env),

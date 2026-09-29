@@ -22,7 +22,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
-use crate::company::artifact_mirror;
 use crate::company::steer::{InflightEntry, InflightKind, SteerAction, SteerControl, cap_redirect};
 use crate::harness::build::agent_workspace;
 use crate::harness::confine;
@@ -228,18 +227,15 @@ pub(crate) fn budget_pause_notice_no_resend(pause: &crate::harness::BudgetPause)
 }
 
 use crate::harness::run_trace::RunTraceSink;
-use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::blockers::{BlockerPayload, BlockerStep};
 use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::context::ContextStore;
 use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
 use crate::ports::types::{
-    CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, CycleRequest,
-    CycleResult, Effect, EffectGroup, EventSeq, OutboundMessage, TokenUsage, TurnStep,
-    TurnStepKind, TurnStepStatus, Verdict,
+    CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
+    OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
 };
-use crate::ports::{Cognition, TaskOrigin, TaskRecord, UsageMetering, generate_id, now_millis};
+use crate::ports::{Cognition, TaskRecord, UsageMetering, now_millis};
 
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
@@ -280,10 +276,6 @@ pub struct HarnessBrain {
     /// record read; `OnceLock` because it is immutable once built and the cost
     /// is a clone of two `Arc`s, not a model call.
     triage: std::sync::OnceLock<crate::harness::triage::MeteredTriage>,
-    /// The per-message responder selection for `auto` channels, built on first
-    /// use (issue #1835). Lazy and `OnceLock` for exactly [`Self::triage`]'s
-    /// reasons — it needs the company id, and once built it is immutable.
-    selector: std::sync::OnceLock<crate::harness::selector::MeteredSelector>,
     /// The card-titling pass, built on first use. Lazy and `OnceLock` for
     /// exactly [`Self::triage`]'s reasons — it needs the company id, and once
     /// built it is immutable.
@@ -328,6 +320,12 @@ pub struct HarnessBrain {
     /// missing. That is the right direction for a purely observational store —
     /// and it is why every test construction can leave it unset.
     runs: Option<Arc<dyn crate::ports::RunStore>>,
+    /// The mention seam a desk reply's `@names` are resolved and notified
+    /// through.
+    ///
+    /// `None` leaves a reply's `mentions` empty and badges nobody — the state
+    /// every test construction and every pre-seam caller is in.
+    mentions: Option<crate::runtime::mention_seam::MentionSeam>,
 }
 
 /// A bubble the **runtime** wrote, not an agent (issue #966).
@@ -499,8 +497,8 @@ impl HarnessBrain {
             record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
+            mentions: None,
             triage: std::sync::OnceLock::new(),
-            selector: std::sync::OnceLock::new(),
             titler: std::sync::OnceLock::new(),
         }
     }
@@ -641,6 +639,14 @@ impl HarnessBrain {
     /// Wires the run store a dispatched card records its attempt into (#242).
     pub fn with_runs(mut self, runs: Arc<dyn crate::ports::RunStore>) -> Self {
         self.runs = Some(runs);
+        self
+    }
+
+    /// Attaches the mention seam, so a reply this brain's desks journal
+    /// resolves its `@names` through the same path an operator message does.
+    #[must_use]
+    pub fn with_mentions(mut self, mentions: crate::runtime::mention_seam::MentionSeam) -> Self {
+        self.mentions = Some(mentions);
         self
     }
 
@@ -809,37 +815,38 @@ impl HarnessBrain {
         // chat path. It is a conversation continuation (it answers into the
         // thread the approval was raised in), so it files the same way a chat
         // turn does.
-        let publish_claim =
-            (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                self.deps
-                    .pending_publishes
-                    .claim(publish::PublishDestination::Conversation)
-            });
+        let publish_claim = self
+            .deps
+            .pending_publishes
+            .claim(self.conversation_destination());
         let output_claim = self.deps.pending_publishes.output_collector().claim();
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
         let outcome = output_claim
-            .scoped(run_turn.run_steered_background(
-                &self.record().id,
-                &grant.agent,
-                &instruction,
-                &control,
-                // Issue #1890 I. Un-streamed, but **not** unaddressed: this
-                // call was raised in a conversation, and the grant has recorded
-                // which one — channel and thread — since #435. Without it the
-                // re-issued call bound to nothing, so it ran against whatever
-                // history the agent happened to be holding and then published
-                // its answer into the origin thread regardless. The same pair
-                // the delegation drain below is bound to.
-                ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
-                None,
-            ))
+            .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                run_turn.run_steered_background(
+                    &self.record().id,
+                    &grant.agent,
+                    &instruction,
+                    &control,
+                    // Issue #1890 I. Un-streamed, but **not** unaddressed: this
+                    // call was raised in a conversation, and the grant has
+                    // recorded which one — channel and thread — since #435.
+                    // Without it the re-issued call bound to nothing, so it ran
+                    // against whatever history the agent happened to be holding
+                    // and then published its answer into the origin thread
+                    // regardless. The same pair the delegation drain below is
+                    // bound to.
+                    ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
+                    None,
+                ),
+            ))))
             .await;
         drop(guard);
-        let published = self.deps.pending_publishes.drain();
+        let published = publish_claim.drain();
         if !published.is_empty()
-            && publish_claim.is_some()
+            && publish_claim.is_claimed()
             && let Err(err) = output_claim
                 .scoped(self.record_conversation_publishes(
                     &grant.agent,
@@ -1102,11 +1109,14 @@ impl HarnessBrain {
         // turns that into an in-turn refusal the agent can actually report.
         // `build_agent` already declines to wire the tool at all in that case;
         // this makes the invariant local rather than borrowed from the builder.
-        let _publish_claim = self.deps.artifacts.as_ref().map(|_| {
-            self.deps
-                .pending_publishes
-                .claim(publish::PublishDestination::Task)
-        });
+        let publish_claim = self
+            .deps
+            .pending_publishes
+            .claim(if self.deps.artifacts.is_some() {
+                publish::PublishDestination::Task
+            } else {
+                publish::PublishDestination::Unclaimed
+            });
         // Issue #453: and the delegation queue, for the same span. A dispatched
         // card's responder is the orchestrator, which carries the delegation
         // tools, and `handle_task_delegations` below is the drain — so this path
@@ -1190,34 +1200,36 @@ impl HarnessBrain {
             // it. This is inside the loop deliberately; the nudge below is not
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
-            self.deps.pending_publishes.clear();
+            publish_claim.clear();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
             self.deps.workflow_refs.clear();
-            let outcome = dispatch_origin
+            let outcome = publish_claim
                 .scoped(Box::pin(
-                    run_turn
-                        // A dispatched task card carries no chat bubble (its steps
-                        // are discarded into the note), so its live turn frames
-                        // must not leak onto the console timeline — run it
-                        // un-streamed (#125 review).
-                        .run_steered_background(
-                            &self.record().id,
-                            &responder,
-                            &instruction,
-                            &control,
-                            // No conversation to bind to: a dispatched card's turn
-                            // answers the board, not a thread (#1890 I). Unchanged
-                            // behaviour — including that it does not clear
-                            // history, since one task can span several turns.
-                            ChatTarget::default(),
-                            // Issue #242: un-streamed does not mean unrecorded. The
-                            // trace this turn produces is written to the attempt
-                            // row as it happens, which is what a redirect re-run
-                            // appends to rather than restarting.
-                            sink.clone(),
-                        ),
+                    dispatch_origin.scoped(Box::pin(
+                        run_turn
+                            // A dispatched task card carries no chat bubble (its steps
+                            // are discarded into the note), so its live turn frames
+                            // must not leak onto the console timeline — run it
+                            // un-streamed (#125 review).
+                            .run_steered_background(
+                                &self.record().id,
+                                &responder,
+                                &instruction,
+                                &control,
+                                // No conversation to bind to: a dispatched card's turn
+                                // answers the board, not a thread (#1890 I). Unchanged
+                                // behaviour — including that it does not clear
+                                // history, since one task can span several turns.
+                                ChatTarget::default(),
+                                // Issue #242: un-streamed does not mean unrecorded. The
+                                // trace this turn produces is written to the attempt
+                                // row as it happens, which is what a redirect re-run
+                                // appends to rather than restarting.
+                                sink.clone(),
+                            ),
+                    )),
                 ))
                 .await;
             // One-shot read of what (if anything) the operator asked for. `None`
@@ -1284,22 +1296,24 @@ impl HarnessBrain {
                             // The card keeps the delegate as its assignee on the
                             // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
-                            let handoff = match self
-                                .delegation_runner(run_turn.as_ref(), &record)
-                                .for_task(&card.id)
-                                // The delegate's turn is part of THIS attempt —
-                                // its steps and its spend belong to the card's
-                                // run, not to nothing (#242).
-                                .for_run(sink.clone())
-                                // Issue #1846 review (Codex #3864988176): the
-                                // card's own (possibly redirect-augmented)
-                                // instruction — the closest thing a dispatched
-                                // task has to "the operator's own words" — so a
-                                // delegate's budget-pause marker re-parks with
-                                // the brief this attempt is actually running,
-                                // not the hand-off instruction the model wrote.
-                                .reissue_message(instruction.clone())
-                                .handle_task_delegations(&mut card, &responder)
+                            let handoff = match publish_claim
+                                .scoped(Box::pin(
+                                    self.delegation_runner(run_turn.as_ref(), &record)
+                                        .for_task(&card.id)
+                                        // The delegate's turn is part of THIS attempt —
+                                        // its steps and its spend belong to the card's
+                                        // run, not to nothing (#242).
+                                        .for_run(sink.clone())
+                                        // Issue #1846 review (Codex #3864988176): the
+                                        // card's own (possibly redirect-augmented)
+                                        // instruction — the closest thing a dispatched
+                                        // task has to "the operator's own words" — so a
+                                        // delegate's budget-pause marker re-parks with
+                                        // the brief this attempt is actually running,
+                                        // not the hand-off instruction the model wrote.
+                                        .reissue_message(instruction.clone())
+                                        .handle_task_delegations(&mut card, &responder),
+                                ))
                                 .await
                             {
                                 Ok(handoff) => handoff,
@@ -1509,7 +1523,7 @@ impl HarnessBrain {
                 let changed = workspace_at_dispatch.changed_since(&workspace);
                 scan_partial = changed.partial;
                 unpublished_before_nudge =
-                    publish::unpublished(&changed.files, &self.deps.pending_publishes.sources());
+                    publish::unpublished(&changed.files, &publish_claim.sources());
             } else {
                 // A hand-off reassigned the card, so the snapshot above is of
                 // the delegator's workspace and the work happened in the
@@ -1529,8 +1543,8 @@ impl HarnessBrain {
         // a local — not a loop, not a counter, not inside the redirect loop. A
         // second nudge is not merely absent, there is nowhere to write one.
         if !unpublished_before_nudge.is_empty() {
-            declined = self
-                .nudge_for_unpublished(
+            declined = publish_claim
+                .scoped(Box::pin(self.nudge_for_unpublished(
                     run_turn.as_ref(),
                     &responder,
                     &base_instruction,
@@ -1546,7 +1560,7 @@ impl HarnessBrain {
                             scope: None,
                         },
                     ),
-                )
+                )))
                 .await;
         }
 
@@ -1554,10 +1568,8 @@ impl HarnessBrain {
         // staged now. Deliberately not a fresh scan: a scratch file the agent
         // wrote *while answering the nudge* is an artifact of being asked, and
         // naming it in the warning would make the nudge generate its own noise.
-        let still_unpublished = publish::unpublished(
-            &unpublished_before_nudge,
-            &self.deps.pending_publishes.sources(),
-        );
+        let still_unpublished =
+            publish::unpublished(&unpublished_before_nudge, &publish_claim.sources());
         if !still_unpublished.is_empty() {
             // A decline is a clean outcome, not an error: the reason goes on the
             // card where it is addressable, the warning names the files for
@@ -1644,7 +1656,7 @@ impl HarnessBrain {
         // outcome than a missing deliverable record. So the failure is now
         // logged at `error` (loudly: an operator whose published file did not
         // store needs to know) and the settle continues.
-        let published = self.deps.pending_publishes.drain();
+        let published = publish_claim.drain();
         let staged_workflows = self.deps.workflow_refs.drain();
         let succeeded = lifecycle::run_status_for(run_end) == RunStatus::Succeeded;
         let recorded: Vec<TaskOutputArtifact> = if succeeded {
@@ -2168,6 +2180,7 @@ impl HarnessBrain {
                     steps: Vec::new(),
                     task_id: Some(card.id.clone()),
                     outputs: Vec::new(),
+                    episode: None,
                 },
             )
             .await
@@ -2269,73 +2282,10 @@ impl HarnessBrain {
         }
     }
 
-    /// Records everything the run published as versioned artifacts, returning
-    /// one reference per artifact **pinned at the version this run wrote**
-    /// (issues #244, #339).
+    /// Records published files as artifacts on `card`.
     ///
-    /// # Why the version comes back
-    ///
-    /// The caller stamps these onto the card, and a card link that named only
-    /// the artifact would re-point at whatever a human last edited — silently
-    /// turning "what this task produced" into "what the artifact says now".
-    /// `push_version` already computes the number; before #339 it was
-    /// discarded.
-    ///
-    /// # Extend by identity, never by recency
-    ///
-    /// The record to extend is the one on this card whose `source` equals the
-    /// published path. That is the correction at the heart of this issue.
-    ///
-    /// The old rule was `max_by_key(updated_at_millis)` — extend whichever
-    /// artifact on the card was touched most recently. An **operator edit**
-    /// bumps `updated_at_millis`, so editing the invoice made the invoice the
-    /// target for the next agent write to the spec: the spec's v3 landed as the
-    /// invoice's v4, and `human_edit_diff` then reported an operator rewriting
-    /// a document they had never seen. Since that diff is the entire purpose of
-    /// the artifact port, recency did not merely mis-file records — it
-    /// fabricated the one number the product exists to measure.
-    ///
-    /// A path that has never been published opens a new record; a rename starts
-    /// a new lineage, which is a limitation named on
-    /// [`ArtifactRecord::source`](crate::ports::artifacts::ArtifactRecord::source)
-    /// rather than papered over with a guess.
-    ///
-    /// # Errors propagate — to the caller, which now contains them
-    ///
-    /// Deliberately, and this was a change in #244. The pre-#244 path returned
-    /// a silent `Ok(())` when the store was missing and swallowed nothing else,
-    /// which meant a failed write to a deliverable an agent had explicitly
-    /// published was indistinguishable from success. An explicit publish that
-    /// could not be stored is a real failure of the run and the operator needs
-    /// to see it, so this still surfaces one.
-    ///
-    /// What changed in #339 is where that failure stops. This now runs
-    /// **before** the card's single write, so `run_task` logs the error at
-    /// `error` and settles the card anyway rather than propagating — a
-    /// bookkeeping fault must not strand a finished card in `in_progress`. The
-    /// error is still raised here; it is simply no longer fatal there.
-    ///
-    /// A **missing store** is different: `publish_artifact` is not wired at all
-    /// without one (see `build.rs`), so a non-empty queue here means something
-    /// upstream is misconfigured. It warns loudly rather than failing the cycle,
-    /// because the turn's actual work is already done and persisted.
-    ///
-    /// `run_id` stamps the revision this call writes (#242) so a run row can
-    /// point at what it actually produced. An earlier attempt's version keeps
-    /// the attempt that wrote *it*.
-    ///
-    /// # Authorship is per file, not per call (issue #463)
-    ///
-    /// Each revision records the agent that published **that file**, read from
-    /// [`PendingPublish::agent`]. `responder` is only the fallback, for a value
-    /// built by hand rather than by the tool.
-    ///
-    /// One drain can hold publishes from more than one agent — the desk lead's
-    /// turn and the orchestrator's own turn both run with the full toolbelt
-    /// under a single `Conversation` claim — so a single author applied to the
-    /// batch stamps one agent's name on another's file. The card above still
-    /// takes one owner, because a card has one; a revision is a different
-    /// question with a different answer.
+    /// Delegates to [`PublishFiling`](publish::filing::PublishFiling); see its
+    /// module docs for why the body no longer lives here.
     async fn record_published_artifacts(
         &self,
         card: &TaskRecord,
@@ -2343,259 +2293,22 @@ impl HarnessBrain {
         published: Vec<publish::PendingPublish>,
         run_id: Option<&str>,
     ) -> Result<Vec<TaskOutputArtifact>> {
-        if published.is_empty() {
-            // The honest, common case: this run produced no file. There is no
-            // artifact, and the run trace is the addressable record of what
-            // happened.
-            return Ok(Vec::new());
+        publish::filing::PublishFiling {
+            company: &self.record().id,
+            deps: &self.deps,
         }
-        let Some(artifacts) = self.deps.artifacts.as_ref() else {
-            tracing::warn!(
-                task_id = %card.id,
-                staged = published.len(),
-                "[publish] files were published but no artifact store is configured; the tool \
-                 should not have been wired — nothing was recorded"
-            );
-            return Ok(Vec::new());
-        };
+        .record_published_artifacts(card, responder, published, run_id)
+        .await
+    }
 
-        let mut on_card = artifacts.list(&self.record().id, Some(&card.id)).await?;
-        let mut written = Vec::with_capacity(published.len());
-        for pending in published {
-            let at = now_millis();
-            // Issue #463: whoever published THIS file. `responder` is the
-            // fallback for a `PendingPublish` not built by the tool — the tool
-            // always stamps its own agent.
-            let author = match pending.agent.trim() {
-                "" => responder,
-                agent => agent,
-            };
-            // Identity, not recency: the record whose `source` is this exact
-            // path, or a new one.
-            let existing = on_card
-                .iter()
-                .position(|a| a.source.as_deref() == Some(pending.source.as_str()));
-            // The revision THIS run wrote (#339). A fresh record is always its
-            // own v1; an extended one takes whatever `push_version` numbered.
-            let mut version = 1;
-            // The node the PREVIOUS version was mirrored into, read before the
-            // push below appends a version whose own node is not chosen yet.
-            let mut prior_node = None;
-            let mut record = match existing {
-                Some(index) => {
-                    let mut found = on_card.remove(index);
-                    prior_node = found.workspace_node_id().map(str::to_string);
-                    version = found.push_version(
-                        pending.payload.artifact_body(),
-                        ArtifactAuthor::Agent,
-                        author,
-                        at,
-                        pending.note.clone(),
-                    );
-                    // A republished file may have changed shape — a markdown
-                    // draft exported as a PDF, a small file grown past the
-                    // inline cap. The record follows what was actually
-                    // captured, or the console renders the new version with the
-                    // old version's renderer.
-                    found.kind = pending.kind;
-                    found
-                }
-                None => {
-                    let mut fresh = ArtifactRecord::new(
-                        generate_id(),
-                        &card.id,
-                        &pending.title,
-                        pending.kind,
-                        pending.payload.artifact_body(),
-                        author,
-                        at,
-                    )
-                    .with_source(pending.source.clone());
-                    if let Some(note) = pending.note.clone()
-                        && let Some(first) = fresh.versions.first_mut()
-                    {
-                        first.note = Some(note);
-                    }
-                    fresh
-                }
-            };
-            if let Some(run_id) = run_id {
-                record.stamp_run(run_id);
-            }
-            // Issue #552: the deliverable also goes into the shared workspace
-            // tree, which is the one surface the operator browses and every
-            // other agent can read. The artifact chain here stays the
-            // authoritative version history; the node holds the current body.
-            //
-            // # Chain first, without exception
-            //
-            // A re-publish inherits the node the previous version named, so the
-            // version can be written *before* the tree is touched. That
-            // ordering is the load-bearing half of keeping the chain
-            // authoritative, not a preference: a node one version ahead of the
-            // chain is the tree showing content the version history has no
-            // record of, which makes `human_edit_diff` quietly wrong rather
-            // than loudly broken — the same #187 rot arriving by a different
-            // door. Requiring the store to half-fail bounds how *often* that
-            // happens and not at all how bad it is, and on a data path a silent
-            // wrong answer outlives the incident that caused it.
-            //
-            // A *fresh* publish has no node id to inherit, so its v1 is stored
-            // unlinked and the link is stamped by the second upsert below. Note
-            // what that buys beyond ordering: because the record is written
-            // first, a node is only ever created for a deliverable that is
-            // already recorded, so this path can no longer leave a node in the
-            // tree with no artifact behind it at all.
-            if let Some(node_id) = prior_node.as_deref() {
-                // Inherit before storing, so a failure anywhere below leaves
-                // the version pointing at the node that currently holds it.
-                record.stamp_workspace_node(node_id);
-            }
-            artifacts.upsert(&self.record().id, &record).await?;
-
-            // **A failed mirror does not lose the deliverable.** An explicit
-            // publish that could not be filed into the tree is still recorded
-            // as an artifact — dropping a produced file over tree bookkeeping
-            // would be far worse than a deliverable the operator has to reach
-            // through the Artifacts tab. So this logs at `error` (loudly: the
-            // tree is where people look) and leaves the version unlinked, which
-            // is exactly what a pre-#552 record carries. The next publish of
-            // the same source retries and heals it.
-            if let Some(workspace) = self.deps.workspace.as_ref() {
-                let target = artifact_mirror::PublishTarget {
-                    agent_id: author,
-                    task_id: &card.id,
-                    // Issue #1687: the folder the deliverable lands in is
-                    // named for the work, not only keyed by it. The card is
-                    // right here and its title is the one string that says
-                    // what an operator is looking at.
-                    task_title: Some(card.title.as_str()),
-                    source: &pending.source,
-                    payload: match &pending.payload {
-                        crate::harness::publish::PublishPayload::Text(text) => {
-                            artifact_mirror::MirrorPayload::Text(text)
-                        }
-                        crate::harness::publish::PublishPayload::Bytes { bytes, mime } => {
-                            artifact_mirror::MirrorPayload::Bytes { bytes, mime }
-                        }
-                    },
-                    existing_node_id: prior_node.as_deref(),
-                };
-                match artifact_mirror::materialize(workspace.as_ref(), &self.record().id, target)
-                    .await
-                {
-                    Ok(mirrored) => {
-                        let node_id = mirrored.node_id;
-                        // Issue #663/#668: the version body was composed before
-                        // the store was asked, so it describes an outcome that
-                        // had not happened. Now it has — say what it was, and
-                        // record the digest the STORE computed so two versions
-                        // of one binary can be told apart.
-                        //
-                        // Always re-composed, never conditional on the link
-                        // having changed: an ordinary re-publish reuses its node
-                        // and would otherwise keep the previous version's
-                        // digest, which is precisely the "identical string"
-                        // failure #668 describes.
-                        let stored = pending.payload.artifact_body_for(
-                            crate::harness::publish::PayloadStorage::Stored {
-                                sha256: mirrored.sha256.as_deref(),
-                            },
-                        );
-                        // Only when it actually says something new. Prose is its
-                        // own body, so a text re-publish composes the identical
-                        // string and still stores once — the contract
-                        // `an_ordinary_republish_writes_the_artifact_once`
-                        // pins. A binary's body gains the store's digest, so it
-                        // differs and is worth the second write: without it the
-                        // version would keep the PREVIOUS digest, which is the
-                        // indistinguishable-versions defect (#668) with an extra
-                        // step.
-                        let body_changed =
-                            record.latest().is_some_and(|latest| latest.body != stored);
-                        if body_changed {
-                            record.amend_latest_body(stored);
-                        }
-                        let relinked = record.workspace_node_id() != Some(node_id.as_str());
-                        if relinked {
-                            record.stamp_workspace_node(&node_id);
-                        }
-                        // A second write only when the record actually changed:
-                        // a fresh publish, a re-publish whose node the operator
-                        // deleted, or a body that now carries an outcome it did
-                        // not before. Warn rather than `?` for the unchanged
-                        // reason — BOTH surfaces already hold this body and only
-                        // the record's copy is stale, so failing the batch would
-                        // discard the remaining publishes' records to report
-                        // something the next publish repairs.
-                        if (body_changed || relinked)
-                            && let Err(err) = artifacts.upsert(&self.record().id, &record).await
-                        {
-                            tracing::warn!(
-                                task_id = %card.id,
-                                source = %pending.source,
-                                node = %node_id,
-                                error = %err,
-                                "[publish] the deliverable and its note are both stored but the \
-                                 record could not be updated; the next publish of this source \
-                                 re-adopts the note and repairs it"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        // Issue #663. The record already claimed this file was
-                        // filed into the workspace. It was not, so the claim is
-                        // withdrawn rather than left standing — an operator who
-                        // opens the artifact and reads "open it there" and finds
-                        // nothing is the dangling-record failure #553 set out to
-                        // remove, arriving through the error path.
-                        //
-                        // The store's error is logged and NOT written to the
-                        // record: a version body is permanent and a backend
-                        // error can name host paths.
-                        tracing::error!(
-                            task_id = %card.id,
-                            agent = %author,
-                            source = %pending.source,
-                            error = %err,
-                            "[publish] could not put the published file into the company \
-                             workspace; the artifact record says so rather than promising a \
-                             file that is not there"
-                        );
-                        record.amend_latest_body(
-                            pending.payload.artifact_body_for(
-                                crate::harness::publish::PayloadStorage::Refused,
-                            ),
-                        );
-                        if let Err(err) = artifacts.upsert(&self.record().id, &record).await {
-                            tracing::error!(
-                                task_id = %card.id,
-                                source = %pending.source,
-                                error = %err,
-                                "[publish] the workspace refused the file AND the record could \
-                                 not be corrected; it still claims the file is stored"
-                            );
-                        }
-                    }
-                }
-            }
-            written.push(TaskOutputArtifact {
-                artifact_id: record.id.clone(),
-                version,
-                title: record.title.clone(),
-                kind: record.kind,
-            });
-            self.deps.pending_publishes.output_collector().artifact(
-                record.id.clone(),
-                card.id.clone(),
-                version,
-                &record.title,
-            );
-            // Keep the working set current so two publishes of the same path in
-            // one run extend one record rather than opening two.
-            on_card.push(record);
+    /// Where a conversation turn's publishes go: a fresh card when both stores
+    /// the drain needs are wired, else nowhere, so the tool refuses in-turn.
+    fn conversation_destination(&self) -> publish::PublishDestination {
+        if self.deps.tasks.is_some() && self.deps.artifacts.is_some() {
+            publish::PublishDestination::Conversation
+        } else {
+            publish::PublishDestination::Unclaimed
         }
-        Ok(written)
     }
 
     /// Files one drained batch of conversation publishes onto the right card —
@@ -2604,7 +2317,7 @@ impl HarnessBrain {
     /// operator's own reply (issue #445) — and returns the card it landed on.
     ///
     /// `claimed` mirrors the belt-and-suspenders guard every call site already
-    /// used inline (`!published.is_empty() && publish_claim.is_some()`): an
+    /// used inline (`!published.is_empty() && publish_claim.is_claimed()`): an
     /// unclaimed queue can only ever drain empty, so this is defensive rather
     /// than load-bearing, but it keeps both conditions visible together instead
     /// of only at the call site.
@@ -2769,110 +2482,23 @@ impl HarnessBrain {
         Ok(card.id)
     }
 
-    /// Records what a **conversation** turn published, minting the card that
-    /// carries it (issue #445). Returns that card's id.
+    /// Files a conversation's publishes, on a card minted to carry them.
     ///
-    /// # Why a card, rather than a company-level artifact
-    ///
-    /// The issue allows either: a chat deliverable becomes an artifact attached
-    /// to no card, or the act of publishing mints the card. This path takes the
-    /// second, and the deciding argument is *reachability* — which is, after
-    /// all, the entire bug.
-    ///
-    /// An [`ArtifactRecord`] carries a non-optional `task_id`, `(task_id,
-    /// source)` **is** its identity, the only route that lists artifacts is
-    /// `GET /tasks/{task_id}/artifacts`, and the only console surface that
-    /// renders one is the per-task Artifacts tab. A card-less artifact would
-    /// therefore need an optional `task_id` (breaking the identity contract), a
-    /// new company-scoped route, and a new console view — and until that last
-    /// piece shipped, the artifact would be recorded and still unreachable,
-    /// which is precisely the failure being fixed, merely moved one layer down.
-    /// Minting the card reuses a path the operator can already open today.
-    ///
-    /// It is also honest about what happened rather than a workaround: an agent
-    /// that produced a deliverable did a unit of work, and a board that shows it
-    /// is more accurate than one that does not. The card lands in
-    /// [`COLUMN_IN_REVIEW`] because that is where the lifecycle already puts
-    /// finished agent work awaiting a person — `COLUMN_DONE` is reached only by
-    /// a human accepting it, and this fix does not get to decide that on their
-    /// behalf.
-    ///
-    /// # What it deliberately does not do
-    ///
-    /// No `output` stamp. That field pins a `run_id` and an attempt ordinal, and
-    /// a chat turn has neither — inventing one would put a fabricated attempt on
-    /// a card to make a field look populated. The artifacts are reachable
-    /// through the tab regardless; an invented run id would not be true.
+    /// Delegates to [`PublishFiling`](publish::filing::PublishFiling), which a
+    /// hive episode's seat also uses; see its module docs for why the body no
+    /// longer lives here.
     async fn record_conversation_publishes(
         &self,
         responder: &str,
         chat: ChatTarget<'_>,
         published: Vec<publish::PendingPublish>,
     ) -> Result<String> {
-        let Some(tasks) = self.deps.tasks.as_ref() else {
-            // Unreachable while the claim is only taken with both stores wired,
-            // and an error rather than a silent `Ok` so it stays unreachable:
-            // the caller surfaces this to the operator instead of dropping the
-            // deliverable the way #445 did.
-            return Err(crate::OpenCompanyError::Harness(
-                "a conversation published a file but no task board is wired".to_string(),
-            ));
-        };
-
-        let card = TaskRecord {
-            id: generate_id(),
-            title: crate::ports::tasks::TaskTitle::system(&publish::conversation_card_title(
-                &published,
-            )),
-            note: Some(publish::conversation_card_note(responder, &published)),
-            // Finished agent work a person has not accepted yet — the same
-            // landing `column_for_settled_run(Succeeded)` gives a dispatched run.
-            column: COLUMN_IN_REVIEW.to_string(),
-            priority: "medium".to_string(),
-            assignee: responder.to_string(),
-            updated_at_millis: now_millis(),
-            // The conversation this came out of, so the card points back at the
-            // thread that produced it (#151 §3.2's field, same meaning).
-            // Issue #1890 B: and the thread inside it, so a file published
-            // inside a thread leaves its card pointing at that thread rather
-            // than at the channel around it. `None` for the thread is the
-            // channel-level conversation, which is where every publish landed
-            // before threads were part of the key.
-            origin: TaskOrigin::new(chat.chat_id.map(str::to_string), chat.thread_root),
-            // A chat turn has no card in scope, so this is a lineage root —
-            // the same `None` a `spawn_task` from an ordinary chat turn writes.
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-            origin_message_seq: None,
-            bounced: None,
-        };
-        // The card is written **first**: an artifact's `task_id` must name a
-        // card that exists. If the artifact writes then fail, the failure
-        // direction is a visible card whose note explains what it was for —
-        // recoverable, and the operator is told below. The reverse order would
-        // leave artifacts pointing at a card that was never created, which is
-        // unreachable by every route and indistinguishable from the original
-        // bug.
-        tasks.upsert(&self.record().id, &card).await?;
-
-        // No run id: there is no attempt row behind a chat turn, and
-        // `stamp_run` is skipped rather than given something invented.
-        let recorded = self
-            .record_published_artifacts(&card, responder, published, None)
-            .await?;
-        tracing::info!(
-            task_id = %card.id,
-            agent = %responder,
-            artifacts = recorded.len(),
-            "[publish] a conversation published files; minted a card to carry them"
-        );
-        Ok(card.id)
+        publish::filing::PublishFiling {
+            company: &self.record().id,
+            deps: &self.deps,
+        }
+        .record_conversation_publishes(responder, chat, published)
+        .await
     }
 
     /// Resolves which agent answers an operator message.
@@ -2941,13 +2567,7 @@ impl HarnessBrain {
         {
             return responder;
         }
-        // The built-in `#general` channel (issue #1743) — the one key that
-        // resolves to nobody *on purpose*. `chat_responder` declines it so both
-        // callers answer as their own orchestrator, which is what this host has
-        // always done for the company's main line. It is not the #884 case the
-        // warning below exists for: nothing was misaddressed, so logging it
-        // would bury the real misroutes under the console's most-used channel.
-        if crate::server::chat_history::is_general_chat(Some(chat)) {
+        if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
             return self.responder.clone();
         }
         tracing::warn!(
@@ -2960,43 +2580,123 @@ impl HarnessBrain {
         self.responder.clone()
     }
 
-    /// The desk key `@everyone` expands against for a message addressed to
-    /// `chat`. Folds the General-desk spellings [`is_general_chat`] admits
-    /// (`None`, `""`, `"main"`, `"General"`) to [`DEFAULT_DESK`], so a
-    /// broadcast from the console's default thread — which sends
-    /// `chat: "main"`, an alias `resolve_desk_id` does not know — expands
-    /// against the General desk rather than no desk at all.
+    /// The company's hives, built over the pool's live agents for this
+    /// message (plan hive-desks, Phase 4).
     ///
-    /// **A real desk answering to that key wins, whatever it is spelled like.**
-    /// A blueprint may declare `[[group_chat]] id = "main"` (or `"general"`),
-    /// which this host grandfathers — `is_general_channel` is guarded on
-    /// `!desk_exists`, so the desk keeps its members and `responder_for` routes
-    /// to its lead. Folding that key to `General` asks `resolve_desk_id` for a
-    /// name no such desk has, which misses, and `@everyone` then expands to the
-    /// **whole roster** instead of the desk that was actually addressed — a
-    /// broadcast escaping the scope of the one case the fold exists to keep
-    /// working. Asking the record first costs one lookup and cannot be wrong.
-    fn everyone_desk(record: &CompanyRecord, chat: Option<&str>) -> String {
-        match chat {
-            Some(chat)
-                if record.resolve_desk_id(chat).is_some()
-                    || !crate::server::chat_history::is_general_chat(Some(chat)) =>
-            {
-                chat.to_string()
+    /// Per message rather than cached: a hive is a validation and a handful
+    /// of `Arc` clones, and a roster or desk change is then in force on the
+    /// next message with nothing to invalidate.
+    async fn desk_hives(
+        &self,
+        record: &CompanyRecord,
+    ) -> std::collections::HashMap<String, Arc<crate::hive::graph::DeskHive>> {
+        let mut agents: std::collections::HashMap<String, openhuman_embed::Agent> =
+            std::collections::HashMap::new();
+        for agent in record.effective_agents() {
+            if let Some(live) = self.pool.agent(&record.id, &agent.id).await {
+                agents.insert(agent.id.clone(), live.runtime_agent().clone());
             }
-            // A General alias resolves to whichever desk claims the line, not
-            // to the literal `DEFAULT_DESK`. A blueprint desk declared
-            // `id = "main", name = "Front office"` claims it by id, so
-            // `resolve_desk_id("General")` misses and the guard above falls
-            // through — and expanding `@everyone` against a desk called
-            // `General` that does not exist scoped the broadcast to the entire
-            // roster, while the channel it was posted in is that desk and its
-            // lead answers there. The alias and the raw key have to name the
-            // same membership or `@everyone` means two different things in one
-            // channel (issue #1743).
-            _ => crate::runtime::delegation_tools::general_claimant(record)
-                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
         }
+        crate::hive::dispatch::hives_for(record, &|id| agents.get(id).cloned())
+    }
+
+    /// The episode seat that parked `approval_id`, if a seat did.
+    fn episode_seat_of(
+        &self,
+        approval_id: &crate::ports::types::ApprovalId,
+    ) -> Option<crate::runtime::episode_resume::EpisodeSeat> {
+        self.deps
+            .approval_parker
+            .as_ref()?
+            .turn_of(approval_id)
+            .as_deref()
+            .and_then(crate::runtime::episode_resume::parse)
+    }
+
+    /// Carries on a desk episode from its last checkpoint, on its own task.
+    async fn resume_desk_episode(&self, episode_id: &str) -> bool {
+        let Some(events) = self.deps.events.clone() else {
+            return false;
+        };
+        let warmed = match self.refresh_record().await {
+            Ok(()) => self.run_turn().ensure(&self.record()).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = warmed {
+            tracing::error!(
+                episode = %episode_id,
+                %error,
+                "[hive] the roster a parked episode resumes with could not be built"
+            );
+            return false;
+        }
+        let record = self.record();
+        let hives = self.desk_hives(&record).await;
+        let dispatcher = crate::hive::dispatch::dispatcher(
+            record,
+            events,
+            hives,
+            Arc::new(HarnessDeps::clone(&self.deps)),
+            Arc::clone(&self.pool),
+            self.mentions.clone(),
+        );
+        crate::hive::dispatch::spawn_resume(dispatcher, episode_id.to_owned());
+        true
+    }
+
+    /// The first active teammate the message named, in reading order —
+    /// `tinyhivemind_core::mention::direct_responder` over the live roster.
+    fn mentioned_responder(&self, mentions: &[crate::ports::types::Mention]) -> Option<String> {
+        if mentions.is_empty() {
+            return None;
+        }
+        let record = self.record();
+        let members = crate::runtime::delegation_tools::tinyhivemind_roster(&record);
+        let retired = record.overlay_retired_agents.clone();
+        let roster = tinyhivemind_core::roster::Roster::new(&members, &[], &retired);
+        let mentions: Vec<tinyhivemind_core::mention::Mention> = mentions
+            .iter()
+            .map(crate::hive::dispatch::tinyhivemind_mention)
+            .collect();
+        tinyhivemind_core::mention::direct_responder(&mentions, &roster).map(str::to_string)
+    }
+
+    /// Everyone else the message named, expanded against the addressed desk
+    /// — `tinyhivemind_core::mention::mentioned_members` over the live
+    /// roster and desks, excluding `responder`.
+    fn mentioned_members(
+        &self,
+        addressed_desk: &str,
+        mentions: &[crate::ports::types::Mention],
+        responder: Option<&str>,
+    ) -> Vec<String> {
+        if mentions.is_empty() {
+            return Vec::new();
+        }
+        let record = self.record();
+        let members = crate::runtime::delegation_tools::tinyhivemind_roster(&record);
+        let retired = record.overlay_retired_agents.clone();
+        let roster = tinyhivemind_core::roster::Roster::new(&members, &[], &retired);
+        let snapshots = crate::runtime::delegation_tools::tinyhivemind_desks(&record);
+        let desks = snapshots.set();
+        let mentions: Vec<tinyhivemind_core::mention::Mention> = mentions
+            .iter()
+            .map(crate::hive::dispatch::tinyhivemind_mention)
+            .collect();
+        tinyhivemind_core::mention::mentioned_members(
+            &mentions,
+            Some(addressed_desk),
+            responder,
+            &roster,
+            &desks,
+        )
+    }
+
+    /// The desk key `@everyone` expands against for a message addressed to
+    /// `chat`; an unaddressed message expands against #general.
+    fn everyone_desk(chat: Option<&str>) -> String {
+        chat.unwrap_or(crate::ports::general_channel::GENERAL_CHANNEL_ID)
+            .to_string()
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -3157,13 +2857,23 @@ impl HarnessBrain {
             agent: None,
             run_id: run_id.map(str::to_string),
         };
-        self.deps
-            .approval_requests
-            .push(crate::harness::built_in::policy::ApprovalRequest {
-                tool: payload.kind.effect_kind(),
-                reason: reason.to_string(),
-                effect,
-            });
+        let pushed =
+            self.deps
+                .approval_requests
+                .push(crate::harness::built_in::policy::ApprovalRequest {
+                    tool: payload.kind.effect_kind(),
+                    reason: reason.to_string(),
+                    effect,
+                });
+        if !pushed.is_queued() {
+            tracing::error!(
+                kind = %payload.kind.effect_kind(),
+                outcome = ?pushed,
+                "[harness::brain] a blocker could not be queued for the operator; settling the \
+                 run as failed rather than blocked on a question nobody was asked"
+            );
+            return TaskRunEnd::Failed;
+        }
         TaskRunEnd::Blocked
     }
 
@@ -3344,22 +3054,6 @@ impl HarnessBrain {
         })
     }
 
-    /// The company's responder selection, built once (issue #1835).
-    fn selector_pass(
-        &self,
-        company: &crate::ports::types::CompanyId,
-    ) -> &crate::harness::selector::MeteredSelector {
-        self.selector.get_or_init(|| {
-            crate::harness::selector::MeteredSelector::from_deps(&self.deps, company.clone())
-        })
-    }
-
-    /// SPIKE: who currently oversees the thread rooted at `parent`.
-    ///
-    /// The last teammate to have replied under that root, read straight off the
-    /// journal — so oversight follows the conversation without a field to keep
-    /// in sync. `None` for an unparented message (the channel itself has no
-    /// overseer), when no event log is wired, or when nobody has spoken yet.
     /// SPIKE: the card this thread already raised, if it raised one.
     ///
     /// One thread is one piece of work. Without this a follow-up inside a
@@ -3385,247 +3079,96 @@ impl HarnessBrain {
             .into_iter()
             .filter(|card| card.origin_parent() == Some(root))
             .filter(|card| {
-                crate::server::chat_history::same_conversation(card.origin_chat_id(), chat)
+                card.origin_chat_id()
+                    == Some(chat.unwrap_or(crate::ports::general_channel::GENERAL_CHANNEL_ID))
             })
             .map(|card| card.id)
             .next_back()
     }
-
-    async fn thread_overseer(
-        &self,
-        chat: Option<&str>,
-        parent: Option<crate::ports::types::EventSeq>,
-    ) -> Option<String> {
-        /// How far back to look for the hand-off. A thread is one level deep
-        /// and bounded in practice; past this the fallback answer is better
-        /// than an unbounded scan on every message.
-        const LOOKBACK: usize = 400;
-
-        let root = parent?;
-        let record = self.record();
-
-        // **The card is the ownership record; the thread only reflects it.**
-        //
-        // Deriving oversight from the conversation alone gives a SECOND owner
-        // that drifts from `assignee` — observed: card held by `design`, thread
-        // overseen by `qa_engineer`, and a stray hop card under a third agent.
-        // Two records for one question is the same class of split the board and
-        // the run history already avoid by keeping one settle site.
-        //
-        // So when this thread raised a card, that card's assignee IS the
-        // overseer: a hand-off moves it, a reassignment from the board moves
-        // it, and the thread follows without a second rule. The mention scan
-        // below is only for a thread with no card behind it — an ordinary chat
-        // exchange, where there is nothing else to be authoritative.
-        if let Some(tasks) = self.deps.tasks.as_ref()
-            && let Ok(cards) = tasks.list(&record.id).await
-        {
-            let owner = cards
-                .iter()
-                .filter(|card| card.origin_parent() == Some(root))
-                .filter(|card| {
-                    crate::server::chat_history::same_conversation(card.origin_chat_id(), chat)
-                })
-                .filter_map(|card| {
-                    crate::runtime::assignee::resolve(&record, &card.assignee)
-                        .working_agent()
-                        .map(str::to_string)
-                })
-                .next_back();
-            if let Some(owner) = owner {
-                return Some(owner);
-            }
-        }
-
-        let events = self.deps.events.as_ref()?;
-        // Backwards from the tail, bounded — NOT `read_from(0, MAX)`, which
-        // turns every chat message into a scan of the whole company history.
-        let page = events.read_before(&record.id, None, LOOKBACK).await.ok()?;
-
-        let dir = crate::runtime::mentions::directory(&record, &[]);
-        let mut last_speaker: Option<String> = None;
-
-        for stored in page {
-            // Nothing at or before the root can carry this thread's hand-off.
-            if stored.seq <= root {
-                break;
-            }
-            let crate::ports::types::CompanyEvent::AgentReply {
-                parent: reply_parent,
-                agent_id,
-                chat_id,
-                text,
-                ..
-            } = &stored.event
-            else {
-                continue;
-            };
-            if *reply_parent != Some(root)
-                || !crate::server::chat_history::same_conversation(Some(chat_id), chat)
-            {
-                continue;
-            }
-            // **The hand-off, not the last utterance.** Oversight transfers to
-            // whoever was HANDED the work, so the overseer is the agent the
-            // most recent hand-off NAMED — not whoever spoke most recently.
-            //
-            // Keying on the last speaker instead is self-reinforcing: one
-            // misrouted turn makes that agent the overseer of the thread
-            // permanently, because answering is itself what confers oversight.
-            // Naming somebody is a deliberate act; speaking is not.
-            let named = crate::runtime::mentions::extract_with_known(text, &dir);
-            if let Some(handed_to) =
-                crate::runtime::mentions::mention_responder(&record, Some(chat_id), &named)
-            {
-                return Some(handed_to);
-            }
-            // Newest-first, so the first reply we see is the latest speaker.
-            if last_speaker.is_none() && record.is_roster_agent(agent_id) {
-                last_speaker = Some(agent_id.clone());
-            }
-        }
-        // Nobody was handed anything: the thread has one participant, and they
-        // hold it.
-        last_speaker
-    }
-
-    /// The per-message pick for a message addressed to an `auto` channel — or
-    /// `None` wherever the deterministic answer should stand (issue #1835).
-    ///
-    /// `None` covers every case, deliberately in one place: the chat key names
-    /// no desk, the desk is lead-routed, the channel has fewer than two roster
-    /// members (a pick over one candidate is the fallback with extra latency),
-    /// or the selection failed — unreachable, slow, unparseable, or an id
-    /// outside the membership. The caller falls back to
-    /// [`responder_for`](Self::responder_for), whose desk arm answers the
-    /// channel's first roster member; **the worst case of this rung is the old
-    /// rung**.
-    ///
-    /// Takes the operator's raw `text`, not the attachment-composed wire body:
-    /// routing is judged on what was said, and a 200k-char extracted-file block
-    /// would drown the one line the selection is about.
-    ///
-    /// A member's role and description come from the same halves the Team page
-    /// renders — [`CompanyRecord::effective_agent`] for a manifest teammate
-    /// (edits applied), the overlay row plus its stored edit for a
-    /// console-created one — so the selector judges fit by what an operator
-    /// reads on the members pane.
-    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
-        let chat = chat?;
-        let (company, desk_id, candidates) = {
-            let record = self.record();
-            let desk_id = record.resolve_desk_id(chat)?;
-            if record.desk_responder_mode(&desk_id).is_lead() {
-                return None;
-            }
-            let candidates: Vec<crate::harness::selector::SelectorCandidate> = record
-                .effective_desk_members(&desk_id)
-                .into_iter()
-                .filter(|m| record.is_roster_agent(m))
-                .filter_map(|id| selector_candidate(&record, &id))
-                .collect();
-            (record.id.clone(), desk_id, candidates)
-        };
-        match candidates.len() {
-            // Every member has left the roster since the channel was created —
-            // `POST …/desks` refuses an empty auto channel, but `DELETE
-            // …/team/{id}` can empty one later (codex on #1872). There is
-            // nobody to pick, so this defers to the caller's fallback ladder
-            // and the orchestrator answers, exactly as it does for any desk
-            // whose members have all gone. Refusing the deletion instead would
-            // be worse — a teammate you cannot remove because a channel names
-            // them — so the gap is closed by saying so rather than by
-            // pretending the channel still routes.
-            0 => {
-                tracing::warn!(
-                    company = %company,
-                    chat = %desk_id,
-                    "[selector] this channel has no roster members left, so there is nobody to \
-                     pick; the orchestrator is answering a message addressed to the channel"
-                );
-                None
-            }
-            1 => Some(candidates[0].id.clone()),
-            // The plan-level total-token ceiling gates the selection too, not
-            // only the responder turn it precedes (codex on #1872). Selection
-            // runs *before* a responder exists, so `total_ceiling_refusal` has
-            // no agent to refuse as — but it is a real model call, and without
-            // this a tenant past its hard ceiling could keep paying to route
-            // by posting into an auto channel, one selector call per message,
-            // after the ceiling that is supposed to permit no model calls at
-            // all. Falling through to the deterministic first member costs
-            // nothing and is the same answer a lead desk would give.
-            _ if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await => {
-                tracing::info!(
-                    company = %company,
-                    chat = %desk_id,
-                    "[selector] total token ceiling reached; routing to the channel's first \
-                     member without a selection call"
-                );
-                None
-            }
-            _ => match self.selector_pass(&company).select(text, &candidates).await {
-                crate::harness::selector::SelectorVerdict::Member(id) => {
-                    tracing::info!(
-                        company = %company,
-                        chat = %desk_id,
-                        picked = %id,
-                        "[selector] routed an unmentioned channel message to its best-fit member"
-                    );
-                    Some(id)
-                }
-                crate::harness::selector::SelectorVerdict::Unavailable => None,
-            },
-        }
-    }
-}
-
-/// One channel member as [`HarnessBrain::auto_channel_responder`] hands it to
-/// the selection: the manifest half through
-/// [`CompanyRecord::effective_agent`] (stored edits applied), the overlay half
-/// from its row with any stored edit's role/description preferred — the same
-/// two halves the Team page folds, so the selector and the members pane
-/// describe a teammate identically.
-fn selector_candidate(
-    record: &CompanyRecord,
-    id: &str,
-) -> Option<crate::harness::selector::SelectorCandidate> {
-    let allow = &record.manifest.tools.allow;
-    if let Some(agent) = record.effective_agent(id) {
-        return Some(crate::harness::selector::SelectorCandidate {
-            id: agent.id.clone(),
-            role: agent.role.clone(),
-            description: agent.description.clone(),
-            tools: crate::runtime::builder::agent_effective_grants(allow, agent.tools.as_deref()),
-        });
-    }
-    let agent = record.overlay_agents.iter().find(|a| a.id == id)?;
-    let edit = record.overlay_agent_edits.iter().find(|e| e.agent_id == id);
-    // An edit that states `tools` replaces the teammate's own list; one that
-    // says nothing leaves it, matching how role and description resolve above.
-    let tools = edit
-        .and_then(|e| e.tools.clone())
-        .unwrap_or_else(|| agent.tools.clone());
-    Some(crate::harness::selector::SelectorCandidate {
-        id: agent.id.clone(),
-        role: edit
-            .and_then(|e| e.role.clone())
-            .unwrap_or_else(|| agent.role.clone()),
-        description: edit
-            .and_then(|e| e.description.clone())
-            .filter(|d| !d.is_empty())
-            .or_else(|| agent.description.clone()),
-        tools: crate::runtime::builder::agent_effective_grants(allow, tools.as_deref()),
-    })
 }
 
 /// The turn instruction for a dispatched card: its title, plus its note when it
 /// carries one, framed as a work item to act on.
 fn task_instruction(card: &TaskRecord) -> String {
     match card.note.as_deref().filter(|n| !n.is_empty()) {
-        Some(note) => format!("Task: {}\n\n{}", card.title, note),
+        Some(note) => {
+            let (assignment, history) = task_note_sections(note);
+            let research_hint = if public_research_assignment(&assignment) {
+                " This is a public-source research assignment: begin with `web_search` now. Do \
+                 not inspect the company workspace, ledgers, prior artifacts, or skill catalogue \
+                 first. Open the strongest search results with `web_fetch` and cite what you \
+                 actually read. If `web_search` reports an authentication, expired-session, \
+                 credential, or provider-availability error, stop after that one call and report \
+                 the exact blocker. Do not retry it with another query."
+            } else {
+                ""
+            };
+            if history.is_empty() {
+                format!("Task: {}\n\n{}{}", card.title, assignment, research_hint)
+            } else {
+                format!(
+                    "Task: {}\n\n## Prior attempt history\n\
+                     Earlier agent/system output exists on the card but is omitted from this turn \
+                     ({} bytes). It is history only. Do not summarize an earlier failure as the \
+                     result of this run.\n\n## Current assignment\n{}\n\nPerform the current assignment now \
+                     with the tools available in this turn. This card is already the authoritative \
+                     task, so do not read the tasks ledger to rediscover it. If it asks for current \
+                     public-source research and `web_search` is on your current tool belt, call \
+                     `web_search`, then verify the strongest sources with `web_fetch`, before \
+                     reporting that research is blocked.{}",
+                    card.title,
+                    history.len(),
+                    assignment,
+                    research_hint
+                )
+            }
+        }
         None => format!("Task: {}", card.title),
     }
+}
+
+fn public_research_assignment(assignment: &str) -> bool {
+    let lower = assignment.to_ascii_lowercase();
+    lower.contains("research")
+        && (lower.contains("source") || lower.contains("competitor") || lower.contains("landscape"))
+}
+
+/// Separate operator/reviewer instructions from result blocks accumulated on a
+/// card by prior runs. `append_result` uses blank-line-separated `[label] `
+/// blocks; continuation paragraphs inherit their preceding label.
+fn task_note_sections(note: &str) -> (String, String) {
+    let mut assignment = Vec::new();
+    let mut history = Vec::new();
+    let mut current_is_assignment = true;
+
+    for paragraph in note.split("\n\n") {
+        if let Some(label) = note_attribution(paragraph) {
+            current_is_assignment = matches!(label, "operator" | "operator redirect" | "reviewer");
+        }
+        if current_is_assignment {
+            assignment.push(paragraph);
+        } else {
+            history.push(paragraph);
+        }
+    }
+
+    // A machine-authored-only note is unusual but still used by a few failure
+    // paths. Never manufacture an empty assignment: the whole note remains the
+    // work description in that case.
+    if assignment.is_empty() {
+        return (note.to_string(), String::new());
+    }
+    (assignment.join("\n\n"), history.join("\n\n"))
+}
+
+fn note_attribution(paragraph: &str) -> Option<&str> {
+    let rest = paragraph.strip_prefix('[')?;
+    let (label, _) = rest.split_once("] ")?;
+    (!label.is_empty()
+        && label.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_- ".contains(&byte)
+        }))
+    .then_some(label)
 }
 
 /// Records one run ending on the card: the result block on its note, and the
@@ -3655,6 +3198,10 @@ impl Brain for HarnessBrain {
     /// without the harness can still name what they open.
     fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
         Some(self.title_pass(&self.record().id))
+    }
+
+    async fn resume_episode(&self, episode_id: &str) -> bool {
+        self.resume_desk_episode(episode_id).await
     }
 
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
@@ -3854,242 +3401,62 @@ impl HarnessBrain {
                         channel_responses.push(confined_turn_bubble(outcome));
                         continue;
                     }
-                    // Issue: hive-mind desks. A desk with somebody to
-                    // deliberate WITH answers as a room rather than through one
-                    // responder — `tinyhivemind_hive::step` decides who speaks
-                    // next, that teammate runs an ordinary turn, its line is
-                    // journaled on the desk, and the loop continues until the
-                    // room converges, deadlocks, or spends its budget.
+                    // Plan hive-desks, Phase 4/5: a desk with somebody to
+                    // deliberate WITH answers as a room. The message opens
+                    // (or joins) an episode on that desk's hive; the seats run
+                    // in concurrent rounds until every assigned one calls
+                    // `complete_episode`; every utterance is journaled by the
+                    // driver as an `AgentReply` with its episode metadata, so
+                    // no bubble goes back through `channel_responses` — the
+                    // REST route would journal it a second time.
                     //
-                    // It sits ABOVE the responder ladder below and BELOW the
-                    // mention rung, which is the same explicit-beats-implicit
-                    // ordering the rest of the ladder already applies: naming
-                    // one teammate in a room addresses that teammate, not the
-                    // room, so a `@mention` still runs exactly one turn.
-                    // `desk_episode` declines everything else that must keep
-                    // the single-turn path — an unaddressed message, a General
-                    // spelling, a DM, a key that names no desk, a desk with
-                    // fewer than two effective roster members, and a desk that
-                    // opted out — so a company with one teammate per desk is
-                    // unaffected byte-for-byte. A copilot thread never reaches
-                    // here at all: it returned above.
+                    // Every other surface — a DM, `#general`, a workflow
+                    // thread, a desk of one — takes the single-turn path
+                    // below. A copilot thread returned above.
                     //
-                    // The episode journals its own turns, and deliberately
-                    // pushes NO bubble onto `channel_responses`: the REST
-                    // chat route journals every response it is handed as an
-                    // `AgentReply`, so a bubble here would write a second row
-                    // for a line the driver has already made durable. The
-                    // console still sees each turn arrive live — the operator
-                    // SSE feed projects journal rows — and a reload reads the
-                    // same transcript the room itself folded.
-                    //
-                    // Skipped when the journal is not wired: the episode reads
-                    // its own turns back out of it to fold the next step, so a
-                    // driver with nowhere to append could not deliberate at
-                    // all, and falling through answers exactly as before.
-                    if crate::runtime::mentions::mention_responder(
-                        &self.record(),
-                        chat.as_deref(),
-                        mentions,
-                    )
-                    .is_none()
-                        && let Some(events) = self.deps.events.clone()
-                        && let Some(desk) =
-                            crate::hivemind::desk_episode(&self.record(), chat.as_deref())
-                    {
-                        // The operator message's own sequence: the episode's
-                        // watermark, so the room folds what was said after it
-                        // was asked and merely reads what came before. A
-                        // request built without seqs falls back to the message
-                        // itself being the whole of the room's history.
-                        let trigger = event_seq.unwrap_or_else(|| EventSeq::new(0));
-                        // The thread this episode's turns and closing report
-                        // are parented to (issue: hive replies were never
-                        // threaded to their trigger). Mirrors
-                        // `server::operator::reply_thread`: already in a
-                        // thread, the episode stays in it; otherwise the
-                        // triggering operator message becomes the thread
-                        // root, exactly as an ordinary single-responder reply
-                        // threads itself. Without this, every hive turn for a
-                        // top-level desk send is journaled with `parent: None`
-                        // — unrelated top-level channel traffic detached from
-                        // the question that asked it, and (worse) sharing the
-                        // desk's channel-level projection with every other
-                        // top-level hive send on the same desk, so a second
-                        // operator message answered in the same cycle can
-                        // fold the first episode's still-fresh turns as its
-                        // own votes.
-                        let thread_root = Some((*parent).unwrap_or(trigger));
-                        let runner = HiveDeskRunner {
-                            run_turn: self.run_turn(),
-                            company: self.record().id.clone(),
-                            chat_id: chat.clone(),
-                            thread_root,
-                            trigger_seq: Some(trigger),
-                            brain: self,
-                            host,
-                        };
-                        // The desk's own memory, over the same `ContextStore`
-                        // the per-turn memory loop and the `memory_recall` belt
-                        // read — so a hosted-memory overlay (CortexDB under
-                        // `OPENCOMPANY_MEMORY=remote`) applies to what a room
-                        // remembers exactly as it does to what a teammate does.
-                        let memory = Arc::new(HiveDeskMemory {
-                            context: Arc::clone(&self.deps.context),
-                            company: self.record().id.clone(),
-                            desk_id: desk.id.clone(),
-                        });
-                        // The company's other desks, when this one opted in to
-                        // referral and there is a peer with somebody on it.
-                        // `None` is the default and every desk that never wrote
-                        // the block, so the driver below is byte-identical to
-                        // the one that ran before referral existed.
-                        let federation = crate::hivemind::desk_federation(&self.record(), &desk);
-                        let mut driver = crate::hivemind::EpisodeDriver::new(
-                            self.record().id.clone(),
-                            desk,
-                            events,
-                            &runner,
-                            composed.clone(),
-                        )
-                        .in_thread(thread_root)
-                        .with_memory(memory)
-                        // Every desk in the company, so a seat that also sits
-                        // elsewhere reads its own other conversations. Ungated,
-                        // unlike the federation above: this hands a member what
-                        // it can already see, not permission to ask anyone
-                        // anything.
-                        .with_context_desks(crate::hivemind::company_desks(&self.record()));
-                        if let Some(federation) = federation {
-                            driver = driver.with_federation(federation, &runner);
-                        }
-                        let run_result = driver.run(trigger).await;
-                        // Issue: an MCP tool-call failure inside a hive
-                        // member's turn queues on `self.deps.mcp_failures`
-                        // exactly as one inside an ordinary responder turn
-                        // does, but nothing on this path ever drained it —
-                        // the queue sat until a later, unrelated chat turn
-                        // cleared it silently, and the failing call produced
-                        // neither an error step nor a `McpCallFailed` journal
-                        // row. Drained here, unconditionally, the same way
-                        // the ordinary responder path drains it below: on
-                        // success AND on error, since a failed episode may
-                        // still have queued a real tool failure. The steps
-                        // vec is discarded — a hive episode has no single
-                        // bubble to attach them to, the transcript is already
-                        // the record — but the drain's real effect, the
-                        // journaled `McpCallFailed` row, does not depend on
-                        // it. Best-effort: a failure surfacing its own
-                        // failure must not cost the episode's real outcome.
-                        let mut discarded_steps = Vec::new();
-                        if let Err(err) =
-                            self.surface_mcp_failures(&mut discarded_steps, None).await
+                    // The episode runs on its own task: the cycle accepted the
+                    // message, the request is journaled, and the console
+                    // follows the rounds live. Skipped when the journal is not
+                    // wired: the driver reads its own rows back.
+                    if let Some(events) = self.deps.events.clone() {
+                        let record = self.record();
+                        let hives = self.desk_hives(&record).await;
+                        if let crate::hive::dispatch::Surface::Room { desk_id } =
+                            crate::hive::dispatch::surface_of(&record, &hives, chat.as_deref())
                         {
-                            tracing::warn!(
-                                company = %self.record().id,
-                                error = %err,
-                                "[hive] failed to surface queued MCP failures after an episode"
+                            let dispatcher = crate::hive::dispatch::dispatcher(
+                                record,
+                                events,
+                                hives,
+                                Arc::new(HarnessDeps::clone(&self.deps)),
+                                Arc::clone(&self.pool),
+                                self.mentions.clone(),
                             );
+                            let trigger = crate::hive::dispatch::trigger_for(
+                                event_seq, &composed, *parent, mentions,
+                            );
+                            crate::hive::dispatch::spawn_episode(dispatcher, desk_id, trigger);
+                            room_answered = true;
+                            continue;
                         }
-                        let outcome = run_result?;
-                        tracing::info!(
-                            company = %self.record().id,
-                            chat = %chat.as_deref().unwrap_or_default(),
-                            ending = %outcome.ending.label(),
-                            turns = outcome.turns,
-                            failed_turns = outcome.failed_turns,
-                            demoted = outcome.violations.len(),
-                            asked = outcome.referrals.asked.len(),
-                            "[hive] a desk answered as a room"
-                        );
-                        // Issue: a hive episode journals every turn and its
-                        // own closing report directly (`EpisodeDriver`), so a
-                        // synchronous chat-API caller and `emit_cycle_webhooks`
-                        // — both of which read `CycleReport.responses`
-                        // (`CycleResult.channel_responses` here) rather than
-                        // the journal — saw an empty response collection and
-                        // never fired `work.completed`, even though the desk
-                        // had just answered at length. Pushing the closing
-                        // report's own text back through here is NOT a second
-                        // journal write: `outcome.report_seq` is the sequence
-                        // the episode already journaled it under, so this
-                        // response carries that durable id and
-                        // `journal_chat_replies` — which otherwise journals
-                        // every response it is handed — skips a response that
-                        // already names one. When the report itself failed to
-                        // journal (`report_seq` is `None`, logged where it
-                        // happened), leaving `message_id` unset lets the
-                        // ordinary path journal it now rather than losing it
-                        // twice.
-                        channel_responses.push(OutboundMessage {
-                            message_id: outcome.report_seq.map(|seq| seq.value().to_string()),
-                            task_id: None,
-                            outputs: Vec::new(),
-                            channel: "operator".to_string(),
-                            agent: Some(crate::hivemind::HIVE_REPORT_AUTHOR.to_string()),
-                            text: outcome.summary(),
-                            steps: Vec::new(),
-                            reply_to: None,
-                            mentions: Vec::new(),
-                        });
-                        room_answered = true;
-                        continue;
                     }
                     // Route to the teammate the message named, else to the
-                    // addressed desk's lead, else the orchestrator.
+                    // addressed desk's default responder, else the
+                    // orchestrator (plan hive-desks, Phase 5: the responder
+                    // ladder — selector, thread overseer — is gone; a desk
+                    // with a room routes through its hive above, and every
+                    // other surface has one deterministic answerer).
                     //
-                    // Naming somebody in a room is a stronger address than the
-                    // room's default answerer, so a mention outranks the desk
-                    // lead. That is the same explicit-beats-implicit ordering
-                    // `responder_for` already applies between an addressed desk
-                    // and the orchestrator (issue #884) — one more rung at the
-                    // top of the existing ladder, not a second competing notion
-                    // of who a message is for.
-                    //
-                    // Resolves nothing on a message that mentions no teammate,
-                    // which is every message journaled before mentions existed,
-                    // so routing is unchanged byte-for-byte for them.
-                    // SPIKE: the thread-overseer rung.
-                    //
-                    // Oversight of a prompt transfers on hand-off: the operator
-                    // opens the conversation, and whoever it delegates to owns
-                    // the thread from there. So a reply *inside* a thread must
-                    // reach whoever currently holds it — not the room's default
-                    // answerer, which is what `responder_for` gives and which
-                    // made a follow-up land on the desk lead while the actual
-                    // overseer sat one message above.
-                    //
-                    // Derived, never stored: the overseer is the last teammate
-                    // to have spoken under this root. That transfers for free —
-                    // a delegate becomes the last speaker the moment it answers.
-                    //
-                    // Sits BELOW an @mention (naming somebody is still the
-                    // strongest address) and ABOVE the channel default, which is
-                    // the same explicit-beats-implicit ordering the ladder
-                    // already applies.
-                    let overseer = self.thread_overseer(chat.as_deref(), *parent).await;
+                    // Naming somebody is the strongest address, so a mention
+                    // outranks the channel default. Resolves nothing on a
+                    // message that mentions no teammate, which is every
+                    // message journaled before mentions existed.
                     // One thread, one card: a follow-up joins the work its
                     // thread already opened instead of opening another.
                     let thread_card = self.thread_card(chat.as_deref(), *parent).await;
-                    let responder = match crate::runtime::mentions::mention_responder(
-                        &self.record(),
-                        chat.as_deref(),
-                        mentions,
-                    )
-                    .or(overseer)
-                    {
-                        Some(responder) => responder,
-                        // Issue #1835: below a mention, above the deterministic
-                        // answer, an `auto` channel picks its best-fit member
-                        // for this message. Every way the pick cannot happen —
-                        // not an auto channel, one member, selection failed —
-                        // is `None`, and the ladder continues exactly where it
-                        // always stood.
-                        None => match self.auto_channel_responder(chat.as_deref(), text).await {
-                            Some(responder) => responder,
-                            None => self.responder_for(chat.as_deref()),
-                        },
-                    };
+                    let responder = self
+                        .mentioned_responder(mentions)
+                        .unwrap_or_else(|| self.responder_for(chat.as_deref()));
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still
                     // spawns exactly one turn, and this teammate spreads the
@@ -4097,20 +3464,9 @@ impl HarnessBrain {
                     // delegation seam rather than through a new uncontrolled
                     // one. `@everyone` expands here, against the addressed
                     // desk's membership.
-                    //
-                    // The addressed desk is the raw chat key unless it is one of
-                    // the General-desk spellings `is_general_chat` folds — the
-                    // console's default thread sends `chat: "main"`, and
-                    // `resolve_desk_id` does not recognise that console-only
-                    // alias, so a broadcast from the main thread would otherwise
-                    // expand against no desk at all.
-                    let addressed_desk = Self::everyone_desk(&self.record(), chat.as_deref());
-                    let also_mentioned = crate::runtime::mentions::mentioned_agents(
-                        &self.record(),
-                        &addressed_desk,
-                        mentions,
-                        Some(&responder),
-                    );
+                    let addressed_desk = Self::everyone_desk(chat.as_deref());
+                    let also_mentioned =
+                        self.mentioned_members(&addressed_desk, mentions, Some(&responder));
                     // The chat/desk thread this turn answers — the same id the
                     // reply is journaled under (`AgentReply.chat_id`). Passed into
                     // the pool so the live turn-stream frames carry it and the
@@ -4166,12 +3522,10 @@ impl HarnessBrain {
                     // a promise to record, and one that cannot be kept must not
                     // be made, or the tool goes back to issuing receipts nothing
                     // honours.
-                    let publish_claim =
-                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                            self.deps
-                                .pending_publishes
-                                .claim(publish::PublishDestination::Conversation)
-                        });
+                    let publish_claim = self
+                        .deps
+                        .pending_publishes
+                        .claim(self.conversation_destination());
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
@@ -4181,37 +3535,39 @@ impl HarnessBrain {
                     let record = self.record();
                     let output_claim = self.deps.pending_publishes.output_collector().claim();
                     let turn = output_claim
-                        .scoped(
-                            self.delegation_runner(run_turn.as_ref(), &record)
-                                // Issues #1035 / #1152: the operator's own statement of
-                                // what this message is for. The REST handler already
-                                // acts on it; until #1035 the runtime never saw it, so
-                                // it could not tell a message the handler had carded
-                                // from one it had not — and since #1152 it also carries
-                                // "this is not work", which the runtime has to honour or
-                                // the console's promise holds on one surface only.
-                                .requested(*deliverable)
-                                // Who else this message named (issue: mentions). Context
-                                // for the turn, never a second dispatch.
-                                .also_mentioned(also_mentioned)
-                                // The thread this message belongs to (#1890). Its own
-                                // `parent` IS the root — a reply is parented to its
-                                // question's parent, never to the question — so an
-                                // unparented message carries `None` and lands on the
-                                // channel-level conversation.
-                                .in_thread(*parent)
-                                // This message's own line in the journal, so the chat
-                                // seed can tell it apart from a concurrently accepted
-                                // sibling by identity instead of by text.
-                                .answering(event_seq)
-                                .maybe_for_task(thread_card.as_deref())
-                                // Issue #1846 review (Codex #3864988176): the operator's
-                                // own words, so a delegate's budget-pause marker re-parks
-                                // with what the operator actually asked for rather than
-                                // the hand-off instruction the model wrote.
-                                .reissue_message(composed.clone())
-                                .handle_operator_message(&responder, &composed, chat_id),
-                        )
+                        .scoped(Box::pin(
+                            publish_claim.scoped(Box::pin(
+                                self.delegation_runner(run_turn.as_ref(), &record)
+                                    // Issues #1035 / #1152: the operator's own statement of
+                                    // what this message is for. The REST handler already
+                                    // acts on it; until #1035 the runtime never saw it, so
+                                    // it could not tell a message the handler had carded
+                                    // from one it had not — and since #1152 it also carries
+                                    // "this is not work", which the runtime has to honour or
+                                    // the console's promise holds on one surface only.
+                                    .requested(*deliverable)
+                                    // Who else this message named (issue: mentions). Context
+                                    // for the turn, never a second dispatch.
+                                    .also_mentioned(also_mentioned)
+                                    // The thread this message belongs to (#1890). Its own
+                                    // `parent` IS the root — a reply is parented to its
+                                    // question's parent, never to the question — so an
+                                    // unparented message carries `None` and lands on the
+                                    // channel-level conversation.
+                                    .in_thread(*parent)
+                                    // This message's own line in the journal, so the chat
+                                    // seed can tell it apart from a concurrently accepted
+                                    // sibling by identity instead of by text.
+                                    .answering(event_seq)
+                                    .maybe_for_task(thread_card.as_deref())
+                                    // Issue #1846 review (Codex #3864988176): the operator's
+                                    // own words, so a delegate's budget-pause marker re-parks
+                                    // with what the operator actually asked for rather than
+                                    // the hand-off instruction the model wrote.
+                                    .reissue_message(composed.clone())
+                                    .handle_operator_message(&responder, &composed, chat_id),
+                            )),
+                        ))
                         .await?;
                     let mut operator_steps = turn.steps;
                     let mut operator_reply = turn.reply;
@@ -4245,7 +3601,7 @@ impl HarnessBrain {
                     // so nothing survives into the next turn, and only *recorded*
                     // when the claim was actually taken — an unclaimed queue can
                     // only be empty here, because the tool refuses without one.
-                    let published = self.deps.pending_publishes.drain();
+                    let published = publish_claim.drain();
                     // Issue #989: the paths this turn actually offered, captured
                     // before `file_conversation_batch` below moves `published` —
                     // the cap-pause scan's "staged" side of `publish::unpublished`
@@ -4260,7 +3616,7 @@ impl HarnessBrain {
                             // Issue #1890 B: the same conversation this turn
                             // answers in, thread and all — `parent` IS the root.
                             ChatTarget::in_thread(chat_id, *parent),
-                            publish_claim.is_some(),
+                            publish_claim.is_claimed(),
                             published,
                             &mut operator_reply,
                         ))
@@ -4299,25 +3655,27 @@ impl HarnessBrain {
                         if !unpublished.is_empty() {
                             let nudge_control = SteerControl::new();
                             let declined = output_claim
-                                .scoped(self.nudge_for_unpublished(
-                                    run_turn.as_ref(),
-                                    &responder,
-                                    text,
-                                    &operator_reply,
-                                    &unpublished,
-                                    changed.partial,
-                                    &nudge_control,
-                                    None,
-                                    None,
-                                ))
+                                .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                                    self.nudge_for_unpublished(
+                                        run_turn.as_ref(),
+                                        &responder,
+                                        text,
+                                        &operator_reply,
+                                        &unpublished,
+                                        changed.partial,
+                                        &nudge_control,
+                                        None,
+                                        None,
+                                    ),
+                                ))))
                                 .await;
-                            let nudge_published = self.deps.pending_publishes.drain();
+                            let nudge_published = publish_claim.drain();
                             if let Some(card_id) = output_claim
                                 .scoped(self.file_conversation_batch(
                                     &responder,
                                     turn.spawned_task.as_deref(),
                                     ChatTarget::in_thread(chat_id, *parent),
-                                    publish_claim.is_some(),
+                                    publish_claim.is_claimed(),
                                     nudge_published,
                                     &mut operator_reply,
                                 ))
@@ -4332,10 +3690,8 @@ impl HarnessBrain {
                             // answering the nudge* is an artifact of being
                             // asked, and naming it here would make the nudge
                             // generate its own noise.
-                            let still_unpublished = publish::unpublished(
-                                &unpublished,
-                                &self.deps.pending_publishes.sources(),
-                            );
+                            let still_unpublished =
+                                publish::unpublished(&unpublished, &publish_claim.sources());
                             if !still_unpublished.is_empty() {
                                 // A plain chat turn has no card to note a
                                 // decline on unless one happened to be opened
@@ -4538,7 +3894,16 @@ impl HarnessBrain {
                     verdict,
                     ..
                 } => {
-                    if let Some(message) =
+                    if let Some(seat) = self.episode_seat_of(approval_id) {
+                        tracing::warn!(
+                            %approval_id,
+                            episode = %seat.episode_id,
+                            seat = %seat.seat,
+                            "[hive] an episode seat's decision reached a chat cycle; handing it to \
+                             its episode instead of re-running the call here"
+                        );
+                        self.resume_episode(&seat.episode_id).await;
+                    } else if let Some(message) =
                         self.redispatch_granted_call(approval_id, *verdict).await?
                     {
                         channel_responses.push(message);
@@ -4565,12 +3930,10 @@ impl HarnessBrain {
                     // the claim is a promise to record, and one that cannot be
                     // kept must not be made, or the tool goes back to issuing
                     // receipts nothing honours.
-                    let publish_claim =
-                        (self.deps.tasks.is_some() && self.deps.artifacts.is_some()).then(|| {
-                            self.deps
-                                .pending_publishes
-                                .claim(publish::PublishDestination::Conversation)
-                        });
+                    let publish_claim = self
+                        .deps
+                        .pending_publishes
+                        .claim(self.conversation_destination());
                     // Drive the same routed turn an operator message gets, so a
                     // responder bound to a named harness runs there and an
                     // unavailable default fails loudly instead of silently
@@ -4579,10 +3942,12 @@ impl HarnessBrain {
                     let record = self.record();
                     let output_claim = self.deps.pending_publishes.output_collector().claim();
                     let turn = output_claim
-                        .scoped(
-                            self.delegation_runner(run_turn.as_ref(), &record)
-                                .handle_operator_message(&responder, prompt, None),
-                        )
+                        .scoped(Box::pin(
+                            publish_claim.scoped(Box::pin(
+                                self.delegation_runner(run_turn.as_ref(), &record)
+                                    .handle_operator_message(&responder, prompt, None),
+                            )),
+                        ))
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,
@@ -4593,7 +3958,7 @@ impl HarnessBrain {
                         // `channel` made reload history route the same reply to
                         // General while journaling the wrong author; they are
                         // separate facts (issue #885).
-                        channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                        channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                         agent: Some(responder.clone()),
                         text: if turn.budget_paused.is_some() {
                             BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string()
@@ -4623,7 +3988,7 @@ impl HarnessBrain {
                             message_id: None,
                             task_id: None,
                             outputs: Vec::new(),
-                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: iteration_cap_pause_notice(&responder),
                             steps: Vec::new(),
@@ -4636,7 +4001,7 @@ impl HarnessBrain {
                             message_id: None,
                             task_id: None,
                             outputs: Vec::new(),
-                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: spend_halt_notice(halt),
                             steps: Vec::new(),
@@ -4649,7 +4014,7 @@ impl HarnessBrain {
                             message_id: None,
                             task_id: None,
                             outputs: Vec::new(),
-                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: budget_pause_notice(pause),
                             steps: Vec::new(),
@@ -4664,7 +4029,7 @@ impl HarnessBrain {
                     // onto the card the turn opened — or a freshly minted one —
                     // exactly as an operator turn's publish is filed.
                     let spawned_task = responses[0].task_id.clone();
-                    let published = self.deps.pending_publishes.drain();
+                    let published = publish_claim.drain();
                     let published_sources: Vec<String> = published
                         .iter()
                         .map(|publish| publish.source.clone())
@@ -4676,8 +4041,10 @@ impl HarnessBrain {
                             // Nothing threaded a scheduled turn: it posts into
                             // the General desk's channel-level conversation,
                             // which is what the bare id meant before #1890 B.
-                            ChatTarget::channel(Some(crate::server::ops::language::DEFAULT_DESK)),
-                            publish_claim.is_some(),
+                            ChatTarget::channel(Some(
+                                crate::server::ops::language::GENERAL_CHANNEL_ID,
+                            )),
+                            publish_claim.is_claimed(),
                             published,
                             &mut responses[0].text,
                         ))
@@ -4695,27 +4062,29 @@ impl HarnessBrain {
                         if !unpublished.is_empty() {
                             let nudge_control = SteerControl::new();
                             let _declined = output_claim
-                                .scoped(self.nudge_for_unpublished(
-                                    run_turn.as_ref(),
-                                    &responder,
-                                    prompt,
-                                    &responses[0].text,
-                                    &unpublished,
-                                    changed.partial,
-                                    &nudge_control,
-                                    None,
-                                    None,
-                                ))
+                                .scoped(Box::pin(publish_claim.scoped(Box::pin(
+                                    self.nudge_for_unpublished(
+                                        run_turn.as_ref(),
+                                        &responder,
+                                        prompt,
+                                        &responses[0].text,
+                                        &unpublished,
+                                        changed.partial,
+                                        &nudge_control,
+                                        None,
+                                        None,
+                                    ),
+                                ))))
                                 .await;
-                            let nudge_published = self.deps.pending_publishes.drain();
+                            let nudge_published = publish_claim.drain();
                             if let Some(card_id) = output_claim
                                 .scoped(self.file_conversation_batch(
                                     &responder,
                                     spawned_task.as_deref(),
                                     ChatTarget::channel(Some(
-                                        crate::server::ops::language::DEFAULT_DESK,
+                                        crate::server::ops::language::GENERAL_CHANNEL_ID,
                                     )),
-                                    publish_claim.is_some(),
+                                    publish_claim.is_claimed(),
                                     nudge_published,
                                     &mut responses[0].text,
                                 ))
@@ -4756,7 +4125,7 @@ impl HarnessBrain {
                             message_id: None,
                             task_id: None,
                             outputs: Vec::new(),
-                            channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
+                            channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: notice,
                             steps: Vec::new(),
@@ -4780,13 +4149,14 @@ impl HarnessBrain {
                                         parent: None,
                                         task_id: response.task_id.clone(),
                                         outputs: response.outputs.clone(),
-                                        chat_id: crate::server::ops::language::DEFAULT_DESK
+                                        chat_id: crate::server::ops::language::GENERAL_CHANNEL_ID
                                             .to_string(),
                                         agent_id,
                                         text: response.text.clone(),
                                         steps: response.steps.clone(),
                                         mentions: Vec::new(),
                                         mention_depth: 0,
+                                        episode: None,
                                     },
                                 )
                                 .await
@@ -4842,540 +4212,6 @@ impl HarnessBrain {
             ledger_deltas: Vec::new(),
             token_usage: TokenUsage::default(),
         })
-    }
-}
-
-/// A hive episode's turn seam, wired to the harness.
-///
-/// The whole of what an episode needs from this host: an agent id and a prompt
-/// in, one reply out. Everything that makes the answering teammate a teammate —
-/// its tools, its memory retrieve/inject/store loop, its approval gate — comes
-/// from `RunTurn::run` being the ordinary turn path, unchanged. A deliberating
-/// turn differs from a single-responder turn in the prompt it is handed and in
-/// nothing else.
-///
-/// The chat target is the desk the episode is deliberating on, so the live
-/// turn-stream frames carry it and the console routes them to that thread
-/// exactly as it does for a normal desk turn.
-struct HiveDeskRunner<'a> {
-    run_turn: Arc<dyn RunTurn>,
-    company: CompanyId,
-    chat_id: Option<String>,
-    thread_root: Option<EventSeq>,
-    /// The triggering operator message's own sequence — the same `trigger`
-    /// the episode itself was started with. Carried onto every `ChatTarget`
-    /// this runner builds (`.answering(...)`) so `TurnStreamCtx::message_seq`
-    /// is populated for a hive turn exactly as it is for an ordinary one;
-    /// without it, live tool frames from a desk started inside a thread carry
-    /// no message identity and the frontend files them under the desk-level
-    /// thread instead of the active `desk#root`/message bucket.
-    trigger_seq: Option<EventSeq>,
-    /// The brain and host this runner's episode is running under, so a
-    /// gated tool call a member's turn hits can be parked for the operator
-    /// **between turns**, not only once the whole episode has finished.
-    ///
-    /// Without this, `request_approval` — the tool `speak`/`refer` reach
-    /// through `self.run_turn.run(...)` — enqueues onto
-    /// `self.deps.approval_requests` and the turn completes normally with a
-    /// "blocked, requires approval" refusal folded into the reply text
-    /// (openhuman resolves `RequireApproval` inline; nothing downstream
-    /// blocks on it). The episode loop therefore keeps running further
-    /// turns without ever surfacing the pending request, and the *cycle's*
-    /// `park_approval_requests` call only runs once
-    /// [`driver.run(trigger)`](crate::hivemind::EpisodeDriver::run) has
-    /// already returned — by then the room may have converged, deadlocked
-    /// or exhausted its budget without the approval it was waiting on ever
-    /// reaching `scripts/hive-euler.py`'s concurrent approval pump.
-    ///
-    /// Draining after every turn this runner completes closes that gap; the
-    /// cycle-level call after `driver.run` stays in place as a safety net
-    /// for anything queued by non-hive-turn work in the same cycle.
-    brain: &'a HarnessBrain,
-    host: &'a dyn CycleHost,
-}
-
-/// Drains and parks whatever a single hive turn just queued onto
-/// `self.deps.approval_requests`, logging rather than propagating a failure:
-/// there is no single "reply" a hive turn returns an operator-visible notice
-/// on the way [`HarnessBrain::park_approval_requests`] does for an ordinary
-/// cycle, and a parking failure must not fail the turn that already computed
-/// a real answer.
-async fn park_hive_turn_approvals(brain: &HarnessBrain, host: &dyn CycleHost, agent_id: &str) {
-    match brain.park_approval_requests(host).await {
-        Ok(None) => {}
-        Ok(Some(notice)) => tracing::warn!(
-            agent = %agent_id,
-            %notice,
-            "[hive] not every approval request from this turn could be parked for the operator"
-        ),
-        Err(err) => tracing::warn!(
-            agent = %agent_id,
-            error = %err,
-            "[hive] failed to park approval requests queued during a member's turn"
-        ),
-    }
-}
-
-/// Turns a terminal outcome (`outcome.budget_paused` / `outcome.halted_for_spend`
-/// / `outcome.abnormal_stop`) into the hard error a hive turn must surface, or
-/// `None` when the turn actually answered.
-///
-/// Without this, `outcome.reply` on any of the three is host-authored
-/// pause/halt/refusal copy, not the agent's answer — folding it as `Ok(reply)`
-/// lets `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
-/// under the member's own identity, and the episode never counts the turn as
-/// failed (`EpisodeOutcome::failed_turns`), so an operator reading the
-/// transcript cannot tell a real answer from a budget wall or a pre-dispatch
-/// refusal the room hit.
-fn terminal_budget_error(
-    agent_id: &str,
-    outcome: &crate::harness::TurnOutcome,
-) -> Option<crate::OpenCompanyError> {
-    if let Some(pause) = &outcome.budget_paused {
-        return Some(crate::OpenCompanyError::Harness(format!(
-            "{agent_id} paused for lack of inference budget mid-deliberation: {}",
-            pause.summary
-        )));
-    }
-    if let Some(halt) = &outcome.halted_for_spend {
-        return Some(crate::OpenCompanyError::Harness(format!(
-            "{agent_id} halted for spend mid-deliberation: spent ${:.2} against a cap of ${:.2}",
-            halt.spent_usd, halt.cap_usd
-        )));
-    }
-    if let Some(reason) = &outcome.abnormal_stop {
-        return Some(crate::OpenCompanyError::Harness(format!(
-            "{agent_id} did not complete its turn: {reason}"
-        )));
-    }
-    None
-}
-
-#[async_trait]
-impl crate::hivemind::HiveTurnRunner for HiveDeskRunner<'_> {
-    async fn speak(&self, agent_id: &str, prompt: &str) -> Result<String> {
-        let outcome = self
-            .run_turn
-            .run(
-                &self.company,
-                agent_id,
-                prompt,
-                // `deliberating`, not `in_thread`: the episode prompt already
-                // carries this desk's transcript, attributed and filtered to
-                // what this turn is allowed to see. Seeding the desk's recent
-                // history on top would hand the same lines back unattributed
-                // and in the assistant role — a peer's opening position
-                // reaching a *blind* turn, and every peer line reading as
-                // something this member had itself said.
-                //
-                // `.answering(self.trigger_seq)`: this turn is still, at
-                // bottom, this desk's response to the operator message that
-                // opened the episode. Without it, `TurnStreamCtx::message_seq`
-                // is `None` for every hive turn, and a desk started inside a
-                // thread has its live tool frames fall back to the
-                // desk-level thread bucket instead of the active
-                // `desk#root`/message one.
-                ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root)
-                    .answering(self.trigger_seq),
-            )
-            .await?;
-        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
-        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
-            return Err(error);
-        }
-        Ok(outcome.reply)
-    }
-}
-
-impl HiveDeskRunner<'_> {
-    /// An unconverged referred room's own turns, attributed and in order, as
-    /// the answer to carry home.
-    ///
-    /// The members' lines rather than the closing report, for the reason
-    /// [`deliberate`](crate::hivemind::HiveReferralRunner::deliberate) gives:
-    /// a report only speaks for the desk once the desk has agreed on
-    /// something.
-    ///
-    /// Each line is rendered through the same rewrite a person reading that
-    /// desk gets. A room's move grammar — `!propose #topic ^N` — is addressed
-    /// to the fold *of that desk*, and carrying it into another desk's
-    /// transcript would hand the asking room markers naming topics and
-    /// sequences that do not exist there.
-    ///
-    /// **The one agent-facing path that rewrites.** Everywhere else — the
-    /// episode prompt, `elsewhere_for`, `referral_prompt`, `chat_seed` — reads
-    /// the stored body, because that is how a seat cites `^16` against a row it
-    /// can identify (see `readable_moves`). The exception earns itself on that
-    /// same rule: this text *crosses desks*, so the rows its markers name are
-    /// rows the reader cannot identify. What the asking room cites instead is
-    /// the relayed line's own sequence on its own desk, which is what it does
-    /// in practice.
-    ///
-    /// `None` when the room took no turn at all, which is a desk that did not
-    /// answer rather than a desk that answered nothing.
-    async fn turns_of(
-        &self,
-        events: &Arc<dyn crate::ports::events::EventLog>,
-        company: &crate::ports::types::CompanyId,
-        outcome: &crate::hivemind::EpisodeOutcome,
-        desk_id: &str,
-        // The question this room was convened on. Every turn of a referred
-        // episode is parented to it, which is what separates them from whatever
-        // else that desk was doing at the time.
-        root: EventSeq,
-    ) -> Option<String> {
-        let (first, last) = (outcome.first_seq?, outcome.last_seq?);
-        let span = last.value().saturating_sub(first.value()).saturating_add(1);
-        let page = events
-            .read_from(company, first, usize::try_from(span).unwrap_or(usize::MAX))
-            .await
-            .ok()?;
-        let said: Vec<String> = page
-            .iter()
-            .filter(|stored| stored.seq <= last)
-            .filter_map(|stored| match &stored.event {
-                CompanyEvent::AgentReply {
-                    chat_id,
-                    agent_id,
-                    text,
-                    audience,
-                    parent,
-                    ..
-                } if chat_id == desk_id
-                    // **This room's turns, not the desk's other traffic.**
-                    //
-                    // A desk that was asked keeps working while the referred
-                    // room runs — its own episode, an ordinary reply — and all
-                    // of it lands on the same desk inside the same sequence
-                    // span. Carried home, somebody else's words would arrive as
-                    // this desk's answer and steer the asking room. The history
-                    // projection scopes the same rows by this parent; this is
-                    // the second builder and needed it too (Codex, #2332).
-                    && *parent == Some(root)
-                    && !crate::hivemind::is_hive_author(agent_id)
-                    // **An aside is not a turn, and never leaves the desk.**
-                    //
-                    // `!aside @peer` is journaled as an ordinary `AgentReply`
-                    // with the pair in `audience`, so it sits in this span like
-                    // any other row and can even be the last one. Carried home
-                    // it would publish a private exchange to a desk that was
-                    // never in it — across a desk boundary, where nobody there
-                    // can even see that it happened. Only desk-visible turns
-                    // answer a crossing (CodeRabbit, #2332).
-                    && audience.is_empty() =>
-                {
-                    Some(format!(
-                        "{agent_id}: {}",
-                        crate::server::chat_history::readable_moves(text.clone()).trim()
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
-        (!said.is_empty()).then(|| said.join("\n"))
-    }
-}
-
-#[async_trait]
-impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
-    async fn refer(&self, desk_id: &str, agent_id: &str, prompt: &str) -> Result<String> {
-        let outcome = self
-            .run_turn
-            .run(
-                &self.company,
-                agent_id,
-                prompt,
-                // The *far* desk's channel, and never this episode's thread: a
-                // thread root is a sequence in the conversation that owns it, so
-                // carrying the asking desk's root across would parent the answer
-                // to a message that does not exist over there.
-                //
-                // `deliberating` for the same reason the episode's own turns
-                // are, and for one more: the referred teammate is not in this
-                // room, so seeding it with the far desk's recent history would
-                // put lines it has never read into its own assistant role while
-                // it answers a question from somewhere else entirely.
-                ChatTarget::deliberating(Some(desk_id), None),
-            )
-            .await?;
-        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
-        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
-            return Err(error);
-        }
-        Ok(outcome.reply)
-    }
-
-    async fn deliberate(&self, desk_id: &str, asker: &str, prompt: &str) -> Result<Option<String>> {
-        let record = self.brain.record();
-        // Whether that desk can hold a room at all: it needs a `[hive]` block,
-        // enough members, and a quorum still reachable with its *effective*
-        // roster. `None` for any of those, and the seat answers — the one thing
-        // this must not do is refuse a crossing a company is entitled to make.
-        let Some(desk) = crate::hivemind::desk_episode(&record, Some(desk_id)) else {
-            return Ok(None);
-        };
-        let Some(events) = self.brain.deps.events.clone() else {
-            // The same guard the desk's own episode path carries: a room reads
-            // its turns back out of the journal to fold the next step, so one
-            // with nowhere to append could not deliberate at all.
-            return Ok(None);
-        };
-        // **The question, written onto the desk being asked.**
-        //
-        // A single-seat crossing deliberately leaves nothing here — see
-        // `referral::forward` — and for a single seat that is right: the seat
-        // is handed the question in its prompt and its answer is the only row
-        // the desk needs. A room cannot work that way. It decides what to say
-        // next by folding this desk's transcript, so a question that is not in
-        // the transcript is a question no seat after the first can read; and
-        // every turn has to hang off something, or a second crossing into this
-        // desk in the same cycle shares the channel-level projection with this
-        // one and folds its turns as its own votes.
-        //
-        // So it is journaled, and its sequence is both the thread root and the
-        // episode's watermark: the room folds what was said after it was asked
-        // and merely reads what came before.
-        //
-        // As an `OperatorMessage` by the asking agent, which is not a new shape
-        // — it is exactly what a chat-path crossing already lands on the desk
-        // it goes to, and `attach_referral_origins` matches it as such ("it IS
-        // that agent speaking there"). A reserved `hive-question` author would
-        // have been the obvious alternative and is the wrong one twice over:
-        // both projections would render it as a *teammate* nobody can spell,
-        // which is the precise defect `HIVE_REPORT_AUTHOR` is dropped to avoid,
-        // and the room folds an operator message as the request it is answering
-        // — which is what this row is — where an agent line folds as a turn.
-        let root = events
-            .append(
-                &record.id,
-                CompanyEvent::OperatorMessage {
-                    text: prompt.to_string(),
-                    by: Some(crate::ports::types::Actor {
-                        kind: crate::ports::types::ActorKind::Agent,
-                        id: asker.to_string(),
-                    }),
-                    chat: Some(desk.id.clone()),
-                    parent: None,
-                    deliverable: None,
-                    mentions: Vec::new(),
-                    attachments: Vec::new(),
-                },
-            )
-            .await?;
-        // Kept before `EpisodeDriver::new` takes the desk by value.
-        let far_desk = desk.id.clone();
-        let runner = HiveDeskRunner {
-            run_turn: Arc::clone(&self.run_turn),
-            company: record.id.clone(),
-            // This desk and this thread — never the asking episode's, whose
-            // thread root is a sequence in a conversation that is not this one.
-            chat_id: Some(desk.id.clone()),
-            thread_root: Some(root),
-            trigger_seq: Some(root),
-            brain: self.brain,
-            host: self.host,
-        };
-        let memory = Arc::new(HiveDeskMemory {
-            context: Arc::clone(&self.brain.deps.context),
-            company: record.id.clone(),
-            desk_id: desk.id.clone(),
-        });
-        // **No `with_federation`, and that omission is the recursion bound.**
-        //
-        // `max_hops` bounds a chain of referrals *within* one episode's ledger.
-        // A referred episode is a NEW episode with a fresh ledger starting at
-        // hop 0, so a far desk allowed to refer onward could convene a third
-        // desk, which could convene a fourth, and nothing in the hop budget
-        // would ever see it. A crossing is therefore one room deep: this desk
-        // answers with what it knows, or says it does not know.
-        let outcome = crate::hivemind::EpisodeDriver::new(
-            record.id.clone(),
-            desk,
-            Arc::clone(&events),
-            &runner,
-            prompt.to_string(),
-        )
-        .in_thread(Some(root))
-        .with_memory(memory)
-        .with_context_desks(crate::hivemind::company_desks(&record))
-        .run(root)
-        .await?;
-        // **What to carry home depends on how the room ended.**
-        //
-        // A room that CONVERGED speaks for the desk in its closing report: the
-        // report names the proposal that carried and who grounded it, which is
-        // the one sentence no single seat is entitled to say.
-        //
-        // A room that did not converge does not. Its report is bookkeeping —
-        // "Nobody on the desk had anything to add, so the room did not open" —
-        // and relaying that as the desk's answer is worse than saying nothing,
-        // because the asking room is told the desk had no view while the view
-        // sits one row away in the transcript. A live crossing did exactly
-        // that: both seats said plainly that refunds is their remit, the room
-        // ended `idle` because neither line carried a move, and the answer that
-        // came home said nobody had anything to add.
-        //
-        // So an unconverged room carries its members' own turns instead,
-        // attributed, in the order they were said.
-        let conclusion = match &outcome.ending {
-            crate::hivemind::EpisodeEnding::Converged { .. } => {
-                if let Some(report_seq) = outcome.report_seq {
-                    let page = events.read_from(&record.id, report_seq, 1).await?;
-                    page.into_iter().find_map(|stored| match stored.event {
-                        CompanyEvent::AgentReply { text, .. } if stored.seq == report_seq => {
-                            Some(text)
-                        }
-                        _ => None,
-                    })
-                } else {
-                    tracing::warn!(
-                        company = %record.id,
-                        desk = %desk_id,
-                        turns = outcome.turns,
-                        "[hive] a referred desk converged but wrote no closing report"
-                    );
-                    // NOT `Ok(None)`: that means "this desk cannot hold a
-                    // room", and `forward` acts on it by running one more model
-                    // turn. The room has already run and spent its turns here —
-                    // only the append of its closing row failed — so falling
-                    // back would bill the room AND a seat, and credit the answer
-                    // to `@<seat>` instead of the desk. Carry what the room
-                    // said, exactly as the unconverged arm does (CodeRabbit,
-                    // #2332).
-                    self.turns_of(&events, &record.id, &outcome, &far_desk, root)
-                        .await
-                }
-            }
-            _ => {
-                self.turns_of(&events, &record.id, &outcome, &far_desk, root)
-                    .await
-            }
-        };
-        tracing::info!(
-            company = %record.id,
-            desk = %desk_id,
-            ending = %outcome.ending.label(),
-            turns = outcome.turns,
-            failed_turns = outcome.failed_turns,
-            answered = conclusion.is_some(),
-            "[hive] a referred desk answered as a room"
-        );
-        // **An empty room that RAN is a failure, not an absent room.**
-        //
-        // `Ok(None)` means "this desk cannot hold a room" and `forward` acts on
-        // it by running a single seat instead. Past this point the room has been
-        // stood up and has spent its budget — a one-turn desk whose only turn
-        // failed comes back as a non-error `Exhausted` with no rows at all — so
-        // returning `None` here would bill the room AND a seat, and credit the
-        // answer to a seat that never spoke. An `Err` is what a crossing that
-        // got nothing back already means, and `unanswered` now names the desk
-        // rather than a seat for exactly this case (Codex, #2332).
-        match conclusion {
-            Some(answer) => Ok(Some(answer)),
-            None => Err(crate::OpenCompanyError::Harness(format!(
-                "the {desk_id} desk deliberated and produced no answer to carry back \
-                 (ending {}, {} turn(s), {} of them failed)",
-                outcome.ending.label(),
-                outcome.turns,
-                outcome.failed_turns,
-            ))),
-        }
-    }
-}
-
-/// A deliberating desk's own memory, over the company's real context store.
-///
-/// Namespaced by desk — every note is labelled `hive/<desk id>/<slug>` — beside
-/// the way an agent's private memories are labelled `agent-memory/<agent id>/…`
-/// (`memory_tools.rs`). One desk's deliberations are therefore listable on their
-/// own, never collide with another desk's, and are not mixed into a teammate's
-/// private memories.
-///
-/// Both halves go through [`ContextStore`], which is the overlay seam: with
-/// `OPENCOMPANY_MEMORY=remote` this is CortexDB, exactly as it is for the
-/// per-turn retrieve→inject→store loop and the `memory_recall` tool.
-struct HiveDeskMemory {
-    context: Arc<dyn ContextStore>,
-    company: CompanyId,
-    desk_id: String,
-}
-
-/// How many search hits to ask for before narrowing them to this desk.
-///
-/// [`ContextStore::search`] ranks company-wide and returns no label, so the
-/// desk scope is applied by intersecting its hits with the addresses actually
-/// stored under this desk's prefix. Over-fetching is what makes that
-/// intersection likely to be non-empty on a company whose memory is mostly
-/// task outcomes and agent notes.
-const HIVE_SEARCH_FANOUT: usize = 8;
-
-#[async_trait]
-impl crate::hivemind::HiveMemory for HiveDeskMemory {
-    async fn recall(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<crate::hivemind::HiveMemoryHit>> {
-        let prefix = crate::hivemind::desk_prefix(&self.desk_id);
-        let mine = self.context.list(&self.company, &prefix).await?;
-        if mine.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Relevance first: the store's own ranking, narrowed to this desk.
-        let hits = self
-            .context
-            .search(
-                &self.company,
-                query,
-                limit.saturating_mul(HIVE_SEARCH_FANOUT),
-            )
-            .await?;
-        let mut addrs: Vec<crate::ports::types::ChunkAddr> = hits
-            .into_iter()
-            .filter(|hit| mine.iter().any(|meta| meta.addr == hit.addr))
-            .map(|hit| hit.addr)
-            .take(limit)
-            .collect();
-        // Recency as the fallback, not as a supplement: a search that matched
-        // nothing on this desk means the ranking has no opinion here, and the
-        // most recent thing the desk concluded is a better answer than nothing.
-        // Mixing the two would let a stale note outrank a relevant one.
-        if addrs.is_empty() {
-            let mut recent = mine.clone();
-            recent.sort_by_key(|meta| std::cmp::Reverse(meta.stored_at_millis));
-            addrs = recent
-                .into_iter()
-                .map(|meta| meta.addr)
-                .take(limit)
-                .collect();
-        }
-        let bodies = self.context.peek_many(&self.company, &addrs).await?;
-        Ok(bodies
-            .into_iter()
-            .flatten()
-            .map(|snippet| crate::hivemind::HiveMemoryHit { snippet })
-            .collect())
-    }
-
-    async fn remember(&self, note: crate::hivemind::HiveMemoryNote) -> Result<()> {
-        // Redacted on the way in, at the note's single construction point, for
-        // the same reason `memory_loop::outcome_chunk` redacts: a deliberation
-        // line can quote a tool's captured output, and this path bypasses
-        // `OcMemory::store` entirely.
-        let title = super::memory::redact_secrets(&note.title);
-        self.context
-            .put(
-                &self.company,
-                ContextChunk {
-                    label: crate::hivemind::note_label(&note.desk_id, &title),
-                    // Title on the first line, so the body is self-describing
-                    // wherever it surfaces — a recall snippet, the Brain view,
-                    // the next episode's "The desk remembers:" block.
-                    body: format!("{title}\n\n{}", super::memory::redact_secrets(&note.body)),
-                },
-            )
-            .await?;
-        Ok(())
     }
 }
 

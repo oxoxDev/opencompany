@@ -30,7 +30,7 @@ understood yet, not a shortcut to take.
    start.
 2. **No new secret or config keys.** Every credential this plan touches has an
    existing name and an existing storage location: `tinyhumans/key`,
-   `provider/tinyhumans/key`, `composio/managed/key`, and (once #2342 lands)
+   `provider/tinyhumans/key`, `composio/tinyhumans/key`, and (once #2342 lands)
    its search equivalent. Reuse those exact keys. If a task seems to need a
    new one, that is a stop-and-reconsider signal, not something to add —
    revisit the task's approach, or raise it as an open question, before

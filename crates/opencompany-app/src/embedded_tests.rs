@@ -158,25 +158,27 @@ async fn the_root_config_names_the_hub_this_host_talks_to() {
 /// The account surfaces stop disowning the host.
 ///
 /// Unwired, `hub_identity()` is `None` and every surface that asks the hub
-/// whose credential this is answers that the host belongs to no TinyHumans
+/// about this host's key answers that the host belongs to no TinyHumans
 /// ecosystem — the Account page reports the balance unknown, and
 /// `credential/link/start` refuses before it builds a URL. The exchange is
-/// wired at boot now, so the route answers about providers rather than
-/// about the host's existence.
+/// wired at boot now, and `/spec` advertises it.
 #[tokio::test]
 async fn the_host_knows_it_belongs_to_an_ecosystem() {
     let dir = tempfile::tempdir().unwrap();
     let host = start(dir.path().to_path_buf()).await.expect("host starts");
 
-    let answered = reqwest::get(format!("{}/api/v1/company/auth/hub", host.base_url()))
+    let spec: serde_json::Value = reqwest::get(format!("{}/spec", host.base_url()))
         .await
-        .expect("the route answers");
-    let status = answered.status();
-    let body = answered.text().await.unwrap_or_default();
+        .expect("the route answers")
+        .json()
+        .await
+        .expect("the spec is JSON");
 
     assert!(
-        !body.contains("not part of a TinyHumans ecosystem"),
-        "the host must not disown its own account: {status} {body}"
+        spec["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|c| c == "hub-identity")),
+        "the host must not disown its own account: {spec}"
     );
 }
 

@@ -18,8 +18,10 @@
 # THREE THINGS a caller decides, each an input:
 #
 #   `sign`                Developer-ID sign + Apple-notarize the .app and DMG.
-#                         Needs the six APPLE_* secrets; the `guard` job fails
-#                         in seconds if one is missing, before ~60 minutes of
+#                         Needs the four APPLE_* signing secrets and the three
+#                         APP_STORE_CONNECT_* notarization secrets; the
+#                         `guard` job fails in seconds if one is missing,
+#                         before ~60 minutes of
 #                         compile. Both staging and production sign, so a
 #                         staging DMG opens on a tester's Mac the way a
 #                         production one does.
@@ -70,7 +72,7 @@ on:
         type: string
         required: true
       sign:
-        description: Developer-ID sign and notarize. Requires the six APPLE_* secrets.
+        description: Developer-ID sign and notarize. Requires the APPLE_* signing and APP_STORE_CONNECT_* notarization secrets.
         type: boolean
         default: true
       with_updater:
@@ -81,9 +83,14 @@ on:
         description: Attach outputs to the DRAFT GitHub Release named by `tag` instead of uploading Actions artifacts. Requires `sign`.
         type: boolean
         default: false
-    # Named rather than `secrets: inherit`, so a caller hands over exactly the
-    # signing material and nothing else the repository holds (AWS, SSH, OpenAI).
-    # All optional: `guard` names the missing one when an input needs it.
+    # THE CALLER MUST PASS EVERY SIGNING NAME. The APPLE_*, APP_STORE_CONNECT_*
+    # and TAURI_SIGNING_* secrets live only in the `Production` environment,
+    # which both jobs below declare. A reusable workflow sees an environment
+    # secret only when the caller passes that name: the caller's value is empty
+    # (it has no environment), and the job's `Production` value replaces it.
+    # Declared here but not passed, a name resolves empty and `guard` fails.
+    # Callers pass names one by one, never `secrets: inherit`, which would hand
+    # over every repository secret.
     secrets:
       APPLE_CERTIFICATE_BASE64:
         required: false
@@ -91,17 +98,21 @@ on:
         required: false
       APPLE_SIGNING_IDENTITY:
         required: false
-      APPLE_ID:
-        required: false
-      APPLE_PASSWORD:
-        required: false
-      APPLE_APP_SPECIFIC_PASSWORD:
-        required: false
       APPLE_TEAM_ID:
+        required: false
+      # Notarization authenticates with an App Store Connect API key (issuer +
+      # key id + the `.p8`, base64), not an Apple ID and app-specific password.
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: false
+      APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64:
+        required: false
+      APP_STORE_CONNECT_ISSUER_ID:
         required: false
       TAURI_SIGNING_PRIVATE_KEY:
         required: false
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      SENTRY_AUTH_TOKEN:
         required: false
 
 permissions:
@@ -112,6 +123,10 @@ jobs:
     name: Guard build inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Where the signing secrets live; see the `secrets:` note above. The
+    # environment is branch-policied to `main` and `release`, the only refs
+    # either caller runs from, and admins cannot bypass it.
+    environment: Production
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,18 +161,43 @@ jobs:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           missing=0
-          for var in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for var in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID \
+                     APP_STORE_CONNECT_API_KEY_ID APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 APP_STORE_CONNECT_ISSUER_ID; do
             if [ -z "${!var}" ]; then
               echo "::error::sign=true but required macOS signing secret is missing: $var" >&2
               missing=1
             fi
           done
           [ "$missing" -eq 0 ] || exit 1
+          # The key id becomes a filename in the build job; refuse anything
+          # but Apple's alphanumeric form. The key must decode to a PKCS#8
+          # PEM — checked by grep on the decoded stream, never printed.
+          if ! [[ "$APP_STORE_CONNECT_API_KEY_ID" =~ ^[A-Z0-9]{8,20}$ ]]; then
+            echo "::error::APP_STORE_CONNECT_API_KEY_ID is not an App Store Connect key id (expected 8-20 uppercase alphanumerics)." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64" | base64 --decode 2>/dev/null | grep -q 'BEGIN PRIVATE KEY'; then
+            echo "::error::APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 does not decode to a .p8 private key (base64 of the whole AuthKey_<id>.p8 file)." >&2
+            exit 1
+          fi
+
+      # Only the upload token is configuration. The DSNs are compiled in
+      # (`frontend/src/lib/crash-reporting.ts`, `crates/opencompany-app/src/crash.rs`)
+      # and the Sentry URL, org and project slugs are hardcoded below.
+      - name: Validate Sentry artifact-upload settings
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::Required Sentry artifact-upload setting is missing: SENTRY_AUTH_TOKEN" >&2
+            exit 1
+          fi
 
       # A release nobody can update FROM is worse than no release: an installed
       # client polls `latest.json` on the newest published release forever, so a
@@ -177,6 +217,7 @@ jobs:
     name: "Desktop: ${{ matrix.target }}"
     needs: guard
     runs-on: macos-latest
+    environment: Production
     timeout-minutes: 90
     strategy:
       # One arch failing must not cancel the other: a green arm64 DMG is worth
@@ -265,11 +306,26 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Resolve release commit
+        id: release-commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # BEFORE the Tauri build. `beforeBuildCommand` is empty in
       # tauri.conf.json, so nothing else compiles `frontend/dist` — the bundler
       # would package a stale or missing dist otherwise.
       - name: Build frontend
         working-directory: frontend
+        env:
+          VITE_SENTRY_ENVIRONMENT: ${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'desktop' }}
+          VITE_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
+          VITE_BUILD_COMMIT: ${{ steps.release-commit.outputs.sha }}
+          # The frontend bundle is architecture-independent. Upload its maps
+          # once from arm64; the Intel leg builds identical assets and would
+          # otherwise race a duplicate artifact-bundle upload.
+          SENTRY_AUTH_TOKEN: ${{ matrix.target == 'aarch64-apple-darwin' && secrets.SENTRY_AUTH_TOKEN || '' }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
+          SENTRY_PROJECT: opencompany-frontend
         run: npm run build
 
       # The Tauri CLI compiles the Rust shell and packages the .app + unsigned
@@ -283,10 +339,22 @@ jobs:
           # Keep in sync with bundle.macOS.minimumSystemVersion in
           # crates/opencompany-app/tauri.conf.json — the Wry system-WebView floor.
           MACOSX_DEPLOYMENT_TARGET: "12.0"
+          OPENCOMPANY_BUILD_COMMIT: ${{ steps.release-commit.outputs.sha }}
         run: |
           ../../frontend/node_modules/.bin/tauri build \
             --target ${{ matrix.target }} \
             -- --locked --features "$DESKTOP_RELEASE_FEATURES"
+
+      - name: Upload Rust debug symbols to Sentry
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
+          # The shell reports to the desktop project, so its symbols go there.
+          SENTRY_PROJECT: opencompany-tauri
+          SENTRY_CLI: ${{ github.workspace }}/frontend/node_modules/.bin/sentry-cli
+          TARGET: ${{ matrix.target }}
+        run: scripts/upload-sentry-symbols.sh "crates/opencompany-app/target/${TARGET}/release"
 
       - name: Locate .app and .dmg bundles
         id: locate
@@ -316,16 +384,42 @@ jobs:
           echo "Found .dmg: $DMG_PATH"
 
       # ---- Developer-ID sign + notarize (gated on `sign`) --------------------
-      # The six APPLE_* secrets were already proved present by `guard`.
+      # Every signing and notarization secret was already proved present (and
+      # the key proved to be a .p8) by `guard`.
+      #
+      # Notarization uses the App Store Connect API key. It is written to
+      # `$RUNNER_TEMP/AuthKey_<id>.p8` — the filename `notarytool` and Tauri
+      # both expect — with a 077 umask, never echoed, and removed by the
+      # always-run step at the end of this job. The names handed to the scripts
+      # are Tauri's own (`APPLE_API_KEY`, `APPLE_API_ISSUER`,
+      # `APPLE_API_KEY_PATH`, read by tauri-bundler's `notarize_auth`). They are
+      # deliberately NOT given to `tauri build` above: that step builds
+      # UNSIGNED (see its comment), and the bundler only notarizes what it
+      # signed, so they would do nothing there. The scripts below do the
+      # signing and notarizing.
+      - name: Install App Store Connect API key
+        id: asc-key
+        if: inputs.sign
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          KEY_B64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_path="${RUNNER_TEMP}/AuthKey_${KEY_ID}.p8"
+          printf '%s' "$KEY_B64" | base64 --decode > "$key_path"
+          echo "path=${key_path}" >> "$GITHUB_OUTPUT"
+
       - name: Sign and notarize .app
         if: inputs.sign
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_API_KEY_PATH: ${{ steps.asc-key.outputs.path }}
         run: |
           bash scripts/release/sign-and-notarize-macos.sh \
             "${{ steps.locate.outputs.app_path }}" \
@@ -334,9 +428,9 @@ jobs:
       - name: Re-package DMG after notarization
         if: inputs.sign
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_API_KEY_PATH: ${{ steps.asc-key.outputs.path }}
         run: |
           bash scripts/release/repackage-dmg.sh \
             "${{ steps.locate.outputs.app_path }}" \
@@ -401,3 +495,11 @@ jobs:
           name: opencompany-${{ inputs.tag }}-${{ matrix.target }}-dmg
           path: ${{ steps.locate.outputs.dmg_path }}
           if-no-files-found: error
+
+      # Whatever happened above — including a failed or cancelled notarization
+      # — the private key does not outlive the job on disk. A glob, not the
+      # step output, so it also catches a key written before a failure left the
+      # output unset.
+      - name: Remove App Store Connect API key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}"/AuthKey_*.p8

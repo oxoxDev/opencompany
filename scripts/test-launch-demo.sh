@@ -5,11 +5,18 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)
 TMP_DIR=$(mktemp -d)
+DOCKER_LOG="${TMP_DIR}/docker.log"
+export DOCKER_LOG
 trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
 
 cat >"${TMP_DIR}/docker" <<'EOF'
 #!/bin/sh
+case "$*" in
+    volume\ inspect\ *) exit 1 ;;
+    volume\ create\ *) printf '%s\n' "$*" >>"$DOCKER_LOG" ;;
+esac
 printf 'company=%s\n' "$OPENCOMPANY_COMPANY"
+printf 'cwd=%s\n' "$PWD"
 printf 'args=%s\n' "$*"
 EOF
 chmod +x "${TMP_DIR}/docker"
@@ -26,19 +33,40 @@ run_launcher() {
 
 up_output=$(run_launcher marketing up)
 printf '%s\n' "$up_output" | grep -F "company=marketing_agency" >/dev/null
+printf '%s\n' "$up_output" | grep -F "Console: http://localhost:5173" >/dev/null
+for cache_volume in \
+    opencompany-cargo-registry \
+    opencompany-cargo-git \
+    opencompany-cargo-target \
+    opencompany-frontend-node-modules; do
+    grep -F "volume create ${cache_volume}" "$DOCKER_LOG" >/dev/null
+done
+printf '%s\n' "$up_output" | grep -F "cwd=${REPO_ROOT}/deploy" >/dev/null
 printf '%s\n' "$up_output" | grep -F -- "--project-name opencompany-marketing-agency" >/dev/null
 printf '%s\n' "$up_output" | grep -F -- "--file ${REPO_ROOT}/deploy/docker-compose.dev.yml" >/dev/null
 printf '%s\n' "$up_output" | grep -F "up --build" >/dev/null
+if printf '%s\n' "$up_output" | grep -F -- "--project-directory" >/dev/null; then
+    echo "launch-demo test: Podman-incompatible --project-directory was passed" >&2
+    exit 1
+fi
 if printf '%s\n' "$up_output" | grep -F -- " -d" >/dev/null; then
     echo "launch-demo test: up unexpectedly runs detached" >&2
     exit 1
 fi
+
+custom_port_output=$(CONSOLE_PORT=4173 run_launcher marketing up)
+printf '%s\n' "$custom_port_output" | grep -F "Console: http://localhost:4173" >/dev/null
 
 compose_output=$(OPENCOMPANY_COMPANY=marketing_agency docker compose \
     --file "${REPO_ROOT}/deploy/docker-compose.yml" \
     --file "${REPO_ROOT}/deploy/docker-compose.dev.yml" \
     config)
 printf '%s\n' "$compose_output" | grep -F -- "- --poll" >/dev/null
+printf '%s\n' "$compose_output" | grep -F -- "- crates/opencompany-core/src" >/dev/null
+if printf '%s\n' "$compose_output" | grep -F -- "- src" >/dev/null; then
+    echo "launch-demo test: cargo-watch still watches the removed root src directory" >&2
+    exit 1
+fi
 if printf '%s\n' "$compose_output" | grep -A1 -F -- "- --poll" | grep -F -- '- "1"' >/dev/null; then
     echo "launch-demo test: cargo-watch --poll unexpectedly has a value" >&2
     exit 1

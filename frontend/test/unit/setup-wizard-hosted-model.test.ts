@@ -154,10 +154,10 @@ const settle = async () =>
   });
 
 /**
- * Gets past step 0 onto the model step, and is a no-op where step 0 is absent.
+ * Gets past step 0 onto step 1, and is a no-op where step 0 is absent.
  *
- * The flow opens on the setup-way choice, and the provider picker sits behind
- * "Set it up yourself".
+ * The flow opens on the setup-way choice, and the add-provider sequence sits
+ * behind "Set it up yourself".
  */
 async function chooseSelfManaged() {
   const option = find("setup-way-self-managed") as HTMLElement | null;
@@ -196,7 +196,7 @@ describe("a host that already reaches a model", () => {
     // The count must drop with the step. A four-screen flow that says "of 5" is
     // telling the operator about a screen they will never be shown.
     expect(container.textContent).toContain("step 1 of 4");
-    expect(find("setup-provider-select"), "the model step must not render").toBeNull();
+    expect(find("setup-add-provider"), "step 1 must not render").toBeNull();
   });
 
   it("finishes without ever showing a key field or a connection test", async () => {
@@ -244,10 +244,10 @@ describe("a host that already reaches a model", () => {
 });
 
 describe("a host that reaches no model of its own", () => {
-  it("still asks the model question, now behind the setup-way choice", async () => {
+  it("still asks how this company connects, now behind the setup-way choice", async () => {
     await show(clientWith(status()));
 
-    expect(find("setup-provider-select"), "the model step is not step 0").toBeNull();
+    expect(find("setup-add-provider"), "step 1 is not step 0").toBeNull();
 
     await chooseSelfManaged();
 
@@ -260,30 +260,27 @@ describe("a host that reaches no model of its own", () => {
       "step-review",
     ]);
     expect(container.textContent).toContain("step 2 of 6");
-    expect(find("setup-provider-select"), "the model step should render").toBeTruthy();
+    expect(find("setup-add-provider"), "step 1 should render").toBeTruthy();
   });
 
-  it("still gates that step on a verdict", async () => {
+  it("still gates the managed branch on a verdict", async () => {
     await show(clientWith(status()));
-    await chooseSelfManaged();
+    await act(async () => {
+      (find("setup-way-managed") as HTMLElement).click();
+    });
+    await next();
 
     await next();
     expect(find("setup-problem"), "an untested connection must hold the step").toBeTruthy();
-    expect(find("setup-provider-select"), "and must not have left it").toBeTruthy();
+    expect(find("setup-field-key"), "and must not have left it").toBeTruthy();
   });
 
   it("says nothing about a host-provided model", async () => {
     await show(clientWith(status()));
     await chooseSelfManaged();
 
-    // "No model" answers the step by being chosen, which is what lets this
-    // walk reach Review without a credential.
-    await act(async () => {
-      (find("setup-provider-select") as HTMLElement).click();
-    });
-    await act(async () => {
-      (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
-    });
+    // Connecting nothing answers the step, which is what lets this walk reach
+    // Review without a credential.
     await next(); // -> business
     await goToReview();
 

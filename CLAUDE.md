@@ -28,7 +28,8 @@ source module directories:
   starting tool belt every company gets whichever vertical it started from,
   authored in `companies/_globals/` and embedded at build time
   (`docs/spec/runtime/globals.md`)
-- `src/openhuman/`: launcher and integration seams for the vendored OpenHuman checkout
+- `src/harness/`: the execution engines — the embedded OpenHuman runtime and one agent per teammate (feature `openhuman`)
+- `src/hive/`: hive desks — one `OpenHumanHive` per `[[group_chat]]`, speech over the `opencompany` MCP server, Jev routing, referral (`docs/spec/runtime/hive.md`)
 - `src/tiny/`: optional TinyAgents crate feature/status surface
 
 The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
@@ -210,16 +211,20 @@ injects its environment. When developing hosted behavior, know the seams:
   application-layer only in this mode — a compromised container can reach
   every tenant's documents; db-per-tenant stays the security default. See
   `docs/spec/runtime/storage.md`. Unset (the default) is a full no-op.
-- The manager should also inject `OPENCOMPANY_DEPLOYMENT=hosted-tenant` and,
-  when product analytics is on, the three variables the OpenPanel transport
-  needs: `OPENCOMPANY_ANALYTICS_CLIENT_ID`,
-  `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and `OPENCOMPANY_ANALYTICS_ENDPOINT`.
-  The endpoint has **no default** — the collector is one the operator
-  self-hosts, so there is no address the workload could guess that would not be
-  somebody else's — and it must be `https`, or `http` to a loopback host: the
-  client secret is a request header on every request, so a plain-`http`
-  collector on a container network would put it on the wire in the clear, and
-  the workload refuses that rather than warning about it.
+- The manager should also inject `OPENCOMPANY_DEPLOYMENT=hosted-tenant`. That
+  is the one telemetry input a tenant needs: a hosted tenant reports product
+  analytics to the TinyHumans OpenPanel (`https://panel.tinyhumans.ai/api/track`,
+  compiled-in client id) and crashes to the compiled-in `opencompany-core`
+  Sentry DSN. `OPENCOMPANY_ANALYTICS_CLIENT_ID` / `OPENCOMPANY_ANALYTICS_ENDPOINT`
+  / `OPENCOMPANY_SENTRY_DSN` override those defaults, `OPENCOMPANY_ANALYTICS=off`
+  / `OPENCOMPANY_SENTRY=off` silence them, and there is no client secret. Any
+  endpoint must be `https`, or `http` to a loopback host: the client id is a
+  request header on every request, and the workload refuses a plain-`http`
+  collector rather than warning about it. These particular defaults — the
+  hosted-tenant analytics client id/endpoint and the `opencompany-core`
+  Sentry DSN — never apply to desktop or self-hosted deployments. The desktop
+  shell has its own, separate compiled-in Sentry default (the
+  `opencompany-tauri` project); see `docs/spec/runtime/crash-reporting.md`.
   None of them is required to boot: an instance that says nothing is treated as **self-hosted**
   and reports nothing, which is the safe direction and the documented default
   (`docs/spec/runtime/analytics.md`). `OPENCOMPANY_TENANT_ID` alone also implies

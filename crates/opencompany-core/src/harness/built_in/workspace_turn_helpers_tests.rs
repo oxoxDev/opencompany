@@ -36,7 +36,7 @@ use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{HarnessDeps, HarnessPool};
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::CompanyRecord;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
@@ -166,6 +166,12 @@ pub(crate) async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
 /// One assistant message carrying a native `tool_calls` array — the shape the
 /// provider's `tool_calling: true` profile puts the turn loop on.
 pub(crate) fn tool_call_message(tool: &str, args: &Value) -> Value {
+    // Plan hive-desks Phase 3: this crate's tools are served over the
+    // `opencompany` MCP server, so a scripted model reaches one exactly as a
+    // real one does — through `mcp_call_tool`. A native tool is unchanged.
+    let (tool, args) = crate::hive::tools::via_opencompany_mcp(tool, args.clone());
+    let tool = tool.as_str();
+    let args = &args;
     json!({
         "role": "assistant",
         "content": null,
@@ -252,7 +258,12 @@ pub(crate) async fn harness(
     Arc<dyn WorkspaceStore>,
 ) {
     let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir));
-    let id = CompanyId::new("acme");
+    // A fresh id per test: every turn test in this binary runs on the one
+    // process-wide OpenHuman runtime, and an agent's thread transcript is
+    // keyed by `(company, agent)` — two fixtures naming `acme`/`ceo` would
+    // resume each other's transcript, system prompt included. Per test rather
+    // than per call so the supervised suite's second record agrees with it.
+    let id = crate::test_support::per_test_company_id("acme");
     store
         .create(&id, &folder("f-std", "standards"), None)
         .await
@@ -267,6 +278,7 @@ pub(crate) async fn harness(
         .unwrap();
 
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -304,6 +316,7 @@ pub(crate) async fn harness(
         run_output_store: None,
         workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
+        approval_parker: None,
         secrets: None,
         web_allowed_domains: Vec::new(),
         capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -330,6 +343,7 @@ pub(crate) async fn harness(
     };
 
     let record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -375,6 +389,26 @@ pub(crate) fn advertised_tools(script: &Script) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect();
+    // Plan hive-desks Phase 3: this crate's own tools reach the model as the
+    // `opencompany` MCP catalogue, named in the system prompt and called
+    // through `mcp_call_tool`, so "advertised" reads both halves.
+    names.extend(
+        script
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|body| body.get("messages").and_then(Value::as_array).cloned())
+            .flatten()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+            .filter_map(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flat_map(|prompt| crate::harness::build::tools_named_in_mcp_brief(&prompt)),
+    );
     names.sort();
     names.dedup();
     names

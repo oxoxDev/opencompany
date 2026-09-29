@@ -56,8 +56,11 @@ pub(super) fn referral_leg_answering(
     [
         CompanyEvent::ReferralEnqueued {
             // These fixtures are desk crossings, which run on the target's
-            // own desk and name no pair conversation.
+            // own desk and name no pair conversation — and so name no rows
+            // either: a range is what a tool-sent DM carries, because it
+            // journals before the reply its marker folds onto.
             conversation: None,
+            rows: None,
             answers,
             from_desk: from_desk.to_string(),
             from_desk_name: from_desk_name.to_string(),
@@ -67,6 +70,9 @@ pub(super) fn referral_leg_answering(
             to_desk: to_desk.to_string(),
             target: target.to_string(),
             returning,
+            episode_id: None,
+            to_episode_id: None,
+            hop: 0,
         },
         CompanyEvent::OperatorMessage {
             text: text.to_string(),

@@ -285,6 +285,15 @@ pub struct McpServerDecl {
     pub source: McpSource,
     /// Resolved outbound credential (`None` until [`resolve_effective`] fills it).
     pub auth: AuthMaterial,
+    /// The operator's stored per-tool approval policy, layered over
+    /// [`read_only_tools`](Self::read_only_tools) by
+    /// [`effective_policies`](super::mcp_policy::effective_policies). Empty
+    /// until [`resolve_effective`] fills it.
+    pub tool_policies: super::mcp_policy::McpToolPolicies,
+    /// The tools discovery last saw on this server and the tier each was
+    /// suggested under. Empty until [`resolve_effective`] fills it, and empty
+    /// for a server discovery has never reached.
+    pub tool_inventory: super::mcp_policy::McpToolInventory,
 }
 
 impl McpServerDecl {
@@ -300,6 +309,8 @@ impl McpServerDecl {
             enabled: server.enabled,
             source,
             auth: AuthMaterial::None,
+            tool_policies: super::mcp_policy::McpToolPolicies::default(),
+            tool_inventory: super::mcp_policy::McpToolInventory::default(),
         }
     }
 }
@@ -372,14 +383,13 @@ pub fn effective_mcp_servers(
     out
 }
 
-/// Flattens a company's effective MCP servers into the `(server, tool)`
-/// read-only set the approval gate consults (issue #1124).
+/// Flattens a company's effective MCP servers into the `(server, tool)` pairs
+/// their `read_only_tools` declarations name.
 ///
-/// Keyed by the server's `name` — the slug the `mcp_call_tool` bridge names its
-/// server under — paired with each `read_only_tools` entry. The gate looks a
-/// live call's `(server, tool)` pair up here; an undeclared pair is simply
-/// absent, which is the gated answer. A disabled server contributes nothing: it
-/// hands out no tool, so a call through it could not have been made.
+/// Test-only: it ignores the stored tool policy, so it is the differential
+/// oracle for [`mcp_allow_set`](super::mcp_policy::mcp_allow_set), which is
+/// what every gate reads. A disabled server contributes nothing.
+#[cfg(test)]
 pub fn mcp_read_set(servers: &[McpServerDecl]) -> crate::policy::McpReadSet {
     crate::policy::McpReadSet::from_pairs(servers.iter().filter(|s| s.enabled).flat_map(|server| {
         server
@@ -685,6 +695,26 @@ pub async fn resolve_effective(
             .find(|m| m.name.trim() == decl.name)
             .and_then(|m| m.auth_secret.clone());
         decl.auth = load_auth(company, &decl.name, secrets, override_key.as_deref()).await?;
+        // Never `?`: a caller treats an error out of here as "this company gets
+        // no MCP servers", so one unreadable policy key would strip every
+        // server from every agent. The gate's face degrades that one server to
+        // all-park instead.
+        let stored = super::mcp_policy::load_tool_policies(
+            company,
+            secrets,
+            &super::mcp_policy::tool_policies_key(&decl.name),
+        )
+        .await;
+        decl.tool_policies = super::mcp_policy::effective_policies(&decl.read_only_tools, stored);
+        // Threaded here, before any route can store a tier default. Without it
+        // a tier default resolves against nothing: the tool is never
+        // enumerated, so the operator's decision is silently not enforced.
+        decl.tool_inventory = super::mcp_policy::load_tool_inventory(
+            company,
+            secrets,
+            &super::mcp_policy::tool_inventory_key(&decl.name),
+        )
+        .await;
     }
     Ok(decls)
 }
@@ -713,6 +743,11 @@ pub fn validate_servers(servers: &[McpServer]) -> Vec<String> {
     problems
 }
 
+/// Server names a company may not declare: the runtime merges servers by
+/// name, last write wins, so a company server under one of these would stand
+/// in for OpenCompany's own MCP server or OpenHuman's docs server.
+pub const RESERVED_SERVER_NAMES: &[&str] = &["opencompany", "gitbooks"];
+
 /// Validates a single server declaration under a caller-supplied `label`.
 pub fn validate_one(label: &str, server: &McpServer) -> Vec<String> {
     let mut problems = Vec::new();
@@ -721,6 +756,13 @@ pub fn validate_one(label: &str, server: &McpServer) -> Vec<String> {
 
     if name.is_empty() {
         problems.push(format!("{label} is missing a `name`."));
+    } else if let Some(reserved) = RESERVED_SERVER_NAMES
+        .iter()
+        .find(|reserved| name.eq_ignore_ascii_case(reserved))
+    {
+        problems.push(format!(
+            "{label} uses the name `{reserved}`, which is reserved for a server OpenCompany runs itself — choose another name."
+        ));
     }
 
     if server
@@ -957,3 +999,7 @@ fn normalize_tools(tools: &[String]) -> Vec<String> {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_store_tests.rs"]
+mod store_tests;
