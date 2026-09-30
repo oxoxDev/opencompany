@@ -92,6 +92,35 @@ fn an_undeclared_desk_reads_as_default_and_an_overlay_outranks_the_manifest() {
 }
 
 #[test]
+fn general_defaults_to_three_seats_and_six_rounds_labelled_default() {
+    let record = record(TWO_DESKS);
+    let general = crate::ports::general_channel::GENERAL_CHANNEL_ID;
+    let (config, source) = effective_routing(&record, general);
+    assert_eq!(source, RoutingSource::Default);
+    assert_eq!(config, RoutingConfig::general());
+    assert!(config.problems("#general").is_empty());
+
+    let effective = desk_routing(&record, general);
+    assert_eq!(effective.round_width, 3);
+    assert_eq!(effective.max_rounds, 6);
+    let default = EffectiveRouting::resolve(&RoutingConfig::default());
+    assert_eq!(effective.turn_timeout_secs, default.turn_timeout_secs);
+    assert_eq!(effective.choice_option_limit, default.choice_option_limit);
+    assert_eq!(effective.referral, default.referral);
+
+    let summary = desk_routing_summary(&record, general, Router::Fallback);
+    assert_eq!(summary.source, RoutingSource::Default);
+    assert_eq!(summary.round_width, 3);
+    assert_eq!(summary.max_rounds, 6);
+
+    assert_eq!(
+        effective_routing(&record, "content").0,
+        RoutingConfig::default(),
+        "other undeclared desks keep the plain default"
+    );
+}
+
+#[test]
 fn problems_name_the_zero_and_out_of_range_keys() {
     let config = RoutingConfig {
         round_width: Some(0),

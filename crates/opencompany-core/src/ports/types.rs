@@ -6055,7 +6055,8 @@ impl CompanyRecord {
     /// The `[group_chat.routing]` block in force on `desk_id`.
     ///
     /// The operator's installed block if there is one, else the console-desk's
-    /// own, else the manifest's `[[group_chat]].routing`, else the default.
+    /// own, else the manifest's `[[group_chat]].routing`, else the default
+    /// (`RoutingConfig::general` for `#general`).
     /// **The one place this precedence lives** — the driver and the console
     /// read through [`crate::hive::routing::effective_routing`], which is a
     /// thin wrapper over this, so a desk cannot run under one block while the
@@ -6082,7 +6083,13 @@ impl CompanyRecord {
             .iter()
             .find(|group| group.id == desk_id)
             .map(|group| group.hive.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                if desk_id == GENERAL_CHANNEL_ID {
+                    crate::hive::routing::RoutingConfig::general()
+                } else {
+                    crate::hive::routing::RoutingConfig::default()
+                }
+            })
     }
 
     /// Whether an operator-installed block is what `effective_desk_hive`

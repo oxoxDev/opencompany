@@ -34,6 +34,10 @@ pub const DEFAULT_CHOICE_OPTION_LIMIT: usize = 8;
 pub const DEFAULT_MAX_ROUNDS: u32 = 12;
 /// Seconds one seat turn may take, counted from the moment it holds its lock.
 pub const DEFAULT_TURN_TIMEOUT_SECS: u64 = 600;
+/// Seats a `#general` round may run at once.
+pub const GENERAL_ROUND_WIDTH: usize = 3;
+/// Rounds a `#general` episode may run.
+pub const GENERAL_MAX_ROUNDS: u32 = 6;
 /// Referral hops allowed when `[group_chat.routing.referral]` enables crossing
 /// without saying how far.
 pub const DEFAULT_REFERRAL_MAX_HOPS: u32 = 1;
@@ -106,6 +110,16 @@ impl RoutingConfig {
     #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The block `#general` runs under when nothing is installed for it.
+    #[must_use]
+    pub fn general() -> Self {
+        Self {
+            round_width: Some(GENERAL_ROUND_WIDTH),
+            max_rounds: Some(GENERAL_MAX_ROUNDS),
+            ..Self::default()
+        }
     }
 
     /// Every problem with the block, in the words the manifest reports them.
@@ -440,7 +454,10 @@ pub fn effective_routing(record: &CompanyRecord, desk_id: &str) -> (RoutingConfi
     let config = record.effective_desk_hive(desk_id);
     let source = if record.desk_hive_is_installed(desk_id) {
         RoutingSource::Overlay
-    } else if config.is_default() {
+    } else if config.is_default()
+        || (desk_id == crate::ports::general_channel::GENERAL_CHANNEL_ID
+            && config == RoutingConfig::general())
+    {
         RoutingSource::Default
     } else {
         RoutingSource::Manifest
