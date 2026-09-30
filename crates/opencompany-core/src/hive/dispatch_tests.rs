@@ -36,15 +36,177 @@ fn a_dm_is_a_room_when_it_has_a_hive_and_a_single_turn_when_it_does_not() {
     );
 }
 
-/// General never becomes a DM room, whatever it is called.
+/// General with no hive, and a message with no chat id, are single turns.
 #[test]
-fn the_general_line_is_never_a_dm() {
+fn general_without_a_hive_and_an_unaddressed_message_are_single_turns() {
     let record = record(TWO_DESKS);
     let empty: HashMap<String, Arc<crate::hive::graph::DeskHive>> = HashMap::new();
     assert!(matches!(
-        surface_of(&record, &empty, Some("general")),
+        surface_of(&record, &empty, Some(GENERAL)),
         Surface::Single
     ));
+    assert!(matches!(surface_of(&record, &empty, None), Surface::Single));
+}
+
+const GENERAL: &str = crate::ports::general_channel::GENERAL_CHANNEL_ID;
+
+struct Switches(&'static [(&'static str, &'static str)]);
+
+impl crate::app::config::EnvSource for Switches {
+    fn get_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.0
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| (*value).into())
+    }
+}
+
+async fn bound_agents(tag: &str, ids: &[&str]) -> HashMap<String, openhuman_embed::Agent> {
+    use crate::harness::openhuman_runtime::{RuntimeBoot, global};
+    use openhuman_embed::AgentSpec;
+
+    let runtime = global(RuntimeBoot::ephemeral()).await.expect("runtime");
+    let salt = uuid::Uuid::new_v4().simple().to_string();
+    ids.iter()
+        .map(|id| {
+            (
+                (*id).to_string(),
+                runtime
+                    .agent(AgentSpec::new(format!("hive-{tag}-{id}-{}", &salt[..8])))
+                    .expect("agent"),
+            )
+        })
+        .collect()
+}
+
+/// `#general` is a room once its hive is built; nothing else moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn general_is_a_room_and_every_other_surface_keeps_its_answer() {
+    let agents = bound_agents("general-surface", &["ceo", "engineer", "writer"]).await;
+    let record = record(TWO_DESKS);
+    let hives = hives_for_in(&record, &|id| agents.get(id).cloned(), &Switches(&[]));
+    assert!(hives.contains_key(GENERAL), "{:?}", hives.keys());
+
+    let general = surface_of(&record, &hives, Some(GENERAL));
+    assert!(
+        matches!(&general, Surface::Room { desk_id } if desk_id == GENERAL),
+        "{general:?}"
+    );
+    assert!(
+        matches!(surface_of(&record, &hives, None), Surface::Single),
+        "a message with no chat id is not #general's"
+    );
+    for spelling in ["general", "General", "main", "#general"] {
+        assert!(
+            !matches!(
+                surface_of(&record, &hives, Some(spelling)),
+                Surface::Room { ref desk_id } if desk_id == GENERAL
+            ),
+            "only the decoded id is #general's room: {spelling}"
+        );
+    }
+    let engineering = surface_of(&record, &hives, Some("engineering"));
+    assert!(
+        matches!(&engineering, Surface::Room { desk_id } if desk_id == "engineering"),
+        "{engineering:?}"
+    );
+    let dm = surface_of(&record, &hives, Some("dm:ceo"));
+    assert!(
+        matches!(&dm, Surface::Room { desk_id } if desk_id == "dm:ceo"),
+        "{dm:?}"
+    );
+}
+
+/// A grandfathered desk and teammate both called `general-channel`: the bare
+/// id is #general's room, the desk gets no room of its own, and the teammate
+/// stays reachable on its prefixed DM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn general_keeps_its_id_against_a_desk_and_a_teammate_that_share_it() {
+    const COLLIDING: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "general-channel"
+role = "Generalist"
+
+[[group_chat]]
+id = "general-channel"
+name = "Colliding desk"
+members = ["general-channel", "ceo"]
+"#;
+    let agents = bound_agents("general-collide", &["ceo", GENERAL]).await;
+    let record = record(COLLIDING);
+    let hives = hives_for_in(&record, &|id| agents.get(id).cloned(), &Switches(&[]));
+
+    let room = &hives[GENERAL];
+    assert_eq!(room.desk_name, "General");
+    assert_eq!(room.lead().as_deref(), Some("ceo"));
+    let bare = surface_of(&record, &hives, Some(GENERAL));
+    assert!(
+        matches!(&bare, Surface::Room { desk_id } if desk_id == GENERAL),
+        "{bare:?}"
+    );
+    let dm = surface_of(&record, &hives, Some("dm:general-channel"));
+    assert!(
+        matches!(&dm, Surface::Room { desk_id } if desk_id == "dm:general-channel"),
+        "{dm:?}"
+    );
+
+    let (desks, errors) = crate::hive::graph::desk_hives(&record, 1, &|id| agents.get(id).cloned());
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(desks.is_empty(), "{:?}", desks.keys().collect::<Vec<_>>());
+}
+
+/// `OPENCOMPANY_GENERAL_EPISODES` switches the room off and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_general_switch_removes_only_the_general_room() {
+    let agents = bound_agents("general-switch", &["ceo", "engineer", "writer"]).await;
+    let record = record(TWO_DESKS);
+    let bind = |id: &str| agents.get(id).cloned();
+
+    let off = hives_for_in(
+        &record,
+        &bind,
+        &Switches(&[("OPENCOMPANY_GENERAL_EPISODES", "0")]),
+    );
+    assert!(!off.contains_key(GENERAL), "{:?}", off.keys());
+    assert!(off.contains_key("engineering"));
+    assert!(off.contains_key("dm:ceo"));
+    assert!(matches!(
+        surface_of(&record, &off, Some(GENERAL)),
+        Surface::Single
+    ));
+
+    let dms_off = hives_for_in(
+        &record,
+        &bind,
+        &Switches(&[("OPENCOMPANY_DM_EPISODES", "off")]),
+    );
+    assert!(dms_off.contains_key(GENERAL), "{:?}", dms_off.keys());
+    assert!(!dms_off.contains_key("dm:ceo"));
+}
+
+#[test]
+fn general_episodes_are_on_unless_switched_off() {
+    use crate::hive::graph::general_episodes_enabled;
+    const KEY: &str = "OPENCOMPANY_GENERAL_EPISODES";
+    assert!(general_episodes_enabled(&Switches(&[])), "unset is on");
+    assert!(general_episodes_enabled(&Switches(&[(KEY, "maybe")])));
+    assert!(!general_episodes_enabled(&Switches(&[(KEY, "0")])));
+    assert!(!general_episodes_enabled(&Switches(&[(KEY, "false")])));
+    assert!(!general_episodes_enabled(&Switches(&[(KEY, "no")])));
+    assert!(!general_episodes_enabled(&Switches(&[(KEY, " off ")])));
+    assert!(general_episodes_enabled(&Switches(&[(KEY, "1")])));
+    assert!(general_episodes_enabled(&Switches(&[(KEY, "on")])));
+    assert!(
+        general_episodes_enabled(&Switches(&[("OPENCOMPANY_DM_EPISODES", "0")])),
+        "the DM switch does not reach #general"
+    );
 }
 
 /// The flag is **on** unless something switches it off, and says so plainly.

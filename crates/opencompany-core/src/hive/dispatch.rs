@@ -2,14 +2,15 @@
 //! opens when that surface is a desk with a room.
 //!
 //! This is the chat body of the harness brain's cycle (plan hive-desks,
-//! Phase 5). A message on a **desk of two or more bound seats** opens (or
-//! joins) an episode on that desk's hive and is answered by the rounds the
-//! driver runs; the brain pushes no bubble for it, because every seat's
-//! utterance is already a journaled `AgentReply` and the console sees each one
-//! land live. Every other surface — a DM, `#general`, a workflow thread, a
-//! desk of one — is one ordinary turn on the responder the host's own rules
-//! pick: the teammate the message named, else the desk's default responder,
-//! else the orchestrator. No router and no driver touch those.
+//! Phase 5). A message on a **room of two or more bound seats** — a desk,
+//! `#general`, or an operator DM — opens (or joins) an episode on that room's
+//! hive and is answered by the rounds the driver runs; the brain pushes no
+//! bubble for it, because every seat's utterance is already a journaled
+//! `AgentReply` and the console sees each one land live. Every other surface —
+//! a message with no chat id, a workflow thread, a desk of one — is one
+//! ordinary turn on the responder the host's own rules pick: the teammate the
+//! message named, else the desk's default responder, else the orchestrator.
+//! No router and no driver touch those.
 //!
 //! The dispatcher for a company is built from the harness pool's live agents
 //! per message rather than cached: a hive is a validation and a handful of
@@ -49,7 +50,13 @@ pub fn surface_of(
         return Surface::Single;
     };
     if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
-        return Surface::Single;
+        return if hives.contains_key(chat) {
+            Surface::Room {
+                desk_id: chat.to_owned(),
+            }
+        } else {
+            Surface::Single
+        };
     }
     // An operator DM, when one runs a hive.
     //
@@ -112,6 +119,15 @@ pub fn hives_for(
     record: &CompanyRecord,
     bind: &dyn Fn(&str) -> Option<openhuman_embed::Agent>,
 ) -> HashMap<String, Arc<crate::hive::graph::DeskHive>> {
+    hives_for_in(record, bind, &crate::app::config::ProcessEnv)
+}
+
+/// [`hives_for`] with its switches read from `env`.
+pub(crate) fn hives_for_in(
+    record: &CompanyRecord,
+    bind: &dyn Fn(&str) -> Option<openhuman_embed::Agent>,
+    env: &dyn crate::app::config::EnvSource,
+) -> HashMap<String, Arc<crate::hive::graph::DeskHive>> {
     // Echoed by a Jev evaluation and compared within one request; a
     // per-build counter would be no more meaningful than the roster size.
     let roster_version = record.effective_agents().len() as u64;
@@ -119,10 +135,28 @@ pub fn hives_for(
     for error in errors {
         tracing::warn!(company = %record.id, %error, "[hive] a desk got no hive");
     }
+    if crate::hive::graph::general_episodes_enabled(env) {
+        match crate::hive::graph::general_hive(record, roster_version, bind) {
+            Ok(Some(general)) => {
+                tracing::info!(
+                    company = %record.id,
+                    seats = general.members().len(),
+                    "[hive] #general runs as episodes"
+                );
+                hives.insert(general.desk_id.clone(), general);
+            }
+            Ok(None) => {
+                tracing::debug!(company = %record.id, "[hive] #general has fewer than two bound seats");
+            }
+            Err(error) => {
+                tracing::warn!(company = %record.id, %error, "[hive] #general got no hive");
+            }
+        }
+    }
     // Operator DMs, when the flag is on. Keyed by the chat id itself, which
     // is what `surface_of` looks up -- and absent when it is off, which is
     // how a DM keeps taking the pooled path.
-    if crate::hive::graph::dm_episodes_enabled(&crate::app::config::ProcessEnv) {
+    if crate::hive::graph::dm_episodes_enabled(env) {
         let (dms, errors) = crate::hive::graph::dm_hives(record, roster_version, bind);
         for error in errors {
             tracing::warn!(company = %record.id, %error, "[hive] a DM got no hive");

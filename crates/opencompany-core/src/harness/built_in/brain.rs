@@ -3411,9 +3411,11 @@ impl HarnessBrain {
                     // no bubble goes back through `channel_responses` — the
                     // REST route would journal it a second time.
                     //
-                    // Every other surface — a DM, `#general`, a workflow
-                    // thread, a desk of one — takes the single-turn path
-                    // below. A copilot thread returned above.
+                    // `#general` and operator DMs are rooms the same way
+                    // when their hives exist. Every other surface — a
+                    // message with no chat id, a workflow thread, a desk of
+                    // one — takes the single-turn path below. A copilot
+                    // thread returned above.
                     //
                     // The episode runs on its own task: the cycle accepted the
                     // message, the request is journaled, and the console
