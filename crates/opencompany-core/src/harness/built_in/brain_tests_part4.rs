@@ -532,8 +532,9 @@ fn everyone_names_the_desk_without_choosing_a_responder() {
 
 #[test]
 fn everyone_desk_is_the_addressed_chat_or_general() {
-    assert_eq!(HarnessBrain::everyone_desk(None), "general");
-    assert_eq!(HarnessBrain::everyone_desk(Some("general")), "general");
+    let general = crate::ports::general_channel::GENERAL_CHANNEL_ID;
+    assert_eq!(HarnessBrain::everyone_desk(None), general);
+    assert_eq!(HarnessBrain::everyone_desk(Some(general)), general);
     assert_eq!(HarnessBrain::everyone_desk(Some("eng_desk")), "eng_desk");
 }
 

@@ -314,7 +314,7 @@ pub fn chat_responder(record: &CompanyRecord, chat: &str) -> Option<String> {
     if let Some(responder) = desk_default_responder(record, chat) {
         return Some(responder);
     }
-    if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
+    if crate::ports::general_channel::is_general_spelling(chat) {
         return None;
     }
     if let Some(agent) = record.resolve_roster_agent_id(chat) {

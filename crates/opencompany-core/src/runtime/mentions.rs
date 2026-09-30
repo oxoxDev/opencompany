@@ -1127,7 +1127,7 @@ pub fn mentioned_agents(
                 // Ordered by the same manifest-then-overlay walk `desk_ids`
                 // uses, so "who is in #general" reads the same as every other
                 // roster surface.
-                None if desk == crate::ports::general_channel::GENERAL_CHANNEL_ID => {
+                None if crate::ports::general_channel::is_general_spelling(desk) => {
                     for id in crate::runtime::delegation_tools::roster_agent_ids(record) {
                         push(&mut out, record, responder, id);
                     }

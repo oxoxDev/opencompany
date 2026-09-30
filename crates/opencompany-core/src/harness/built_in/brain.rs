@@ -2567,7 +2567,7 @@ impl HarnessBrain {
         {
             return responder;
         }
-        if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
+        if crate::ports::general_channel::is_general_spelling(chat) {
             return self.responder.clone();
         }
         tracing::warn!(

@@ -4315,9 +4315,10 @@ impl CompanyRuntime {
             // sequence means the recorded parent was never a valid root.
             _ => return None,
         };
-        let channel = channel
-            .unwrap_or_else(|| crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string());
-        (channel == chat_id).then_some(parent)
+        let channel =
+            crate::ports::general_channel::decode_general_chat_id(channel.unwrap_or_default());
+        (channel == crate::ports::general_channel::decode_general_chat_id(chat_id.to_owned()))
+            .then_some(parent)
     }
 
     /// Files a durable mention notification for the people `mentions` names in
