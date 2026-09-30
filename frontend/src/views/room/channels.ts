@@ -139,7 +139,7 @@ function generalChannel(d: Desk, members: TeamMember[]): Channel {
     purpose:
       d.blurb ||
       (orchestrator
-        ? `Everyone's here. ${orchestrator.name} picks up anything you don't @-mention.`
+        ? `The team decides who takes each message; ${orchestrator.name} leads when no one fits.`
         : "Everyone's here — the whole company on one line"),
     tone: d.tone,
     memberIds: d.members,

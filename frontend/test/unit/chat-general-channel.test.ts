@@ -7,14 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { DeskDto, NotificationDto, ReadMarker } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { GENERAL_CHANNEL_ID, isGeneralChannel, migrateLegacyGeneralId } from "@/lib/chat";
+import {
+  type ChatMessage,
+  GENERAL_CHANNEL_ID,
+  isGeneralChannel,
+  migrateLegacyGeneralId,
+} from "@/lib/chat";
 import { defaultDesks, isGeneralDesk, type Desk } from "@/lib/desks";
+import { foldEpisodes } from "@/lib/episodes";
 import { readLastChannel, writeLastChannel } from "@/lib/last-channel";
 import { notificationHref } from "@/lib/notification-links";
 import type { TeamMember } from "@/lib/team";
 import { mergeReadFloors } from "@/lib/unread";
 import {
   buildChannels,
+  buildTimeline,
+  buildTimelineItems,
   channelIdForThread,
   deskFromDto,
   dmThreadId,
@@ -89,9 +97,11 @@ describe("#general from the API entry", () => {
     expect(engineering.leadless).toBeUndefined();
   });
 
-  it("names the orchestrator as who picks up an unmentioned message", () => {
+  it("says the team decides and names the orchestrator as the fallback lead", () => {
     const [general] = channels(ROSTER, [deskFromDto(GENERAL_DTO)]);
-    expect(general.purpose).toBe("Everyone's here. Ada picks up anything you don't @-mention.");
+    expect(general.purpose).toBe(
+      "The team decides who takes each message; Ada leads when no one fits.",
+    );
     expect(general.voice).toBe("Ada");
   });
 
@@ -125,6 +135,40 @@ describe("#general from the API entry", () => {
 
     expect(added.memberIds).toContain("new");
     expect(removed.memberIds).not.toContain("eng");
+  });
+});
+
+describe("an episode in #general", () => {
+  const rows: ChatMessage[] = [
+    { id: "h1", from: "you", byPerson: true, at: 0, text: "When do passkeys ship?" },
+    {
+      id: "h2",
+      from: "company",
+      channel: "ceo",
+      at: 10,
+      text: "Blake, how long?",
+      episode: { id: "ep-g", revision: 0, kind: "post" },
+    },
+    {
+      id: "h3",
+      from: "company",
+      channel: "eng",
+      at: 20,
+      text: "Next sprint.",
+      episode: { id: "ep-g", revision: 1, kind: "complete_episode" },
+    },
+  ];
+
+  it("draws one round band and the completion marker", () => {
+    const [general] = channels(ROSTER, [deskFromDto(GENERAL_DTO)]);
+    const items = buildTimelineItems(
+      buildTimeline(rows, general, []),
+      [],
+      {},
+      foldEpisodes(rows),
+    );
+
+    expect(items.map((item) => item.kind)).toEqual(["message", "round", "episode_complete"]);
   });
 });
 
