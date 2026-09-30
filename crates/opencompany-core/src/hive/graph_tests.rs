@@ -199,3 +199,116 @@ fn a_dm_is_answered_by_its_owner_and_a_desk_is_still_routed() {
         "a desk is routed -- that is what a desk is for"
     );
 }
+
+const LED_BY_THE_LAST: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+"#;
+
+async fn pool_agents(tag: &str, ids: &[&str]) -> HashMap<String, openhuman_embed::Agent> {
+    let runtime = global(RuntimeBoot::ephemeral()).await.expect("runtime");
+    let salt = uuid::Uuid::new_v4().simple().to_string();
+    ids.iter()
+        .map(|id| {
+            (
+                (*id).to_string(),
+                runtime
+                    .agent(AgentSpec::new(format!("hive-{tag}-{id}-{}", &salt[..8])))
+                    .expect("agent"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn general_is_its_members_led_by_the_orchestrator() {
+    let agents = pool_agents("general", &["ceo", "engineer", "writer"]).await;
+    let record = record(LED_BY_THE_LAST);
+    assert_eq!(
+        record.general_channel.members,
+        vec!["writer", "engineer", "ceo"]
+    );
+
+    let general = general_hive(&record, 4, &|id| agents.get(id).cloned())
+        .expect("a valid graph")
+        .expect("three bound seats");
+    assert_eq!(general.desk_id, "general-channel");
+    assert_eq!(general.desk_name, "General");
+    assert_eq!(general.hive.graph().desk.name, GENERAL_ROOM_NAME);
+    assert_eq!(general.roster_version, 4);
+    assert_eq!(general.members(), vec!["ceo", "writer", "engineer"]);
+    assert_eq!(general.lead().as_deref(), Some("ceo"));
+    assert_eq!(
+        general.hive.graph().desk.responder_mode,
+        tinyhivemind::desk::ResponderMode::Lead
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn general_drops_retired_unbound_and_unknown_members() {
+    let agents = pool_agents("general-drop", &["ceo", "engineer", "writer"]).await;
+    let mut record = record(LED_BY_THE_LAST);
+    record.overlay_retired_agents.push("writer".into());
+    record.general_channel.members = vec![
+        "writer".into(),
+        "ghost".into(),
+        "engineer".into(),
+        "ceo".into(),
+    ];
+
+    let general = general_hive(&record, 1, &|id| agents.get(id).cloned())
+        .expect("a valid graph")
+        .expect("two bound seats");
+    assert_eq!(general.members(), vec!["ceo", "engineer"]);
+
+    let lone = general_hive(&record, 1, &|id| {
+        (id != "engineer")
+            .then(|| agents.get(id).cloned())
+            .flatten()
+    })
+    .expect("a valid graph");
+    assert!(lone.is_none(), "one bound seat is no room");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn general_with_no_synced_members_seats_the_roster() {
+    let agents = pool_agents("general-unsynced", &["ceo", "engineer", "writer"]).await;
+    let mut record = record(LED_BY_THE_LAST);
+    record.general_channel.members.clear();
+    record.overlay_retired_agents.push("engineer".into());
+
+    let general = general_hive(&record, 1, &|id| agents.get(id).cloned())
+        .expect("a valid graph")
+        .expect("the roster binds");
+    assert_eq!(general.members(), vec!["ceo", "writer"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desk_hives_still_builds_no_general() {
+    let agents = pool_agents("general-desks", &["ceo", "engineer", "writer"]).await;
+    let mut record = record(LED_BY_THE_LAST);
+    record.manifest.group_chats.push(crate::company::GroupChat {
+        id: "general".into(),
+        name: "Legacy general".into(),
+        description: None,
+        members: vec!["ceo".into(), "writer".into()],
+        tools: Vec::new(),
+        hive: Default::default(),
+    });
+    let (hives, errors) = desk_hives(&record, 1, &|id| agents.get(id).cloned());
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(hives.is_empty(), "{:?}", hives.keys().collect::<Vec<_>>());
+}

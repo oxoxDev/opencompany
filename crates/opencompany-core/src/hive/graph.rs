@@ -89,63 +89,151 @@ pub fn desk_hives(
         let Ok(members) = desks.members(&desk.id) else {
             continue;
         };
-        let mut bindings = Vec::new();
-        let mut candidates = Vec::new();
-        let mut bound_members = Vec::new();
-        for member in members {
-            if !record.is_roster_agent(member) {
-                continue;
-            }
-            let Some(agent) = bind(member) else {
-                continue;
-            };
-            let profile = agents.iter().find(|agent| agent.id == member);
-            candidates.push(RouteCandidate {
-                id: member.to_string(),
-                label: profile
-                    .and_then(|agent| agent.name.clone())
-                    .unwrap_or_else(|| member.to_string()),
-                role: profile.map(|agent| agent.role.clone()),
-                description: profile.and_then(|agent| agent.description.clone()),
-                capabilities: Vec::new(),
-                learned_topics: Vec::new(),
-                available: true,
-            });
-            bindings.push(AgentBinding::new(member, EmbedSeat(agent)));
-            bound_members.push(member.to_string());
-        }
-        if bound_members.len() < 2 {
-            continue;
-        }
-        let graph = HiveGraph::new(
+        let seats = bind_seats(record, &agents, members, bind);
+        match build_hive(
+            &desk.name,
             tinyhivemind::desk::Desk {
                 id: desk.id.clone(),
                 name: desk.name.clone(),
                 description: desk.description.clone(),
-                members: bound_members,
+                members: Vec::new(),
                 responder_mode: desk.responder_mode.clone(),
             },
-            candidates,
-        );
-        match BoundHive::new(graph, bindings) {
-            Ok(hive) => {
-                hives.insert(
-                    desk.id.clone(),
-                    Arc::new(DeskHive {
-                        desk_id: desk.id.clone(),
-                        desk_name: desk.name.clone(),
-                        hive,
-                        roster_version,
-                    }),
-                );
+            seats,
+            roster_version,
+        ) {
+            Ok(Some(hive)) => {
+                hives.insert(desk.id.clone(), hive);
             }
-            Err(source) => errors.push(HiveBuildError::Invalid {
-                desk_id: desk.id.clone(),
-                source,
-            }),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         }
     }
     (hives, errors)
+}
+
+/// The name `#general`'s room carries inside tinyhivemind, which refuses a
+/// desk named `general` or `main`.
+pub const GENERAL_ROOM_NAME: &str = "General Channel";
+
+/// `#general`'s hive: its members, the orchestrator first so it leads.
+///
+/// `Ok(None)` when fewer than two members bind.
+///
+/// # Errors
+///
+/// tinyhivemind refused the graph.
+pub fn general_hive(
+    record: &CompanyRecord,
+    roster_version: u64,
+    bind: &dyn Fn(&str) -> Option<openhuman_embed::Agent>,
+) -> Result<Option<Arc<DeskHive>>, HiveBuildError> {
+    use crate::ports::general_channel::{GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME};
+
+    let agents = record.effective_agents();
+    let mut members: Vec<String> = if record.general_channel.members.is_empty() {
+        record
+            .manifest
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .chain(record.overlay_agents.iter().map(|agent| agent.id.clone()))
+            .collect()
+    } else {
+        record.general_channel.members.clone()
+    };
+    let mut seen = std::collections::HashSet::new();
+    members.retain(|member| seen.insert(member.clone()));
+    if let Some(orchestrator) = crate::company::orchestrator_id(&agents)
+        && let Some(at) = members.iter().position(|member| member == orchestrator)
+    {
+        let lead = members.remove(at);
+        members.insert(0, lead);
+    }
+    let seats = bind_seats(record, &agents, members.iter().map(String::as_str), bind);
+    build_hive(
+        GENERAL_CHANNEL_NAME,
+        tinyhivemind::desk::Desk {
+            id: GENERAL_CHANNEL_ID.to_string(),
+            name: GENERAL_ROOM_NAME.to_string(),
+            description: None,
+            members: Vec::new(),
+            responder_mode: tinyhivemind::desk::ResponderMode::Lead,
+        },
+        seats,
+        roster_version,
+    )
+}
+
+/// The members of one room that are on the roster and bound, in order.
+struct BoundSeats {
+    members: Vec<String>,
+    candidates: Vec<RouteCandidate>,
+    bindings: Vec<AgentBinding<EmbedSeat>>,
+}
+
+fn bind_seats<'a>(
+    record: &CompanyRecord,
+    agents: &[crate::company::Agent],
+    members: impl IntoIterator<Item = &'a str>,
+    bind: &dyn Fn(&str) -> Option<openhuman_embed::Agent>,
+) -> BoundSeats {
+    let mut seats = BoundSeats {
+        members: Vec::new(),
+        candidates: Vec::new(),
+        bindings: Vec::new(),
+    };
+    for member in members {
+        if !record.is_roster_agent(member) {
+            continue;
+        }
+        let Some(agent) = bind(member) else {
+            continue;
+        };
+        let profile = agents.iter().find(|agent| agent.id == member);
+        seats.candidates.push(RouteCandidate {
+            id: member.to_string(),
+            label: profile
+                .and_then(|agent| agent.name.clone())
+                .unwrap_or_else(|| member.to_string()),
+            role: profile.map(|agent| agent.role.clone()),
+            description: profile.and_then(|agent| agent.description.clone()),
+            capabilities: Vec::new(),
+            learned_topics: Vec::new(),
+            available: true,
+        });
+        seats
+            .bindings
+            .push(AgentBinding::new(member, EmbedSeat(agent)));
+        seats.members.push(member.to_string());
+    }
+    seats
+}
+
+/// `desk` with `seats` as its members, shown as `desk_name`, or `None` below
+/// two seats.
+fn build_hive(
+    desk_name: &str,
+    mut desk: tinyhivemind::desk::Desk,
+    seats: BoundSeats,
+    roster_version: u64,
+) -> Result<Option<Arc<DeskHive>>, HiveBuildError> {
+    if seats.members.len() < 2 {
+        return Ok(None);
+    }
+    desk.members = seats.members;
+    let desk_id = desk.id.clone();
+    let desk_name = desk_name.to_owned();
+    let graph = HiveGraph::new(desk, seats.candidates);
+    match BoundHive::new(graph, seats.bindings) {
+        Ok(hive) => Ok(Some(Arc::new(DeskHive {
+            desk_id,
+            desk_name,
+            hive,
+            roster_version,
+        }))),
+        Err(source) => Err(HiveBuildError::Invalid { desk_id, source }),
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +271,14 @@ mod tests;
 #[must_use]
 pub fn dm_episodes_enabled(env: &dyn crate::app::config::EnvSource) -> bool {
     env.get("OPENCOMPANY_DM_EPISODES")
+        .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
+}
+
+/// Whether `#general` runs as an episode room; on unless
+/// `OPENCOMPANY_GENERAL_EPISODES` is `0`, `false`, `no` or `off`.
+#[must_use]
+pub fn general_episodes_enabled(env: &dyn crate::app::config::EnvSource) -> bool {
+    env.get("OPENCOMPANY_GENERAL_EPISODES")
         .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
 }
 
