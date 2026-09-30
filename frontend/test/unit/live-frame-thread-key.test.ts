@@ -41,8 +41,9 @@ describe("a live frame's thread", () => {
     expect(channelForThread({}, "ada")).toBeNull();
   });
 
-  it("addresses a teammate whose id is `general` on its prefixed DM thread", () => {
-    const namesake = { id: GENERAL_CHANNEL_ID, name: "Gen" } as TeamMember;
-    expect(dmThreadId(namesake)).toBe("dm:general");
+  it("addresses a teammate whose id is #general's, current or legacy, on its prefixed DM thread", () => {
+    for (const id of [GENERAL_CHANNEL_ID, "general"]) {
+      expect(dmThreadId({ id, name: "Gen" } as TeamMember)).toBe(`dm:${id}`);
+    }
   });
 });

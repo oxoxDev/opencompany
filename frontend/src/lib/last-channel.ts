@@ -43,7 +43,7 @@ function storage(): Storage | null {
 /**
  * The channel this company was last read in, or `null` if nothing is
  * remembered. A `#general` remembered under a legacy id is rewritten to
- * `general` on the way out.
+ * `GENERAL_CHANNEL_ID` on the way out.
  */
 export function readLastChannel(scope: LocalScope): string | null {
   const store = storage();

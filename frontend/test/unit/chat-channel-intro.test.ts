@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { staticAvatarSrc } from "@/lib/avatar";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import { avatarFor, type TeamMember } from "@/lib/team";
 import { MessageTimeline } from "@/views/room/MessageTimeline";
 import type { Channel } from "@/views/room/model";
@@ -131,7 +132,7 @@ describe("the channel intro's mark", () => {
   it("keeps the company's own brand mark on #general", () => {
     // `#general` is the one channel that legitimately has a voice behind it, and
     // it wears the company mark rather than a mascot or a hash.
-    render({ id: "general", name: "general", voice: "Acme", kind: "channel", purpose: "" });
+    render({ id: GENERAL_CHANNEL_ID, name: "general", voice: "Acme", kind: "channel", purpose: "" });
 
     expect(mark().querySelector("img")).toBeNull();
     expect(mark().className).toContain("bg-primary");

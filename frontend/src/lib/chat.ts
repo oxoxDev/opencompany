@@ -8,7 +8,10 @@ import type {
 import { toTurnFailure, type TurnFailure } from "./turn-failure";
 
 /** The company-wide `#general` channel's id, which is also its chat thread id. */
-export const GENERAL_CHANNEL_ID = "general";
+export const GENERAL_CHANNEL_ID = "general-channel";
+
+/** The id `#general` carried before {@link GENERAL_CHANNEL_ID}. */
+export const LEGACY_GENERAL_CHANNEL_ID = "general";
 
 /** Does this id name the `#general` channel? */
 export function isGeneralChannel(id: string): boolean {
@@ -16,13 +19,15 @@ export function isGeneralChannel(id: string): boolean {
 }
 
 /**
- * The current id for a channel id stored or linked before `#general` had one:
- * `main` and any casing of `general` become {@link GENERAL_CHANNEL_ID}, every
- * other id comes back unchanged.
+ * The current id for a channel id stored or linked under an older `#general`
+ * id: `main`, `general` and {@link GENERAL_CHANNEL_ID}, in any casing, become
+ * {@link GENERAL_CHANNEL_ID}; every other id comes back unchanged.
  */
 export function migrateLegacyGeneralId(id: string): string {
   const key = id.toLowerCase();
-  return key === "main" || key === GENERAL_CHANNEL_ID ? GENERAL_CHANNEL_ID : id;
+  return key === "main" || key === LEGACY_GENERAL_CHANNEL_ID || key === GENERAL_CHANNEL_ID
+    ? GENERAL_CHANNEL_ID
+    : id;
 }
 
 /**

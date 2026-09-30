@@ -41,7 +41,7 @@ test("the host lists #general first, immutable, with the whole roster", async ({
   }>;
   const team = (await (await request.get(`${API}/team`)).json()) as Array<{ id: string }>;
 
-  expect(desks[0]).toMatchObject({ id: "general", kind: "general", mutable: false });
+  expect(desks[0]).toMatchObject({ id: "general-channel", kind: "general", mutable: false });
   expect(new Set(desks[0].members)).toEqual(new Set(team.map((m) => m.id)));
 });
 
@@ -86,7 +86,7 @@ test("an agent added or removed elsewhere appears in and leaves #general live", 
 test("a membership write to #general is refused", async ({ request }) => {
   const team = (await (await request.get(`${API}/team`)).json()) as Array<{ id: string }>;
   const response = await request.delete(
-    `${API}/desks/general/members/${encodeURIComponent(team[0].id)}`,
+    `${API}/desks/general-channel/members/${encodeURIComponent(team[0].id)}`,
   );
   expect(response.status()).toBe(409);
 });

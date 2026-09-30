@@ -30,7 +30,7 @@ const DESKS = [
   // carries no mentions in the seed feed, so a test can open it without the
   // act of looking clearing a badge it is about to assert on.
   {
-    id: "general",
+    id: "general-channel",
     name: "General",
     kind: "general",
     mutable: false,
@@ -197,14 +197,14 @@ test("a mention in #general badges #general and clears when it is opened", async
       subjectId: "20",
       title: "Rae mentioned you in general",
       createdAt: 4,
-      context: "general",
+      context: "general-channel",
     },
     ...seedFeed(),
   ];
   await mockApi(page, feed, {
     history: {
-      general: [
-        { id: "20", channel: "general", author: "ceo", text: "@you over here", atMillis: 4, mine: false },
+      "general-channel": [
+        { id: "20", channel: "general-channel", author: "ceo", text: "@you over here", atMillis: 4, mine: false },
       ],
     },
   });

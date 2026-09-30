@@ -17,7 +17,7 @@ import { RoomView } from "@/views/RoomView";
  */
 
 const DESK_DTO = {
-  id: "general",
+  id: GENERAL_CHANNEL_ID,
   name: "General",
   description: "The whole company",
   kind: "general" as const,
@@ -155,7 +155,7 @@ function banner() {
 
 describe("a channel renders the whole composer", () => {
   it("draws the input, the Send button and the controls", async () => {
-    await mount("general");
+    await mount(GENERAL_CHANNEL_ID);
 
     expect(composerInput()).not.toBeNull();
     expect(container.querySelector('[aria-label="Send"]')).not.toBeNull();
@@ -173,7 +173,7 @@ describe("a channel renders the whole composer", () => {
   });
 
   it("still offers the empty-state cards", async () => {
-    await mount("general");
+    await mount(GENERAL_CHANNEL_ID);
 
     expect(container.textContent).toContain("Give the team a brief");
     expect(container.textContent).toContain("Add people");
@@ -182,7 +182,7 @@ describe("a channel renders the whole composer", () => {
 
 describe("the harness-unavailable notice sits next to the composer", () => {
   it("renders the notice on a writable channel, saying all three things", async () => {
-    await mount("general", "unavailable");
+    await mount(GENERAL_CHANNEL_ID, "unavailable");
 
     const strip = banner();
     expect(strip).not.toBeNull();
@@ -200,7 +200,7 @@ describe("the harness-unavailable notice sits next to the composer", () => {
   });
 
   it("shares the composer's own box, so nothing can come between them", async () => {
-    await mount("general", "unavailable");
+    await mount(GENERAL_CHANNEL_ID, "unavailable");
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -225,7 +225,7 @@ describe("the harness-unavailable notice sits next to the composer", () => {
   });
 
   it("overlaps the transcript rather than displacing it", async () => {
-    await mount("general", "unavailable");
+    await mount(GENERAL_CHANNEL_ID, "unavailable");
 
     const strip = banner()!;
     // The trade the float makes, stated: it covers the last line of the
@@ -243,7 +243,7 @@ describe("the harness-unavailable notice sits next to the composer", () => {
     // `InflightRunBar` renders inside the same box, between the notice's anchor
     // and the composer. That used to break the adjacency assertion; now it
     // cannot, and this is the case that proves it.
-    await mount("general", "unavailable", ["Jane"], true);
+    await mount(GENERAL_CHANNEL_ID, "unavailable", ["Jane"], true);
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -259,12 +259,12 @@ describe("the harness-unavailable notice sits next to the composer", () => {
 });
 
 /**
- * An address minted before `#general` had the id `general` — `#/chat/main`, or
- * `#/chat/General` in any casing — opens `#general` and is replaced, not pushed,
- * with `#/chat/general`.
+ * An address minted under an older `#general` id — `#/chat/main`, or
+ * `#/chat/general` in any casing — opens `#general` and is replaced, not pushed,
+ * with `#/chat/general-channel`.
  */
 describe("a legacy #general address", () => {
-  for (const legacy of ["main", "General", "GENERAL"]) {
+  for (const legacy of ["main", "general", "General", "GENERAL"]) {
     it(`opens #general from #/chat/${legacy} and rewrites the address`, async () => {
       window.history.replaceState(null, "", `#/chat/${legacy}?m=h7`);
       const before = window.history.length;
@@ -273,7 +273,7 @@ describe("a legacy #general address", () => {
 
       expect(composerInput()?.getAttribute("aria-label")).toBe("Message #general");
       expect(container.textContent).not.toContain("isn't a channel here");
-      expect(window.location.hash).toBe("#/chat/general?m=h7");
+      expect(window.location.hash).toBe(`#/chat/${GENERAL_CHANNEL_ID}?m=h7`);
       expect(window.history.length).toBe(before);
     });
   }
@@ -281,7 +281,7 @@ describe("a legacy #general address", () => {
   it("leaves #/chat/general alone", async () => {
     window.history.replaceState(null, "", "#/chat/general");
 
-    await mount("general");
+    await mount(GENERAL_CHANNEL_ID);
 
     expect(window.location.hash).toBe("#/chat/general");
   });

@@ -23,7 +23,7 @@ import { RoomView } from "@/views/RoomView";
 
 /**
  * `#general` is a real channel: the host lists it first in `GET .../desks` as
- * `{ id: "general", kind: "general", mutable: false }`, with every non-retired
+ * `{ id: "general-channel", kind: "general", mutable: false }`, with every non-retired
  * teammate as a member. The console renders it from that entry, pins it first,
  * offers no membership, order or delete control on it, and migrates the ids it
  * used to keep for it (`main`, `General`) to `general`.
@@ -48,7 +48,7 @@ const ROSTER: TeamMember[] = [
 ];
 
 const GENERAL_DTO: DeskDto = {
-  id: "general",
+  id: GENERAL_CHANNEL_ID,
   name: "General",
   kind: "general",
   members: ["ceo", "eng"],
@@ -71,7 +71,7 @@ describe("#general from the API entry", () => {
   it("renders the host's entry, pinned first even when listed later", () => {
     const rail = channels(ROSTER, [deskFromDto(ENGINEERING_DTO), deskFromDto(GENERAL_DTO)]);
 
-    expect(rail.map((c) => c.id)).toEqual(["general", "engineering"]);
+    expect(rail.map((c) => c.id)).toEqual([GENERAL_CHANNEL_ID, "engineering"]);
     expect(rail[0].name).toBe("general");
     expect(rail[0].kind).toBe("channel");
     expect(rail[0].memberIds).toEqual(["ceo", "eng"]);
@@ -131,12 +131,12 @@ describe("#general from the API entry", () => {
 describe("addressing #general by id", () => {
   const desks = [deskFromDto(GENERAL_DTO), deskFromDto(ENGINEERING_DTO)];
 
-  it("resolves the `general` thread to the `general` channel", () => {
+  it("resolves the `general-channel` thread to the `general-channel` channel", () => {
     expect(channelIdForThread(GENERAL_CHANNEL_ID, desks, ROSTER)).toBe(GENERAL_CHANNEL_ID);
   });
 
   it("no longer folds legacy spellings onto it", () => {
-    for (const spelling of ["", "main", "General", "GENERAL"]) {
+    for (const spelling of ["", "main", "general", "General", "GENERAL"]) {
       expect(isGeneralChannel(spelling)).toBe(false);
       expect(channelIdForThread(spelling, desks, ROSTER)).toBeNull();
     }
@@ -145,6 +145,9 @@ describe("addressing #general by id", () => {
   it("addresses a teammate whose id is `general` on its prefixed DM thread only", () => {
     const namesake = member({ id: "general", name: "Gen" });
     expect(dmThreadId(namesake)).toBe("dm:general");
+    expect(dmThreadId(member({ id: GENERAL_CHANNEL_ID, name: "Gc" }))).toBe(
+      `dm:${GENERAL_CHANNEL_ID}`,
+    );
     expect(dmThreadId(ROSTER[0])).toBe("ceo");
     expect(channelIdForThread("dm:general", desks, [...ROSTER, namesake])).toBe("dm:general");
   });
@@ -157,8 +160,8 @@ describe("addressing #general by id", () => {
 });
 
 describe("migrating stored #general ids", () => {
-  it("maps `main` and any casing of `general` to `general`, and nothing else", () => {
-    for (const legacy of ["main", "MAIN", "General", "GENERAL", "general"]) {
+  it("maps `main`, `general` and #general's own id, in any casing, to it, and nothing else", () => {
+    for (const legacy of ["main", "MAIN", "General", "GENERAL", "general", "General-Channel"]) {
       expect(migrateLegacyGeneralId(legacy)).toBe(GENERAL_CHANNEL_ID);
     }
     for (const other of ["engineering", "dm:main", "", "maintenance"]) {
@@ -173,7 +176,10 @@ describe("migrating stored #general ids", () => {
       { channelId: "engineering", lastReadAt: 5 },
     ] as ReadMarker[];
 
-    expect(mergeReadFloors({ general: 20 }, markers)).toEqual({ general: 30, engineering: 5 });
+    expect(mergeReadFloors({ [GENERAL_CHANNEL_ID]: 20 }, markers)).toEqual({
+      [GENERAL_CHANNEL_ID]: 30,
+      engineering: 5,
+    });
   });
 
   describe("the remembered last channel", () => {
@@ -181,7 +187,7 @@ describe("migrating stored #general ids", () => {
 
     beforeEach(() => window.localStorage.clear());
 
-    it("rewrites a remembered `main` to `general` once, on read", () => {
+    it("rewrites a remembered `main` to #general's id once, on read", () => {
       writeLastChannel(scope, "main");
       const setItem = vi.spyOn(Storage.prototype, "setItem");
 
@@ -191,6 +197,11 @@ describe("migrating stored #general ids", () => {
       expect(readLastChannel(scope)).toBe(GENERAL_CHANNEL_ID);
       expect(setItem).not.toHaveBeenCalled();
       setItem.mockRestore();
+    });
+
+    it("rewrites a remembered `general` to #general's id", () => {
+      writeLastChannel(scope, "general");
+      expect(readLastChannel(scope)).toBe(GENERAL_CHANNEL_ID);
     });
 
     it("leaves any other channel as it was", () => {
@@ -203,7 +214,7 @@ describe("migrating stored #general ids", () => {
         throw new Error("denied");
       });
       expect(readLastChannel(scope)).toBeNull();
-      expect(() => writeLastChannel(scope, "general")).not.toThrow();
+      expect(() => writeLastChannel(scope, GENERAL_CHANNEL_ID)).not.toThrow();
       getItem.mockRestore();
     });
   });
@@ -220,7 +231,7 @@ describe("a notification from #general", () => {
       createdAt: 1,
       context: GENERAL_CHANNEL_ID,
     };
-    expect(notificationHref(n)).toBe("#/chat/general?m=h41");
+    expect(notificationHref(n)).toBe(`#/chat/${GENERAL_CHANNEL_ID}?m=h41`);
   });
 });
 
@@ -296,7 +307,7 @@ describe("RoomView offers no membership control on #general", () => {
   }
 
   it("draws neither an add button nor the org-chart link on #general", async () => {
-    await openMembers("general");
+    await openMembers(GENERAL_CHANNEL_ID);
 
     expect(container.querySelector('textarea[aria-label="Message #general"]')).not.toBeNull();
     expect(container.textContent).toContain("Everyone else");

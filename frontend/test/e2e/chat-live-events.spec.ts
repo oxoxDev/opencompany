@@ -74,7 +74,7 @@ test("a legacy #/chat/main link opens #general under its own address", async ({ 
   await page.goto("/#/chat/main");
 
   await expect(page.getByPlaceholder("Message #general")).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => new URL(page.url()).hash).toMatch(/^#\/chat\/general(?:\?|$)/);
+  await expect.poll(() => new URL(page.url()).hash).toMatch(/^#\/chat\/general-channel(?:\?|$)/);
 });
 
 /**
@@ -207,7 +207,7 @@ test("a turn sent in #general gets its reply there", async ({ page }) => {
   test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
 
   await openChannel(page, "general");
-  await expect(page).toHaveURL(/#\/chat\/general(?:[/?]|$)/);
+  await expect(page).toHaveURL(/#\/chat\/general-channel(?:[/?]|$)/);
   const before = await settledBubbleCount(page);
 
   const marker = `general-${Date.now()}`;
@@ -216,7 +216,7 @@ test("a turn sent in #general gets its reply there", async ({ page }) => {
   );
   await page.getByPlaceholder("Message #general").fill(marker);
   await page.keyboard.press("Enter");
-  expect((await sent).postDataJSON()).toMatchObject({ text: marker, chat: "general" });
+  expect((await sent).postDataJSON()).toMatchObject({ text: marker, chat: "general-channel" });
 
   await expect(reply(page, marker)).toHaveCount(1, { timeout: 60_000 });
   await expect(bubbles(page)).toHaveCount(before + 2);

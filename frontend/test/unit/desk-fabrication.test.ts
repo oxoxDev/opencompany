@@ -66,7 +66,7 @@ describe("a company with no desks (empty /desks answer)", () => {
   it("lists #general once when the host supplies it", () => {
     const desks: DeskDto[] = [
       { id: "engineering", name: "Engineering desk", members: [] },
-      { id: "general", name: "General", kind: "general", members: [], mutable: false },
+      { id: GENERAL_CHANNEL_ID, name: "General", kind: "general", members: [], mutable: false },
     ];
 
     expect(threadsFromDesks(desks).map((t) => t.id)).toEqual([
@@ -91,7 +91,7 @@ describe("a company with no desks (empty /desks answer)", () => {
       thread: GENERAL_CHANNEL_ID,
     } as ApprovalSummary;
     const general = deskFromDto({
-      id: "general",
+      id: GENERAL_CHANNEL_ID,
       name: "General",
       kind: "general",
       members: [],

@@ -174,13 +174,13 @@ test("a card raised in #general has origin `general` and links back to #general"
   const previousIds = new Set(((await before.json()) as Task[]).map((task) => task.id));
   const marker = Date.now();
   const posted = await request.post(`${API}/chat`, {
-    data: { text: `track the general launch SPAWNONE ${marker}`, chat: "general" },
+    data: { text: `track the general launch SPAWNONE ${marker}`, chat: "general-channel" },
   });
   expect(posted.ok(), await posted.text()).toBeTruthy();
 
   const card = await taskMatching(
     request,
-    (task) => task.originChatId === "general" && !previousIds.has(task.id),
+    (task) => task.originChatId === "general-channel" && !previousIds.has(task.id),
   );
 
   await page.goto(`/#/company/tasks/${card.id}`);
@@ -188,7 +188,7 @@ test("a card raised in #general has origin `general` and links back to #general"
   const origin = page.getByRole("button", { name: /Opened from chat/ });
   await expect(origin).toBeVisible({ timeout: 15_000 });
   await origin.click();
-  await expect(page).toHaveURL(/#\/chat\/general(?:[/?]|$)/);
+  await expect(page).toHaveURL(/#\/chat\/general-channel(?:[/?]|$)/);
 });
 
 /**
@@ -280,7 +280,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   const card = await taskMatching(
     request,
     (task) =>
-      task.originChatId === "general" &&
+      task.originChatId === "general-channel" &&
       task.title.includes(marker) &&
       !previousIds.has(task.id),
   );
@@ -307,14 +307,14 @@ test("a persisted chat card is rendered and rehydrated on the default lane", asy
   const href = `#/company/tasks/${taskId}`;
   await page.route("**/chat/history?*", async (route) => {
     const desk = new URL(route.request().url()).searchParams.get("desk");
-    if (desk !== "general") return route.continue();
+    if (desk !== "general-channel") return route.continue();
     return route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
       body: JSON.stringify([
         {
           id: "default-lane-card-message",
-          channel: "general",
+          channel: "general-channel",
           author: "orchestrator",
           text: "I opened a card for this request.",
           atMillis: Date.now(),

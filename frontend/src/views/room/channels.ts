@@ -265,8 +265,8 @@ export function dmChannelId(member: TeamMember): string {
  * The **host thread** a teammate's DM is addressed on — not always the same
  * string as {@link dmChannelId}, which is its console-local channel id.
  *
- * The bare teammate id, except for a teammate whose id is `general` or a
- * legacy spelling of it (`main`, any casing): the host reads those bare keys as
+ * The bare teammate id, except for a teammate whose id is `#general`'s id or a
+ * legacy spelling of it (`general`, `main`, any casing): the host reads those bare keys as
  * #general, so that DM is addressed prefixed, which `chat_responder` unwraps.
  * Every seam that turns a roster member into a thread id has to ask this — the
  * sender, the live thread → channel map, the rehydration targets and the

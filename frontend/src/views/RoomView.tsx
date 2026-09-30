@@ -1020,8 +1020,8 @@ export function RoomView({
       ? resolveDmChannelId(decodedSub, members)
       : null;
   /**
-   * `#/chat/main` or any casing of `#/chat/general` that names no channel of
-   * its own: an address minted before `#general` had the id `general`. It
+   * `#/chat/main`, `#/chat/general` or another casing of `#general`'s id that
+   * names no channel of its own: an address minted under an older id. It
    * resolves to `#general` here and the effect below replaces the address.
    */
   const generalSub =

@@ -37,7 +37,7 @@ const ROSTER = Array.from({ length: 17 }, (_, i) => ({
 const DESKS = [
   {
     // The host lists `#general` first: the whole roster, maintained server-side.
-    id: "general",
+    id: "general-channel",
     name: "General",
     kind: "general",
     mutable: false,
@@ -260,12 +260,12 @@ test("#general is not fabricated for a host with no desks surface", async ({ pag
   await expect(notice).toContainText("#general");
 });
 
-test("a legacy #/chat/main address is replaced with #/chat/general", async ({ page }) => {
+test("a legacy #/chat/main address is replaced with #/chat/general-channel", async ({ page }) => {
   await mockApi(page, () => "ok");
   await page.goto("/#/chat/main");
 
   await expect(page.getByPlaceholder("Message #general")).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/chat/general");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/chat/general-channel");
   await expect(page.getByRole("status").filter({ hasText: /isn't a channel here/ })).toHaveCount(0);
 });
 
