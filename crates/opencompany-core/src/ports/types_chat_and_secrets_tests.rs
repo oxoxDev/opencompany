@@ -261,7 +261,7 @@ fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
     let event = CompanyEvent::AgentReply {
         audience: Vec::new(),
         episode: None,
-        chat_id: "general".to_string(),
+        chat_id: "general-channel".to_string(),
         agent_id: "ceo".to_string(),
         text: "hi".to_string(),
         steps: Vec::new(),
@@ -274,7 +274,7 @@ fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
     let json = serde_json::to_string(&event).expect("serialize");
     assert_eq!(
         json,
-        r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#
+        r#"{"kind":"AgentReply","chat_id":"general-channel","agent_id":"ceo","text":"hi"}"#
     );
 }
 
@@ -571,7 +571,7 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "general".to_string(),
+        chat_id: "general-channel".to_string(),
         agent_id: "ceo".to_string(),
         text: "hi".to_string(),
         steps: Vec::new(),
@@ -588,7 +588,7 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "general".to_string(),
+        chat_id: "general-channel".to_string(),
         agent_id: "ceo".to_string(),
         text: "done".to_string(),
         steps: vec![TurnStep {

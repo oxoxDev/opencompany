@@ -933,7 +933,8 @@ pub enum CompanyEvent {
         /// migrating.
         ///
         /// Decoded on read: every legacy spelling of `#general` loads as
-        /// `"general"`. Absent means an unaddressed post, which is #general.
+        /// [`GENERAL_CHANNEL_ID`]. Absent means an unaddressed post, which is
+        /// #general.
         #[serde(
             default,
             deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
@@ -5177,14 +5178,15 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`GENERAL_CHANNEL_ID`] and the legacy `main` spelling join them: a teammate
-/// minted onto either would be addressed like #general.
-pub const RESERVED_AGENT_IDS: [&str; 6] = [
+/// [`GENERAL_CHANNEL_ID`] and the legacy `main` and `general` spellings join
+/// them: a teammate minted onto any of them would be addressed like #general.
+pub const RESERVED_AGENT_IDS: [&str; 7] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
     "main",
+    crate::ports::general_channel::LEGACY_GENERAL_CHANNEL_ID,
     GENERAL_CHANNEL_ID,
 ];
 

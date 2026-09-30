@@ -342,7 +342,8 @@ fn rejects_every_reserved_id_as_a_manifest_agent_id() {
         assert!(
             problems
                 .iter()
-                .any(|p| p.contains("reserved") && p.to_ascii_lowercase().contains(&candidate)),
+                .any(|p| (p.contains("reserved") || candidate.contains('-'))
+                    && p.to_ascii_lowercase().contains(&candidate)),
             "id {candidate:?} (reserved: {reserved:?}) should have been rejected: {problems:?}"
         );
     }

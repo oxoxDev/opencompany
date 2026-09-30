@@ -8,7 +8,17 @@ fn decode(line: &str) -> CompanyEvent {
 
 #[test]
 fn every_legacy_spelling_is_general() {
-    for spelling in ["", "general", "General", "GENERAL", "main", "Main"] {
+    assert_eq!(GENERAL_CHANNEL_ID, "general-channel");
+    for spelling in [
+        "",
+        "general",
+        "General",
+        "GENERAL",
+        "main",
+        "Main",
+        "general-channel",
+        "General-Channel",
+    ] {
         assert!(is_general_spelling(spelling), "{spelling:?}");
         assert_eq!(decode_general_chat_id(spelling.into()), GENERAL_CHANNEL_ID);
     }
@@ -108,4 +118,25 @@ fn a_legacy_teammate_called_main_keeps_its_dm_apart_from_general() {
         crate::runtime::delegation_tools::chat_responder(&record, GENERAL_CHANNEL_ID),
         None
     );
+}
+
+#[test]
+fn a_record_stored_under_the_legacy_id_loads_as_general_channel() {
+    let stored: GeneralChannel =
+        serde_json::from_str(r#"{"id":"general","name":"General","members":["ceo"]}"#)
+            .expect("a stored #general loads");
+    assert_eq!(stored.id, GENERAL_CHANNEL_ID);
+    assert_eq!(stored.name, GENERAL_CHANNEL_NAME);
+    assert_eq!(stored.members, vec!["ceo".to_string()]);
+
+    match decode(r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#) {
+        CompanyEvent::AgentReply { chat_id, .. } => assert_eq!(chat_id, GENERAL_CHANNEL_ID),
+        other => panic!("{other:?}"),
+    }
+    match decode(r#"{"kind":"OperatorMessage","text":"hi","chat":"general"}"#) {
+        CompanyEvent::OperatorMessage { chat, .. } => {
+            assert_eq!(chat.as_deref(), Some(GENERAL_CHANNEL_ID))
+        }
+        other => panic!("{other:?}"),
+    }
 }

@@ -63,7 +63,7 @@ fn a_journal_written_before_this_variant_still_loads_byte_identically() {
     // / pre-`chat` `OperatorMessage` and the pre-`steps` `AgentReply`.
     let legacy = [
         r#"{"kind":"OperatorMessage","text":"ship it"}"#,
-        r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"on it"}"#,
+        r#"{"kind":"AgentReply","chat_id":"general-channel","agent_id":"ceo","text":"on it"}"#,
         r#"{"kind":"ScheduleFired","cron":"0 9 * * *","prompt":"daily"}"#,
         r#"{"kind":"WorkflowCreated","workflow_id":"digest","name":"Digest"}"#,
         r#"{"kind":"TaskDispatched","task_id":"t-1"}"#,

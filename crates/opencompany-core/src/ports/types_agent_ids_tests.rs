@@ -45,7 +45,15 @@ fn mint_agent_id_never_returns_a_reserved_id() {
     assert_eq!(record.mint_agent_id("General"), "general_2");
     assert_eq!(
         RESERVED_AGENT_IDS,
-        ["operator", "agents", "desks", "system", "main", "general"]
+        [
+            "operator",
+            "agents",
+            "desks",
+            "system",
+            "main",
+            "general",
+            "general-channel"
+        ]
     );
 }
 

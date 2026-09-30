@@ -6,7 +6,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::ports::types::{Actor, CompanyEvent, CompanyRecord, OverlayAgent};
 
 /// The id of the company-wide channel, stamped on every message written to it.
-pub const GENERAL_CHANNEL_ID: &str = "general";
+pub const GENERAL_CHANNEL_ID: &str = "general-channel";
+
+/// The id `#general` was stored under before [`GENERAL_CHANNEL_ID`]; decoded
+/// onto it on read.
+pub const LEGACY_GENERAL_CHANNEL_ID: &str = "general";
 
 /// The display name of the company-wide channel.
 pub const GENERAL_CHANNEL_NAME: &str = "General";
@@ -19,6 +23,7 @@ pub const GENERAL_CHANNEL_NAME: &str = "General";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralChannel {
     /// Always [`GENERAL_CHANNEL_ID`].
+    #[serde(deserialize_with = "deserialize_general_chat")]
     pub id: String,
     /// Always [`GENERAL_CHANNEL_NAME`].
     pub name: String,
@@ -132,11 +137,14 @@ impl CompanyRecord {
     }
 }
 
-/// Whether `chat` is a legacy or current spelling of `#general`: its id, its
-/// display name, `main`, or the empty string, in any case.
+/// Whether `chat` is a legacy or current spelling of `#general`: its id,
+/// `general` (its legacy id and its display name), `main`, or the empty
+/// string, in any case.
 pub fn is_general_spelling(chat: &str) -> bool {
     chat.is_empty()
         || chat.eq_ignore_ascii_case(GENERAL_CHANNEL_ID)
+        || chat.eq_ignore_ascii_case(LEGACY_GENERAL_CHANNEL_ID)
+        || chat.eq_ignore_ascii_case(GENERAL_CHANNEL_NAME)
         || chat.eq_ignore_ascii_case("main")
 }
 

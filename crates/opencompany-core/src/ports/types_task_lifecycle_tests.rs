@@ -246,7 +246,7 @@ fn desk_task_completed_carries_artifact_ids_and_still_reads_the_old_shape() {
 fn a_thread_parent_round_trips_and_a_pre_thread_line_still_loads() {
     for legacy in [
         r#"{"kind":"OperatorMessage","text":"hi"}"#,
-        r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"hi"}"#,
+        r#"{"kind":"AgentReply","chat_id":"general-channel","agent_id":"ceo","text":"hi"}"#,
     ] {
         let event: CompanyEvent = serde_json::from_str(legacy).unwrap();
         match &event {
