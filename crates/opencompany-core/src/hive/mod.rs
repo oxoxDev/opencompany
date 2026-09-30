@@ -32,6 +32,10 @@ mod dm_episode_tests;
 /// The journal as the episode store: the `GET {scope}/episodes` fold, the
 /// driver checkpoint a resume reads, and the open-episode lookup (Phase 4).
 pub mod episode_store;
+/// `#general` driven end to end as an episode room.
+#[cfg(all(test, feature = "openhuman"))]
+#[path = "general_episode_tests.rs"]
+mod general_episode_tests;
 /// One `OpenHumanHive` per desk over the company's live agents (Phase 4).
 #[cfg(feature = "openhuman")]
 pub mod graph;
