@@ -335,7 +335,7 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
         .expect("the second card");
     assert_eq!(
         unaddressed.origin_chat_id(),
-        Some("general"),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID),
         "an unaddressed message is a #general conversation"
     );
     assert!(
@@ -652,5 +652,10 @@ async fn an_unaddressed_chat_is_stored_on_general() {
             _ => None,
         })
         .collect();
-    assert_eq!(chats, vec![Some("general".to_string())]);
+    assert_eq!(
+        chats,
+        vec![Some(
+            crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string()
+        )]
+    );
 }

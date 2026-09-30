@@ -28,7 +28,10 @@ async fn a_first_build_stores_general_with_the_whole_roster() {
         .unwrap();
 
     let stored = FsCompanyStore::new(home).load(&id).await.unwrap().unwrap();
-    assert_eq!(stored.general_channel.id, "general");
+    assert_eq!(
+        stored.general_channel.id,
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
     assert_eq!(stored.general_channel.name, "General");
     let roster: Vec<String> = stored
         .effective_agents()
@@ -66,7 +69,10 @@ async fn a_record_saved_without_general_is_backfilled_on_build() {
         .unwrap();
 
     let rebuilt = store.load(&id).await.unwrap().unwrap();
-    assert_eq!(rebuilt.general_channel.id, "general");
+    assert_eq!(
+        rebuilt.general_channel.id,
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
     let roster: Vec<String> = rebuilt
         .effective_agents()
         .into_iter()

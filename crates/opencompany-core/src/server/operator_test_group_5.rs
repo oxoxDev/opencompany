@@ -76,7 +76,10 @@ async fn desks_route_returns_the_company_desks() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let desks = value.as_array().unwrap();
     assert_eq!(desks.len(), 1, "only #general: {desks:?}");
-    assert_eq!(desks[0]["id"], "general");
+    assert_eq!(
+        desks[0]["id"],
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
     assert_eq!(desks[0]["kind"], "general");
     assert_eq!(desks[0]["mutable"], false);
 }

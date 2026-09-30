@@ -436,14 +436,15 @@ async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
     let CompanyEvent::AgentReply { chat_id, .. } = relays
         .iter()
         .find(
-            |event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == "general"),
+            |event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id == crate::ports::general_channel::GENERAL_CHANNEL_ID),
         )
         .expect("the empty-chat_id General relay must be present")
     else {
         unreachable!()
     };
     assert_eq!(
-        chat_id, "general",
+        chat_id,
+        crate::ports::general_channel::GENERAL_CHANNEL_ID,
         "a legacy empty chat_id reads back as #general"
     );
 }

@@ -302,13 +302,16 @@ fn a_continuation_with_no_conversation_answers_outside_every_chat() {
     // — visible to the person who approved, and never a teammate's DM.
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None))),
-        "general",
+        crate::ports::general_channel::GENERAL_CHANNEL_ID,
     );
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9")))),
-        "general",
+        crate::ports::general_channel::GENERAL_CHANNEL_ID,
     );
-    assert_eq!(super::continuation_fallback_chat_id(None), "general");
+    assert_eq!(
+        super::continuation_fallback_chat_id(None),
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
 }
 
 /// Issue #1092, the property that actually matters: a workflow park's
@@ -369,7 +372,11 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
     let unaddressed =
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None)));
     assert!(
-        owns("general", "General", &reply(unaddressed.clone())),
+        owns(
+            crate::ports::general_channel::GENERAL_CHANNEL_ID,
+            crate::ports::general_channel::GENERAL_CHANNEL_NAME,
+            &reply(unaddressed.clone())
+        ),
         "`{unaddressed}` must still be read as the operator's General line",
     );
 }

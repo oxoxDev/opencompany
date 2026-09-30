@@ -34,7 +34,7 @@ async fn add_agent_seats_the_new_teammate_in_general() {
             .filter_map(|stored| match stored.event {
                 crate::ports::types::CompanyEvent::DeskMembersChanged {
                     desk_id, added, ..
-                } if desk_id == "general" => Some(added),
+                } if desk_id == crate::ports::general_channel::GENERAL_CHANNEL_ID => Some(added),
                 _ => None,
             })
             .collect();

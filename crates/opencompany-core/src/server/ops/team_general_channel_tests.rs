@@ -77,7 +77,9 @@ async fn general_changes(state: &AppState) -> Vec<(Vec<String>, Vec<String>)> {
                 added,
                 removed,
                 ..
-            } if desk_id == "general" => Some((added, removed)),
+            } if desk_id == crate::ports::general_channel::GENERAL_CHANNEL_ID => {
+                Some((added, removed))
+            }
             _ => None,
         })
         .collect()

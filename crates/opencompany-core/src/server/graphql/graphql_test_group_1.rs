@@ -570,7 +570,10 @@ async fn chats_list_the_manifest_desks() {
         1,
         "a legacy `general` desk folds into #general: {chats:?}"
     );
-    assert_eq!(chats[0]["id"], "general");
+    assert_eq!(
+        chats[0]["id"],
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
     assert_eq!(chats[0]["kind"], "general");
     assert_eq!(chats[0]["members"][0], "maya");
 }

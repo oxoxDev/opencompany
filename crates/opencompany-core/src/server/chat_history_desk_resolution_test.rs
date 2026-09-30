@@ -151,7 +151,10 @@ async fn resolve_general_spelling_short_circuits_without_a_store_read() {
     // A legacy General spelling decodes to #general without reaching `load`.
     assert_eq!(
         resolve(RecordStore(None), Some("main")).await,
-        ("general".to_string(), "general".to_string())
+        (
+            crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string(),
+            crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string()
+        )
     );
 }
 

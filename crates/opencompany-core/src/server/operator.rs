@@ -2555,7 +2555,7 @@ struct ChatMessage {
     #[serde(alias = "message")]
     text: String,
     /// The desk the message is addressed to. Absent, empty, or any spelling
-    /// of `#general` is normalized to `"general"` by `chat_and_emit`.
+    /// of `#general` is normalized to `GENERAL_CHANNEL_ID` by `chat_and_emit`.
     #[serde(default)]
     chat: Option<String>,
     /// The message this one replies to, by its id (issue #364) — a thread reply

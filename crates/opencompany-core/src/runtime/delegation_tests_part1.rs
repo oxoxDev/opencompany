@@ -620,7 +620,10 @@ async fn a_desk_hand_off_opens_a_card_by_construction() {
         "the card belongs to the delegate"
     );
     assert_eq!(card.column, COLUMN_IN_REVIEW, "it settles for a person");
-    assert_eq!(card.origin_chat_id(), Some("general"));
+    assert_eq!(
+        card.origin_chat_id(),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID)
+    );
     assert!(
         card.note
             .as_deref()

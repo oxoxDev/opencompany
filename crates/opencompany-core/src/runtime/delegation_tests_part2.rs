@@ -197,7 +197,10 @@ async fn a_spawned_card_records_the_thread_that_queued_it() {
 
     let cards = fx.cards().await;
     assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(cards[0].origin_chat_id(), Some("general"));
+    assert_eq!(
+        cards[0].origin_chat_id(),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID)
+    );
     assert_eq!(cards[0].origin_parent(), Some(EventSeq::new(41)));
 }
 

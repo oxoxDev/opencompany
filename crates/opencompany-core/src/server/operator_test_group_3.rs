@@ -585,7 +585,7 @@ async fn desk_lifecycle_is_journaled() {
         .filter(|row| {
             matches!(
                 &row.event,
-                CompanyEvent::DeskMembersChanged { desk_id, .. } if desk_id != "general"
+                CompanyEvent::DeskMembersChanged { desk_id, .. } if desk_id != crate::ports::general_channel::GENERAL_CHANNEL_ID
             )
         })
         .count();
@@ -597,7 +597,7 @@ async fn desk_lifecycle_is_journaled() {
         rows.iter().any(|row| matches!(
             &row.event,
             CompanyEvent::DeskMembersChanged { desk_id, added, .. }
-                if desk_id == "general" && !added.is_empty()
+                if desk_id == crate::ports::general_channel::GENERAL_CHANNEL_ID && !added.is_empty()
         )),
         "the new teammate joins #general: {kinds:?}"
     );

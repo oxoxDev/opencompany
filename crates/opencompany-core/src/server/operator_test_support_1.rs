@@ -630,7 +630,8 @@ pub(super) async fn get_desks(app: &axum::Router, cookie: &str) -> serde_json::V
     let all = listed.as_array_mut().expect("a desk list");
     let general = all.remove(0);
     assert_eq!(
-        general["id"], "general",
+        general["id"],
+        crate::ports::general_channel::GENERAL_CHANNEL_ID,
         "#general is listed first: {general}"
     );
     assert_eq!(general["kind"], "general");

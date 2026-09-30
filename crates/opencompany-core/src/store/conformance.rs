@@ -6583,11 +6583,21 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
     // being absent is not the same as it matching.
 
     let chat = runs
-        .create_run(&alpha, NewRun::for_chat("t1", "general", "ceo"))
+        .create_run(
+            &alpha,
+            NewRun::for_chat(
+                "t1",
+                crate::ports::general_channel::GENERAL_CHANNEL_ID,
+                "ceo",
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(chat.task_id, None);
-    assert_eq!(chat.chat_id.as_deref(), Some("general"));
+    assert_eq!(
+        chat.chat_id.as_deref(),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID)
+    );
     assert_eq!(
         chat.attempt, 1,
         "with no card there is nothing for a second attempt to be the second of"
@@ -6595,7 +6605,14 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
     assert_eq!(runs.get_run(&alpha, "t1").await.unwrap(), Some(chat));
 
     let second_chat = runs
-        .create_run(&alpha, NewRun::for_chat("t2", "general", "ceo"))
+        .create_run(
+            &alpha,
+            NewRun::for_chat(
+                "t2",
+                crate::ports::general_channel::GENERAL_CHANNEL_ID,
+                "ceo",
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -6672,7 +6689,7 @@ pub fn assert_legacy_run_row_loads() {
     // row is byte-identical to the ones already on disk.
     let card_less = RunRecord {
         task_id: None,
-        chat_id: Some("general".to_string()),
+        chat_id: Some(crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string()),
         ..loaded
     };
     let written = serde_json::to_value(&card_less).unwrap();
@@ -6816,9 +6833,16 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
     runs.create_run(&gamma, NewRun::for_task("g1", "card", "engineer"))
         .await
         .unwrap();
-    runs.create_run(&gamma, NewRun::for_chat("g2", "general", "engineer"))
-        .await
-        .unwrap();
+    runs.create_run(
+        &gamma,
+        NewRun::for_chat(
+            "g2",
+            crate::ports::general_channel::GENERAL_CHANNEL_ID,
+            "engineer",
+        ),
+    )
+    .await
+    .unwrap();
     runs.create_run(&gamma, NewRun::for_task("g3", "card", "ceo"))
         .await
         .unwrap();
