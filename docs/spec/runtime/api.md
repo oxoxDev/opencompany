@@ -106,32 +106,39 @@ drop-safety. See
 
 ### The built-in `#general` channel
 
-Every company has a company-wide channel with the id `general` and the name
-`General`. It is created with the company, stored with the company record
+Every company has a company-wide channel with the id `general-channel` and the
+name `General`. It is created with the company, stored with the company record
 (`CompanyRecord.general_channel`), and backfilled on boot for a company that
 predates it.
 
 **Membership follows the roster.** Hiring a teammate adds them to `#general`,
 and retiring or removing one takes them out. Each change is journaled as a
-`DeskMembersChanged` row with `desk_id: "general"`. `@everyone` posted here
+`DeskMembersChanged` row with `desk_id: "general-channel"`. `@everyone` posted here
 expands to those members. It is still a **list, not a fan-out**: one operator
 message spawns one turn, whatever it names.
 
 **`GET …/desks` lists it first**, as
-`{id: "general", name: "General", kind: "general", mutable: false, members}`.
+`{id: "general-channel", name: "General", kind: "general", mutable: false, members, routing}`,
+where `routing` is its read-only routing summary (3 seats a round, 6 rounds).
 Every other row carries `kind: "desk"` and `mutable: true`. GraphQL `chats`
 lists it first too, with `kind: "general"`.
 
 **Addressing.** `POST …/chat` with no `chat` is a post to `#general`, and
 `GET …/chat/history` with no `desk` reads it. Nothing rewrites the journal.
 Instead, every stored chat id is decoded on read, so rows written as `""`,
-`main` or `General` (in any case) load as `general`, and a legacy row with no
-chat id reads as #general. Every new post, addressed or not, is stored with
-`chat: "general"` when it names #general. A continuation of an approval parked by
+`main` or `general` (in any case) load as `general-channel`, and a legacy row
+with no chat id reads as #general. A record, task origin or run stored under
+`general` decodes the same way, so an existing company needs no migration, and a
+client still posting `chat: "general"` lands in #general. Every new post,
+addressed or not, is stored with `chat: "general-channel"` when it names
+#general. A continuation of an approval parked by
 a workflow run answers on that run, not in the conversation that started it.
 
-**Who answers a message that mentions nobody:** the orchestrator, in one turn.
-An `@`-mention overrides that, just as it does in a desk channel. `general` and
+**Who answers a message that mentions nobody:** the team, as a hive episode
+([hive.md](hive.md)): routing picks who takes it and the orchestrator leads when
+no one fits. With `OPENCOMPANY_GENERAL_EPISODES=0`, or fewer than two bound
+members, the orchestrator answers in one turn. An `@`-mention picks who answers
+first, just as it does in a desk channel. `general-channel`, `general` and
 `main` are reserved agent ids. A legacy teammate that already has one does not
 take over the channel: the console addresses its DM as `dm:<id>`.
 
@@ -140,10 +147,11 @@ returns `409` and a sentence (never a bare `404`):
 
 | write | answer |
 |---|---|
-| `DELETE …/desks/general` (or a legacy spelling) | `409` |
-| `POST …/desks/general/members` | `409` — membership follows the roster |
-| `DELETE …/desks/general/members/{agentId}` | `409` |
-| `PUT …/desks/general/order` | `409` |
+| `DELETE …/desks/general-channel` (or a legacy spelling) | `409` |
+| `POST …/desks/general-channel/members` | `409` — membership follows the roster |
+| `DELETE …/desks/general-channel/members/{agentId}` | `409` |
+| `PUT …/desks/general-channel/order` | `409` |
+| `PUT …/desks/general-channel/routing` | `409` |
 | `POST …/desks` with a General id or display name | `409` — reserved |
 
 **Manifests.** A `[[group_chat]]` whose id or name is a General spelling is

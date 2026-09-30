@@ -5,9 +5,9 @@ the message opens an **episode**, the room runs it in **rounds** of concurrent
 turns, seats talk to each other by posting, broadcasting and DMing, and the
 episode ends when a seat reports the work complete.
 
-That is the whole story for a `[[group_chat]]` of two or more members. A desk
-of one, a DM, the General line and a workflow copilot thread run one ordinary
-turn, exactly as they always did.
+That is the whole story for a `[[group_chat]]` of two or more members, for
+`#general`, and for an operator DM. A desk of one, a message with no chat id
+and a workflow copilot thread run one ordinary turn.
 
 The mechanics come from [`tinyhivemind`](https://github.com/tinyhumansai/tinyhivemind)
 (`vendor/tinyhivemind`) and its `tinyhivemind-openhuman` adapter, which binds
@@ -54,14 +54,26 @@ one process ── one openhuman_embed::Runtime
 
 | Surface (`ConversationRef.kind`) | What runs |
 | --- | --- |
-| `Direct` (`dm:<agent>` or a bare roster id) | one turn on that agent |
-| `General` (`""`, `main`, `general`, `General`) | one turn on `delegation_tools::chat_responder` |
+| `Direct` (`dm:<agent>` or a bare roster id) | an **episode** led by that agent when DM episodes are on (`OPENCOMPANY_DM_EPISODES`, default on), else one turn on it |
+| `General` (chat id exactly `general-channel`; a legacy `general`, `main` or `""` is decoded onto it first) | an **episode** in `#general`'s room when it binds two or more seats and `OPENCOMPANY_GENERAL_EPISODES` is not `0`/`false`/`no`/`off`, else one turn on the orchestrator |
+| No chat id (`POST …/chat` never produces one: it addresses `#general`) | one turn on `delegation_tools::chat_responder` |
 | `Workflow` (a copilot thread) | one **confined** turn (`confine.rs`); returns before this gate |
 | `Desk`, one effective member | one ordinary turn; a bare reply is salvaged as a `post` and the episode auto-completes |
 | `Desk`, two or more members | an **episode** |
 
-`route_message` answers `Fallback` for the first three: no Jev, no driver, one
-ordinary turn, journaled as `AgentReply`. `@mention` resolution is
+Every single-turn row gets no Jev and no driver: one ordinary turn, journaled
+as `AgentReply`.
+
+`#general`'s room (`hive::graph::general_hive`) is the tinyhivemind desk
+`general-channel`, named `General Channel` because the library refuses a desk
+named `general` or `main`. It seats `#general`'s members —
+the non-retired roster, or the whole roster when a record has not synced them
+yet — with the orchestrator first, so it leads when routing picks nobody. It
+runs under `RoutingConfig::general()` (3 seats a round, 6 rounds) unless an
+operator installed a block; the console shows that summary read-only. A
+`#general` seat, like every episode seat, carries none of
+`EPISODE_WITHHELD_TOOLS` (`spawn_task`, `delegate_to_desk`,
+`delegate_to_teammate`, `assign_task`, `review_task`). `@mention` resolution is
 `tinyhivemind_core::mention::{resolve, direct_responder, mentioned_members}` on
 every surface.
 

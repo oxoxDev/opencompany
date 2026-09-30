@@ -48,10 +48,10 @@ addressed or stored under one.
 ## `#general` — the company-wide channel
 
 `#general` comes from the host like every other channel: `GET .../desks` lists it
-first, with `id: "general"`, `kind: "general"` and `mutable: false`. Its id is
-also its thread id — sends address `chat: "general"`, history reads
-`?desk=general`, and live frames, notifications and card origins all carry
-`general`. `buildChannels` pins it first in the Channels section.
+first, with `id: "general-channel"`, `kind: "general"` and `mutable: false`. Its
+id is also its thread id — sends address `chat: "general-channel"`, history
+reads `?desk=general-channel`, and live frames, notifications and card origins
+all carry `general-channel`. It still displays as `#general`. `buildChannels` pins it first in the Channels section.
 
 **Its membership is the roster**, kept by the host: adding, removing or retiring
 a teammate updates it server-side and journals a `DeskMembersChanged`, so the
@@ -62,17 +62,19 @@ badge (`leadless`). The org chart, the Overview graph, the Comms graph and the
 assignee picker leave it out — it is the whole roster, not a desk in the
 hierarchy.
 
-**An unmentioned message is answered by the orchestrator**; the purpose line
-under the title says so by name when `GET .../team` reports `isOrchestrator`.
+**An unmentioned message is answered by the team** as a hive episode, with the
+orchestrator leading when no one fits; the purpose line under the title says so
+by name when `GET .../team` reports `isOrchestrator`. The round band and
+completion marker render here as on any desk.
 `@everyone` here reaches every member.
 
 **Legacy addresses** — `#/chat/main` and any casing of `#/chat/general` that
-names no channel — are replaced (not pushed) with `#/chat/general`. A remembered
-last channel or a read floor stored under `main`/`General` is read as `general`
-(`migrateLegacyGeneralId`).
+names no channel — are replaced (not pushed) with `#/chat/general-channel`. A
+remembered last channel or a read floor stored under `main`/`general` is read as
+`general-channel` (`migrateLegacyGeneralId`).
 
-**A teammate whose id is `general`** keeps its DM under `dm:general`
-(`dmThreadId`), because the bare key addresses the channel.
+**A teammate whose id is `general-channel`, `general` or `main`** keeps its DM
+under `dm:<id>` (`dmThreadId`), because the bare key addresses the channel.
 
 ## What is real and what is console-local
 
