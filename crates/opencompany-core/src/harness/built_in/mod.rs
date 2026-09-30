@@ -5950,8 +5950,9 @@ pub(crate) fn seat_persona(
     // **The hand-off tools come off an episode seat's belt.**
     //
     // `spawn_task`, `delegate_to_desk` and `delegate_to_teammate` are wired
-    // onto every roster agent (`build.rs`), and each queues work the
-    // [`HarnessBrain`] drains. Inside an episode nothing drains that queue,
+    // onto every roster agent (`build.rs`), `assign_task` and `review_task`
+    // onto the orchestrator, and each queues work the [`HarnessBrain`]
+    // drains. Inside an episode nothing drains that queue,
     // so the orchestrator refuses the call in the model's own turn rather
     // than parking it forever (`drain_unwired`).
     //
@@ -6011,7 +6012,7 @@ pub(crate) fn seat_persona(
     // name. `ledger_brief` prints every native ledger's `written_by`, and the
     // board's says "`spawn_task` to open a card, `assign_task` to hand it
     // over" -- true of the company, and false of a seat whose belt was just
-    // stripped of the first. The strip above is by exact match on two known
+    // stripped of both. The strip above is by exact match on two known
     // blocks and could not see a third.
     //
     // A live run paid for it. The claimer read the catalogue, went looking,
@@ -6052,11 +6053,16 @@ pub(crate) fn seat_persona(
 
 /// The roster tools an episode seat is **not** built with.
 ///
-/// Every one of these queues work for the [`HarnessBrain`] to drain, and no
-/// brain drains inside an episode. See `build_episode_seat` for why they are
-/// withheld rather than left to refuse.
-pub(crate) const EPISODE_WITHHELD_TOOLS: [&str; 3] =
-    ["spawn_task", "delegate_to_desk", "delegate_to_teammate"];
+/// Every one of these queues work on the company-wide delegation queue for the
+/// [`HarnessBrain`] to drain, and no brain drains inside an episode. See
+/// `build_episode_seat` for why they are withheld rather than left to refuse.
+pub(crate) const EPISODE_WITHHELD_TOOLS: [&str; 5] = [
+    "spawn_task",
+    "delegate_to_desk",
+    "delegate_to_teammate",
+    "assign_task",
+    "review_task",
+];
 
 pub(crate) fn build_roster(
     runtime: &openhuman_embed::Runtime,

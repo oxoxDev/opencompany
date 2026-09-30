@@ -122,32 +122,15 @@ pub fn written_by_note(spec: &crate::ledger::LedgerSpec) -> String {
     format!(" _(read-only here: {})_", spec.written_by)
 }
 
-/// What replaces it for a seat inside an episode.
+/// What replaces it for a seat inside an episode, where every board-writing
+/// verb is withheld (`EPISODE_WITHHELD_TOOLS`) and `ask` is how work moves.
 ///
-/// The standing line names both verbs that write the board, and only one of
-/// them is off this belt: `EPISODE_WITHHELD_TOOLS` takes `spawn_task`, while
-/// `assign_task` is the orchestrator's and stays. The swap runs for every
-/// episode seat, the orchestrator's included, so a sentence denying both
-/// would tell that seat it cannot hand a card over when it can -- the same
-/// defect this exists to remove, pointed the other way. It therefore claims
-/// only what is true of every seat: the verb that *opens* a card is gone.
-///
-/// A live run shows what leaving the standing line costs: the claimer read
-/// the catalogue, went looking for `spawn_task`, told the operator "opening
-/// the task card on the board isn't something I can do directly from here",
-/// and invented a route through another teammate.
-///
-/// The registry line stays as it is -- it describes the company, and
-/// `registry_tests` holds it to naming those verbs on purpose. What changes
-/// is what an episode seat is shown in its place.
-///
-/// Takes the prefix for the reason every note here does: the belt carries
-/// `desk_ask`, and a note that says `ask` names a tool the seat cannot see.
+/// Takes the prefix the seat's belt carries, so the note names `desk_ask`.
 #[must_use]
 pub fn episode_written_by_note(prefix: &str) -> String {
     format!(
-        " _(read-only here, and the verb that opens a card is not on your belt inside an \
-         episode either. `{prefix}ask` the teammate who should do the work instead.)_"
+        " _(read-only here, and the board's verbs are not on your belt inside an episode \
+         either. `{prefix}ask` the teammate who should do the work instead.)_"
     )
 }
 

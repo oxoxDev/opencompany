@@ -718,19 +718,10 @@ fn the_boards_catalogue_line_is_replaceable_and_its_episode_form_promises_nothin
          {episode}"
     );
 
-    // **And it must not deny a verb the seat still has.**
-    //
-    // `assign_task` is the orchestrator's and is not withheld, while this
-    // swap runs for every episode seat including that one. A sentence saying
-    // the card verbs are gone would tell the orchestrator it cannot hand a
-    // card over when it can -- the same defect, pointed the other way, and
-    // the withheld-direction assertions above cannot see it.
-    assert!(
-        !episode.contains("hand"),
-        "the note claims only that opening a card is gone, never handing one over: {episode}"
-    );
-    assert!(
-        !episode.contains("assign_task") && !episode.contains("desk_assign_task"),
-        "`assign_task` survives an episode on the orchestrator's belt: {episode}"
-    );
+    for verb in ["assign_task", "review_task"] {
+        assert!(
+            crate::harness::built_in::EPISODE_WITHHELD_TOOLS.contains(&verb),
+            "`{verb}` pushes to the company-wide delegation queue, so no seat carries it"
+        );
+    }
 }
