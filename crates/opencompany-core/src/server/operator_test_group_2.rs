@@ -493,6 +493,38 @@ async fn list_desks_hides_an_overlay_desk_shadowing_general() {
     assert!(ids.contains(&"studio"), "unrelated desk dropped: {ids:?}");
 }
 
+/// `#general` carries its routing summary: the `#general` defaults, from no
+/// installed block.
+#[tokio::test]
+async fn list_desks_gives_general_its_default_routing_summary() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, desk_manifest()).await;
+    let app = router(state);
+    let cookie = crate::server::test_support::fixed_cookie("acme");
+
+    let listed = get_desk_list(&app, &cookie).await;
+    let general = &listed.as_array().expect("a desk list")[0];
+    assert_eq!(
+        general["id"],
+        crate::ports::general_channel::GENERAL_CHANNEL_ID
+    );
+    let routing = &general["routing"];
+    assert_eq!(routing["source"], "default", "{general}");
+    assert_eq!(
+        routing["roundWidth"],
+        crate::hive::routing::GENERAL_ROUND_WIDTH
+    );
+    assert_eq!(
+        routing["maxRounds"],
+        crate::hive::routing::GENERAL_MAX_ROUNDS
+    );
+    assert_eq!(
+        routing["router"],
+        serde_json::to_value(crate::hive::routing::host_router()).unwrap()
+    );
+}
+
 /// Every desk mutation aimed at a bare General spelling — no legacy
 /// overlay row at all — is refused with a reason, under **every** spelling
 /// the host folds into the General conversation (issue #1743; restored PR

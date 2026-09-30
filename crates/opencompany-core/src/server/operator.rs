@@ -309,7 +309,7 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
                 overlay_members: Vec::new(),
                 responder: ResponderMode::Lead,
                 overlay_created: false,
-                routing: None,
+                routing: desk_routing_summary(&record, &general.id, router),
             };
             std::iter::once(general)
                 .chain(manifest_desks)
