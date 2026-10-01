@@ -94,6 +94,12 @@ Results are cached per URL (512 entries). The console renders nothing that is
 not already inline, so opening Discover makes no request to a publisher's host
 from the operator's browser.
 
+The registry gives most first-party servers no title and no icon, so the
+official thirteen are named, and given their GitHub organisation avatar as a
+logo, from the brand table in `catalogue`. Any other entry whose name is only
+`mcp` or `server` is shown under its publisher namespace (`com.acme/mcp` →
+"Acme").
+
 ### Delete dispatches
 
 `DELETE …/mcp/servers/{name}` removes what the row actually has: the
