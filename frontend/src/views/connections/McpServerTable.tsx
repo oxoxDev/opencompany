@@ -362,23 +362,23 @@ function NameButton({
 }
 
 const HEADERS: { label: string; className: string }[] = [
-  { label: "Server", className: "" },
-  { label: "Source", className: "hidden w-28 md:table-cell" },
-  { label: "Status", className: "w-32 sm:w-40" },
-  { label: "Reach", className: "hidden w-48 md:table-cell" },
-  { label: "", className: "w-28 sm:w-52" },
+  { label: "Server", className: "w-full" },
+  { label: "Source", className: "hidden md:table-cell" },
+  { label: "Status", className: "" },
+  { label: "Reach", className: "hidden lg:table-cell" },
+  { label: "", className: "" },
 ];
 
 export function McpServerTable({ children }: { children: React.ReactNode }) {
   return (
     <div className="overflow-hidden rounded-lg border border-border">
-      <table className="w-full table-fixed border-collapse text-sm">
+      <table className="w-full border-collapse text-sm">
         <thead>
           <tr>
             {HEADERS.map((head, i) => (
               <th
                 key={head.label || `spacer-${i}`}
-                className={`border-b border-border px-3 py-2.5 text-left text-3xs font-medium tracking-wide text-muted-foreground uppercase first:pl-4 last:pr-4 ${head.className}`}
+                className={`border-b border-border px-3 py-2.5 text-left text-3xs font-medium tracking-wide whitespace-nowrap text-muted-foreground uppercase first:pl-4 last:pr-4 ${head.className}`}
               >
                 {head.label}
               </th>
@@ -402,7 +402,7 @@ export function McpServerRow(props: McpServerItemProps) {
       onClick={(event) => openFromItem(event, open)}
       className="cursor-pointer transition-colors select-none hover:bg-muted/40"
     >
-      <td className="border-b border-border py-3 pr-3 pl-4 align-middle">
+      <td className="w-full max-w-0 border-b border-border py-3 pr-3 pl-4 align-middle">
         <div className="flex min-w-0 items-center gap-2">
           <McpServerIcon iconUrl={server.iconUrl} name={server.name} />
           <div className="min-w-0">
@@ -410,15 +410,15 @@ export function McpServerRow(props: McpServerItemProps) {
           </div>
         </div>
       </td>
-      <td className="hidden border-b border-border px-3 py-3 align-middle md:table-cell">
+      <td className="hidden border-b border-border px-3 py-3 align-middle whitespace-nowrap md:table-cell">
         <Badge variant={badge.variant} data-testid="mcp-source-badge">
           {badge.label}
         </Badge>
       </td>
-      <td className="border-b border-border px-3 py-3 align-middle">
+      <td className="border-b border-border px-3 py-3 align-middle whitespace-nowrap">
         <StatusCell {...props} />
       </td>
-      <td className="hidden border-b border-border px-3 py-3 align-middle md:table-cell">
+      <td className="hidden max-w-48 border-b border-border px-3 py-3 align-middle lg:table-cell">
         {bridge === "absent" || reach === undefined || !server.enabled ? (
           <span className="text-xs text-muted-foreground">—</span>
         ) : (
