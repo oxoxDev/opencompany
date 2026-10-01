@@ -247,3 +247,53 @@ fn a_directory_install_is_named_by_a_slug_of_its_shown_name() {
     );
     assert_eq!(directory_server_name("  — ").as_deref(), None);
 }
+
+fn existing(rows: &[(&str, &str)]) -> Vec<(String, Option<String>)> {
+    rows.iter()
+        .map(|(name, endpoint)| (name.to_string(), Some(endpoint.to_string())))
+        .collect()
+}
+
+#[test]
+fn an_install_takes_the_slug_of_its_shown_name() {
+    assert_eq!(
+        install_name_for(
+            "Notion",
+            "com.notion/mcp",
+            Some("https://mcp.notion.com/mcp"),
+            &[]
+        ),
+        InstallName::Free("notion".to_string())
+    );
+}
+
+#[test]
+fn installing_a_server_already_declared_at_that_endpoint_is_refused() {
+    let rows = existing(&[("notion", "https://mcp.notion.com/mcp")]);
+    assert_eq!(
+        install_name_for(
+            "Notion",
+            "com.notion/mcp",
+            Some("https://mcp.notion.com/mcp"),
+            &rows
+        ),
+        InstallName::AlreadyInstalled("notion".to_string())
+    );
+}
+
+#[test]
+fn a_name_clash_with_another_server_is_numbered_not_replaced_by_the_qualified_name() {
+    let rows = existing(&[
+        ("notion", "https://my-notion.example/mcp"),
+        ("notion-2", "https://other.example/mcp"),
+    ]);
+    assert_eq!(
+        install_name_for(
+            "Notion",
+            "com.notion/mcp",
+            Some("https://mcp.notion.com/mcp"),
+            &rows
+        ),
+        InstallName::Free("notion-3".to_string())
+    );
+}

@@ -31,6 +31,7 @@ use tinymcp::registry::curation::OFFICIAL_SERVERS;
 
 use crate::company::mcp::load_runtime_index;
 use crate::company::mcp::{McpHealth, stdio_install_refusal};
+use crate::company::mcp_endpoint::normalize_endpoint;
 use crate::company::mcp_server_info::{self, fetch_icon};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
@@ -44,9 +45,9 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
 use super::catalogue::{
-    brand_logo, brand_name, browse_upstream_page, catalogue_detail, catalogue_search,
-    directory_server_name, featured_entry, featured_page, health_from_status, inline_icon,
-    inline_icons, rank_catalogue, shift_browse_page,
+    InstallName, brand_logo, brand_name, browse_upstream_page, catalogue_detail, catalogue_search,
+    featured_entry, featured_page, health_from_status, inline_icon, inline_icons, install_name_for,
+    rank_catalogue, shift_browse_page,
 };
 
 // ---------------------------------------------------------------------------
@@ -379,7 +380,7 @@ pub(super) async fn install(
         )))
         .into_response();
     };
-    let name = match install_name(runtime, &detail.display_name, &qualified_name).await {
+    let name = match install_name(runtime, &detail.display_name, &qualified_name, &endpoint).await {
         Ok(name) => name,
         Err(error) => return error.into_response(),
     };
@@ -402,29 +403,35 @@ pub(super) async fn install(
     declared.into_response()
 }
 
-/// The readable slug of the entry's name, or its qualified name when this
-/// company already has a server called that.
+/// The name a directory install is saved under, or the refusal when this
+/// company already declares a server at the same endpoint.
 async fn install_name(
     runtime: &CompanyRuntime,
     display_name: &str,
     qualified_name: &str,
+    endpoint: &str,
 ) -> Result<String, ApiError> {
-    let Some(slug) = directory_server_name(display_name) else {
-        return Ok(qualified_name.to_string());
-    };
     let manifest = manifest_servers(runtime).await?;
     let index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
-    let taken = manifest
+    let existing: Vec<(String, Option<String>)> = manifest
         .iter()
         .chain(index.iter())
-        .any(|server| server.name.trim() == slug);
-    Ok(if taken {
-        qualified_name.to_string()
-    } else {
-        slug
-    })
+        .map(|server| {
+            (
+                server.name.trim().to_string(),
+                normalize_endpoint(&server.endpoint),
+            )
+        })
+        .collect();
+    let endpoint = normalize_endpoint(endpoint);
+    match install_name_for(display_name, qualified_name, endpoint.as_deref(), &existing) {
+        InstallName::Free(name) => Ok(name),
+        InstallName::AlreadyInstalled(name) => Err(ApiError(OpenCompanyError::Conflict(format!(
+            "this server is already installed as `{name}`."
+        )))),
+    }
 }
 
 /// Keeps the directory's name and logo on the installed server wherever the

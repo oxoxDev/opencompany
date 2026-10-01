@@ -275,6 +275,42 @@ pub(in crate::server::ops) fn directory_server_name(display_name: &str) -> Optio
     (!slug.is_empty()).then(|| slug.to_string())
 }
 
+/// What a directory install is saved as, given the company's existing servers
+/// as `(name, normalized endpoint)` pairs.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::server::ops) enum InstallName {
+    /// A name nothing else uses.
+    Free(String),
+    /// A server already dials this endpoint, under this name.
+    AlreadyInstalled(String),
+}
+
+/// Picks the name for a directory install: refused when the same endpoint is
+/// already declared, otherwise the slug of its shown name, numbered on a clash.
+pub(in crate::server::ops) fn install_name_for(
+    display_name: &str,
+    qualified_name: &str,
+    endpoint: Option<&str>,
+    existing: &[(String, Option<String>)],
+) -> InstallName {
+    if let Some((name, _)) = existing
+        .iter()
+        .find(|(_, other)| endpoint.is_some() && other.as_deref() == endpoint)
+    {
+        return InstallName::AlreadyInstalled(name.clone());
+    }
+    let base = directory_server_name(display_name).unwrap_or_else(|| qualified_name.to_string());
+    let taken = |candidate: &str| existing.iter().any(|(name, _)| name == candidate);
+    if !taken(&base) {
+        return InstallName::Free(base);
+    }
+    let numbered = (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or(base);
+    InstallName::Free(numbered)
+}
+
 fn is_generic_name(name: &str) -> bool {
     name.split(|c: char| c.is_whitespace() || c == '-' || c == '_')
         .filter(|word| !word.is_empty())
