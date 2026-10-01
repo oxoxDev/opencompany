@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { openOutward } from "@/lib/external-links";
+import { openInNewTab, openOutward } from "@/lib/external-links";
 import {
   AlertTriangle,
   FileJson,
@@ -424,7 +424,7 @@ export function McpServersSection({
       // so the authorization page never opens.
       let opened = openOutward(authorizeUrl);
       if (!opened) {
-        opened = window.open(authorizeUrl, "_blank", "noopener,noreferrer") !== null;
+        opened = openInNewTab(authorizeUrl);
       }
       setSignIns((s) => ({
         ...s,
