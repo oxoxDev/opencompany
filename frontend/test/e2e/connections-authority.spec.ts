@@ -201,10 +201,9 @@ test("a member sees what is connected but is offered nothing that changes it", a
     await expect(memberPage.getByTestId("mcp-read-only")).toBeVisible({ timeout: 30_000 });
     await expect(memberPage.getByTestId("mcp-add-open")).toHaveCount(0);
     await expect(memberPage.locator("#mcp-name")).toHaveCount(0);
-    await expect(memberPage.locator("#mcp-token")).toHaveCount(0);
     // The document is the other way to write the same store, so it must refuse
     // a member too — read-only, and with no Save to press.
-    await memberPage.getByTestId("mcp-tab-json").click();
+    await memberPage.getByTestId("mcp-json-open").click();
     await expect(memberPage.getByTestId("mcp-json-text")).toHaveAttribute("readonly", "");
     await expect(memberPage.getByTestId("mcp-json-save")).toHaveCount(0);
 
@@ -300,7 +299,7 @@ test("an admin is still offered every control across the four pages", async ({ p
   await expect(page.locator("#mcp-name")).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("mcp-add-dialog")).toHaveCount(0);
-  await page.getByTestId("mcp-tab-json").click();
+  await page.getByTestId("mcp-json-open").click();
   await expect(page.getByTestId("mcp-json-revert")).toBeVisible();
 
   // The same control the member case asserts is disabled, enabled here — which

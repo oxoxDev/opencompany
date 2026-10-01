@@ -23,10 +23,9 @@ import { LIVE_BRAIN } from "./capabilities";
  * (`deepwiki`) in its manifest, so the list is never empty here, and the add /
  * remove half exercises the runtime source against the routes the host serves.
  *
- * The redesign moved where three of these readings live: the section heading is
- * `Your servers`, a row's endpoint is behind its own disclosure, and a row's
- * secondary controls are behind an overflow menu. Every claim below is the one
- * it was before — read from where the page now keeps it.
+ * Where these readings live: a row opens the server's own page, its endpoint
+ * and connection facts sit in that page's details pop-up, and a row's
+ * secondary controls are behind an overflow menu.
  * Live probing (`Test`) and tool discovery (`Tools`) need the `openhuman`
  * feature and report `not_wired` on this build, so they are deliberately not
  * driven here.
@@ -94,12 +93,15 @@ test("the MCP page lists the company's servers instead of crashing on open", asy
   await expect(manifest).toBeVisible();
   await expect(manifest.getByTestId("mcp-source-badge")).toHaveText("manifest");
 
-  // The endpoint is still the host's, and still asserted — the row keeps it in
-  // its own disclosure now rather than as a second line in a cell.
-  await manifest.getByTestId("mcp-row-expander").click();
-  await expect(page.getByTestId("mcp-row-detail")).toContainText(
+  // The endpoint is still the host's, and still asserted — from the server's
+  // details pop-up rather than a cell in the list.
+  await manifest.getByTestId("mcp-server-open").click();
+  await page.getByTestId("mcp-page-details-open").click();
+  await expect(page.getByTestId("mcp-page-details")).toContainText(
     "https://mcp.deepwiki.com/mcp",
   );
+  await page.keyboard.press("Escape");
+  await page.getByTestId("mcp-page-back").click();
 
   // Issue #567: the screen states what this deployment can do with these
   // servers. Asserted from both sides, because the failure being fixed is a
@@ -148,29 +150,35 @@ test("a server opens into its own page, not a row that grew", async ({
   await expect(page.getByTestId("mcp-server-row")).toHaveCount(0);
   await expect(panel.getByTestId("mcp-page-back")).toBeVisible();
 
-  await expect(panel).toContainText("https://mcp.deepwiki.com/mcp");
+  // Connection facts live in a pop-up, not at the foot of the page.
+  await expect(page.getByTestId("mcp-page-details")).toHaveCount(0);
+  await panel.getByTestId("mcp-page-details-open").click();
+  const details = page.getByTestId("mcp-page-details");
+  await expect(details).toContainText("https://mcp.deepwiki.com/mcp");
 
   // The manifest server the harness declares has never been probed on this
   // host: `Test` needs the `openhuman` feature and reports `not_wired` here. So
   // this is the case with no honest single-badge rendering — not reachable, not
   // broken — and the panel has to say which.
-  await expect(panel.getByTestId("mcp-page-probe")).toContainText(
+  await expect(details.getByTestId("mcp-page-probe")).toContainText(
     "has not been probed",
   );
 
   // MCP records no connect, the same answer the native path gets and for the
   // same reason. A blank here reads as "never connected".
-  await expect(panel.getByTestId("mcp-page-connected-on")).toContainText(
+  await expect(details.getByTestId("mcp-page-connected-on")).toContainText(
     "connection date not recorded",
   );
 
   // What a disconnect reaches — and, for a manifest server, that the console
   // cannot remove it at all.
-  const scope = panel.getByTestId("mcp-page-disconnect-scope");
+  const scope = details.getByTestId("mcp-page-disconnect-scope");
   await expect(scope).toContainText("cannot be removed from the console");
   await expect(scope).toContainText(
     "Nothing is revoked at the server's own end",
   );
+  await page.keyboard.press("Escape");
+  await expect(details).toHaveCount(0);
 
   // Usage, read under `mcp:deepwiki`. The harness host serves the usage route
   // and no agent has called this server, so a real zero is the right answer —
@@ -207,18 +215,22 @@ test("an admin adds and removes a runtime MCP server", async ({ page }) => {
     await page.getByTestId("mcp-add-endpoint").fill(endpoint);
     await page.getByTestId("mcp-add-submit").click();
 
-    // The outcome lands on the server it is about rather than as a toast that
-    // has gone by the time the operator looks for it.
-    await expect(page.getByTestId("mcp-add-open-server")).toBeVisible({
+    // Probing is `not_wired` on this build, so the add continues in the
+    // connect dialog rather than as a toast that has gone by the time the
+    // operator looks for it.
+    await expect(page.getByTestId("mcp-connect-dialog")).toBeVisible({
       timeout: 30_000,
     });
-    await page.getByRole("button", { name: "Done" }).click();
+    await page.keyboard.press("Escape");
 
     const row = page.getByTestId("mcp-server-row").filter({ hasText: name });
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByTestId("mcp-source-badge")).toHaveText("runtime");
-    await row.getByTestId("mcp-row-expander").click();
-    await expect(page.getByTestId("mcp-row-detail")).toContainText(endpoint);
+    await row.getByTestId("mcp-server-open").click();
+    await page.getByTestId("mcp-page-details-open").click();
+    await expect(page.getByTestId("mcp-page-details")).toContainText(endpoint);
+    await page.keyboard.press("Escape");
+    await page.getByTestId("mcp-page-back").click();
 
     // The host is the authority on what was stored, so confirm the row is not
     // just optimistic console state.
@@ -358,7 +370,8 @@ test("mcp.json shows the same servers the rows do, and saves an edit back", asyn
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await openMcpSettings(page);
-  await page.getByTestId("mcp-tab-json").click();
+  await page.getByTestId("mcp-json-open").click();
+  await expect(page.getByTestId("mcp-json-dialog")).toBeVisible();
 
   const editor = page.getByTestId("mcp-json-text");
   await expect(editor).toBeVisible({ timeout: 15_000 });
@@ -406,8 +419,9 @@ test("mcp.json shows the same servers the rows do, and saves an edit back", asyn
       )
       .toContain(name);
 
-    // And the rows show it, because both tabs read one configuration.
-    await page.getByTestId("mcp-tab-connections").click();
+    // And the rows show it, because both surfaces read one configuration.
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("mcp-json-dialog")).toHaveCount(0);
     await expect(
       page.getByTestId("mcp-server-row").filter({ hasText: name }),
     ).toBeVisible({

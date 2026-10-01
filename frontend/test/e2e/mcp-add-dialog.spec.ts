@@ -3,12 +3,13 @@ import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
 /**
- * Adding a server asks what it is for.
+ * Adding a custom server asks for a name and a URL, nothing else. Sign-in or a
+ * credential is the connect step that follows.
  *
- * Default-feature host: the add and remove routes are served here, which is
- * what this spec drives. Probing is `not_wired` on this build, so neither the
- * probe line nor the probed-description offer can appear — both are asserted in
- * the unit suite instead, and what is asserted here is the outcome step itself.
+ * Default-feature host: the add and remove routes are served here. Probing is
+ * `not_wired` on this build, so the host sends no `test` and an add always
+ * continues in the connect dialog; the "added and connected" outcome is
+ * asserted in the unit suite.
  */
 
 type Page = import("@playwright/test").Page;
@@ -25,50 +26,57 @@ async function openMcp(page: Page) {
   await expect(page.getByTestId("mcp-search")).toBeVisible({ timeout: 30_000 });
 }
 
-test("the form is a dialog, not four fields on every visit", async ({ page }) => {
+test("the form asks for a name and a URL only", async ({ page }) => {
   await openMcp(page);
 
   await expect(page.getByTestId("mcp-add-dialog")).toHaveCount(0);
   await page.getByTestId("mcp-add-open").click();
-  await expect(page.getByTestId("mcp-add-dialog")).toBeVisible();
-  await expect(page.getByTestId("mcp-add-description")).toBeVisible();
+  const dialog = page.getByTestId("mcp-add-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Add custom server" })).toBeVisible();
+  await expect(dialog.getByTestId("mcp-add-name")).toBeVisible();
+  await expect(dialog.getByTestId("mcp-add-endpoint")).toBeVisible();
+  await expect(dialog.getByTestId("mcp-add-description")).toHaveCount(0);
+  await expect(dialog.locator("#mcp-token")).toHaveCount(0);
+  await expect(dialog.getByRole("textbox")).toHaveCount(2);
 });
 
-test("a server added by URL can say what it is for", async ({ page }) => {
+test("a server added by URL continues in the connect dialog", async ({ page }) => {
   // Unique per run: the host keeps runtime servers in its secret store, so a
   // fixed name plus a tolerated "already exists" would let this spec adopt a
   // leftover registration pointing anywhere at all.
   const name = `pw-add-${randomUUID().slice(0, 8)}`;
 
-  await openMcp(page);
-  await page.getByTestId("mcp-add-open").click();
-  await page.getByTestId("mcp-add-name").fill(name);
-  await page.getByTestId("mcp-add-endpoint").fill("https://mcp.example.test/mcp");
-  await page
-    .getByTestId("mcp-add-description")
-    .fill("Reads the quarterly reporting replica.");
-  await page.getByTestId("mcp-add-submit").click();
+  try {
+    await openMcp(page);
+    await page.getByTestId("mcp-add-open").click();
+    await page.getByTestId("mcp-add-name").fill(name);
+    await page.getByTestId("mcp-add-endpoint").fill("https://mcp.example.test/mcp");
+    await page.getByTestId("mcp-add-submit").click();
 
-  // The outcome step, not the probe line on it: probing is `not_wired` on this
-  // build, so the host sends no `test` and that line is correctly absent. The
-  // button back to the server is what says the add landed.
-  await expect(page.getByTestId("mcp-add-open-server")).toBeVisible({
-    timeout: 30_000,
-  });
-  await page.getByRole("button", { name: "Done" }).click();
+    const connect = page.getByTestId("mcp-connect-dialog");
+    await expect(connect).toBeVisible({ timeout: 30_000 });
+    await expect(connect).toContainText(name);
+    await expect(page.getByTestId("mcp-add-dialog")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(connect).toHaveCount(0);
 
-  const added = page.getByTestId("mcp-server-row").filter({ hasText: name });
-  await expect(added).toBeVisible({ timeout: 30_000 });
-  await expect(added).toContainText("Reads the quarterly reporting replica.");
+    const added = page.getByTestId("mcp-server-row").filter({ hasText: name });
+    await expect(added).toBeVisible({ timeout: 30_000 });
+    await expect(added.getByTestId("mcp-source-badge")).toHaveText("runtime");
 
-  // Leave the company as it was found.
-  await added.getByTestId("mcp-row-overflow").click();
-  await page.getByRole("menu").getByTestId("mcp-remove").click();
-  await page
-    .getByRole("alertdialog")
-    .getByRole("button", { name: "Remove", exact: true })
-    .click();
-  await expect(added).toHaveCount(0, { timeout: 30_000 });
+    await added.getByTestId("mcp-row-overflow").click();
+    await page.getByRole("menu").getByTestId("mcp-remove").click();
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "Remove", exact: true })
+      .click();
+    await expect(added).toHaveCount(0, { timeout: 30_000 });
+  } finally {
+    await page.request
+      .delete(`/api/v1/company/mcp/servers/${encodeURIComponent(name)}`)
+      .catch(() => undefined);
+  }
 });
 
 test("a name already in use is refused in place", async ({ page }) => {

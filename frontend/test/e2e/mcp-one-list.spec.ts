@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 import { LIVE_BRAIN } from "./capabilities";
 
 /**
- * The MCP module's front door is one searchable list.
+ * The MCP module's front door is one searchable list, and every row is a
+ * link to that server's own page.
  *
  * Runs on the default-feature host the rest of this directory drives. Every
  * assertion is about rendering and navigation, which that host can answer. Tool
@@ -29,6 +30,10 @@ async function openMcp(page: Page) {
 /** The row for `name` in the one list. */
 function row(page: Page, name: string) {
   return page.getByTestId("mcp-server-row").filter({ hasText: name });
+}
+
+async function selection(page: Page) {
+  return page.evaluate(() => window.getSelection()?.toString() ?? "");
 }
 
 test("the list carries the manifest server and where it came from", async ({
@@ -57,42 +62,33 @@ test("search narrows this company's own servers", async ({ page }) => {
   await expect(row(page, "deepwiki")).toBeVisible();
 });
 
-test("a row opens its detail from the arrow, and never from a hover", async ({
-  page,
-}) => {
+test("a row carries no expander and no description column", async ({ page }) => {
   await openMcp(page);
   const deepwiki = row(page, "deepwiki");
-  const expander = deepwiki.getByTestId("mcp-row-expander");
+  await expect(deepwiki).toBeVisible();
 
-  await expect(expander).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByTestId("mcp-row-expander")).toHaveCount(0);
   await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
+  await expect(
+    page.getByRole("columnheader", { name: "Description" }),
+  ).toHaveCount(0);
 
-  // The earlier draft revealed on hover too, which made the table move under
-  // the pointer on the way to anything else and was unreachable by touch.
   await deepwiki.hover();
-  await expect(expander).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
-
-  await expander.click();
-  await expect(expander).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTestId("mcp-row-detail")).toContainText(
-    "https://mcp.deepwiki.com/mcp",
-  );
+  await expect(page.getByTestId("mcp-server-page")).toHaveCount(0);
 });
 
-test("clicking the row opens its detail, anywhere but a control", async ({
-  page,
-}) => {
+test("clicking anywhere on the row opens the server's page", async ({ page }) => {
   await openMcp(page);
-  const deepwiki = row(page, "deepwiki");
-  const expander = deepwiki.getByTestId("mcp-row-expander");
 
-  await deepwiki.getByTestId("mcp-source-badge").click();
-  await expect(expander).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByTestId("mcp-row-detail")).toBeVisible();
+  await row(page, "deepwiki").getByTestId("mcp-source-badge").click();
+  const detail = page.getByTestId("mcp-server-page");
+  await expect(detail).toBeVisible();
+  await expect(detail.getByRole("heading", { name: "deepwiki" })).toBeVisible();
+  await expect(page.getByTestId("mcp-server-row")).toHaveCount(0);
+  await expect(page).toHaveURL(/server=deepwiki/);
 
-  await deepwiki.getByTestId("mcp-source-badge").click();
-  await expect(expander).toHaveAttribute("aria-expanded", "false");
+  await detail.getByTestId("mcp-page-back").click();
+  await expect(row(page, "deepwiki")).toBeVisible();
 });
 
 test("the name is the link, so no row carries a View button", async ({ page }) => {
@@ -100,12 +96,8 @@ test("the name is the link, so no row carries a View button", async ({ page }) =
   const deepwiki = row(page, "deepwiki");
 
   await expect(deepwiki.getByRole("button", { name: "View" })).toHaveCount(0);
-
-  // The name navigates and does NOT also toggle the row underneath it: the row
-  // is a click target now, so every control on it has to stop being one.
   await deepwiki.getByTestId("mcp-server-open").click();
   await expect(page.getByTestId("mcp-server-page")).toBeVisible();
-  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
 });
 
 test("a control on the row does its own job and nothing else", async ({
@@ -114,24 +106,17 @@ test("a control on the row does its own job and nothing else", async ({
   await openMcp(page);
   const deepwiki = row(page, "deepwiki");
 
-  // The overflow opens its menu without also disclosing the detail — the
-  // failure being prevented is a menu that appears over a row that just grew.
   await deepwiki.getByTestId("mcp-row-overflow").click();
   await expect(page.getByTestId("mcp-toggle")).toBeVisible();
-  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
+  await expect(page.getByTestId("mcp-server-page")).toHaveCount(0);
 });
 
 test("a row keeps its secondary controls behind the overflow", async ({ page }) => {
   await openMcp(page);
   const deepwiki = row(page, "deepwiki");
 
-  // The failure being prevented: the old row carried up to seven icon-only
-  // controls, remove among them, distinguished only by aria-label — so a
-  // destructive action sat one mis-click from a scan.
-  //
-  // Counted at page level, not inside the row: the menu content is portaled out
-  // of it, so a row-scoped absence check would also pass with the menu open and
-  // would therefore be a check that cannot fail.
+  // Counted at page level: the menu is portaled out of the row, so a
+  // row-scoped absence check would pass with the menu open.
   for (const hidden of ["mcp-toggle", "mcp-test", "mcp-tools", "mcp-permissions"]) {
     await expect(page.getByTestId(hidden)).toHaveCount(0);
   }
@@ -140,9 +125,6 @@ test("a row keeps its secondary controls behind the overflow", async ({ page }) 
   const menu = page.getByRole("menu");
   await expect(menu.getByTestId("mcp-toggle")).toBeVisible();
   await expect(menu.getByTestId("mcp-permissions")).toBeVisible();
-
-  // A manifest declaration cannot be removed from the console at all, so the
-  // destructive item is absent rather than present and refused.
   await expect(menu.getByTestId("mcp-remove")).toHaveCount(0);
 });
 
@@ -151,34 +133,24 @@ test("the page states what this build can do with these servers", async ({
 }) => {
   await openMcp(page);
 
-  // Asserted in both directions: the notice is a function of the host, so a
-  // hard-coded one fails on whichever lane it is wrong for.
   const notice = page.getByTestId("mcp-bridge-absent");
   if (LIVE_BRAIN) await expect(notice).toHaveCount(0);
   else await expect(notice).toBeVisible();
 });
 
-test("a double-click settles the row open and highlights nothing", async ({
-  page,
-}) => {
+test("a double-click opens the page and highlights nothing", async ({ page }) => {
   await openMcp(page);
-  const deepwiki = row(page, "deepwiki");
-  const expander = deepwiki.getByTestId("mcp-row-expander");
 
-  await deepwiki.getByTestId("mcp-source-badge").dblclick();
+  await row(page, "deepwiki").getByTestId("mcp-source-badge").dblclick();
 
-  await expect(expander).toHaveAttribute("aria-expanded", "true");
-  expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toEqual(
-    "",
-  );
+  await expect(page.getByTestId("mcp-server-page")).toBeVisible();
+  expect(await selection(page)).toEqual("");
 });
 
 test("dragging across a row opens it and selects nothing", async ({ page }) => {
   await openMcp(page);
-  const deepwiki = row(page, "deepwiki");
-  const badge = deepwiki.getByTestId("mcp-source-badge");
+  const badge = row(page, "deepwiki").getByTestId("mcp-source-badge");
 
-  // `hover` first: the box must be measured with the pointer already on the row.
   await badge.hover();
   const box = await badge.boundingBox();
   if (box === null) throw new Error("the source badge has no box to drag across");
@@ -188,29 +160,50 @@ test("dragging across a row opens it and selects nothing", async ({ page }) => {
   }
   await page.mouse.up();
 
-  expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toEqual(
-    "",
-  );
-  await expect(deepwiki.getByTestId("mcp-row-expander")).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
+  expect(await selection(page)).toEqual("");
+  await expect(page.getByTestId("mcp-server-page")).toBeVisible();
 });
 
-test("the endpoint in the open detail can still be selected and copied", async ({
+test("the endpoint in the details pop-up can be selected and copied", async ({
   page,
 }) => {
   await openMcp(page);
-  const deepwiki = row(page, "deepwiki");
-  await deepwiki.getByTestId("mcp-row-expander").click();
+  await row(page, "deepwiki").getByTestId("mcp-server-open").click();
+  await page.getByTestId("mcp-page-details-open").click();
 
   const endpoint = page
-    .getByTestId("mcp-row-detail")
+    .getByTestId("mcp-page-details")
     .getByText("https://mcp.deepwiki.com/mcp");
   await expect(endpoint).toBeVisible();
 
   await endpoint.dblclick();
-  expect(
-    (await page.evaluate(() => window.getSelection()?.toString() ?? "")).length,
-  ).toBeGreaterThan(0);
+  expect((await selection(page)).length).toBeGreaterThan(0);
+});
+
+test("a deep link to a server still opens its page", async ({ page }) => {
+  await page.goto("/#/connections/mcp?server=deepwiki");
+  await expect(page.getByTestId("mcp-server-page")).toBeVisible({
+    timeout: 30_000,
+  });
+});
+
+test("the list fits a phone without scrolling sideways", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await openMcp(page);
+  await expect(row(page, "deepwiki")).toBeVisible();
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+  await expect(row(page, "deepwiki").getByTestId("mcp-row-overflow")).toBeVisible();
+});
+
+test("a server's name has room at desktop width", async ({ page }) => {
+  await openMcp(page);
+  const name = row(page, "deepwiki").getByTestId("mcp-server-open");
+  await expect(name).toBeVisible();
+
+  const clipped = await name.evaluate((el) => el.scrollWidth > el.clientWidth);
+  expect(clipped, "the name column is squeezed until it truncates").toBe(false);
 });
