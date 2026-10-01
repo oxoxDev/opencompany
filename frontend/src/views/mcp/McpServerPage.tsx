@@ -34,6 +34,7 @@ import {
   useConnectionUsage,
 } from "@/views/connections/connection-usage";
 import {
+  mcpDisplayName,
   mcpProvenanceNote,
   mcpRemovalNote,
   REGISTRY_OAUTH_UNSUPPORTED_NOTICE,
@@ -132,10 +133,14 @@ export function McpServerPage({
 
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start">
         <div className="flex min-w-0 flex-1 items-start gap-4">
-          <McpServerIcon iconUrl={server.iconUrl} name={server.name} className="size-14" />
+          <McpServerIcon
+            iconUrl={server.iconUrl}
+            name={mcpDisplayName(server)}
+            className="size-14"
+          />
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="truncate text-xl font-semibold">{server.name}</h2>
+              <h2 className="truncate text-xl font-semibold">{mcpDisplayName(server)}</h2>
               <Badge variant="outline" className="font-normal" data-testid="mcp-page-provenance">
                 {PROVENANCE_LABELS[server.source] ?? server.source}
               </Badge>
@@ -288,6 +293,14 @@ export function McpServerPage({
             <DialogTitle>Connection details</DialogTitle>
           </DialogHeader>
           <dl className="space-y-3 text-xs">
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Name</dt>
+              <dd>
+                <code className="font-mono select-text" data-testid="mcp-page-name">
+                  {server.name}
+                </code>
+              </dd>
+            </div>
             <div className="space-y-1">
               <dt className="text-muted-foreground">Endpoint</dt>
               <dd>

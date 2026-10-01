@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { McpBridgeState } from "@/lib/mcp-bridge";
 import { mcpHealthBadge } from "@/lib/mcp-bridge";
-import { mcpRowControls, mcpSourceBadge } from "@/lib/mcp-registry";
+import { mcpDisplayName, mcpRowControls, mcpSourceBadge } from "@/lib/mcp-registry";
 import { McpReachCell } from "@/views/connections/mcp-reach-cell";
 
 /** Everything a row's controls can do, owned by the section that holds the state. */
@@ -354,9 +354,9 @@ function NameButton({
       data-testid="mcp-server-open"
       className="block max-w-full truncate rounded-sm text-left text-sm font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       onClick={() => actions.onOpen(server.name)}
-      aria-label={`Open ${server.name}`}
+      aria-label={`Open ${mcpDisplayName(server)}`}
     >
-      {server.name}
+      {mcpDisplayName(server)}
     </button>
   );
 }
@@ -404,7 +404,7 @@ export function McpServerRow(props: McpServerItemProps) {
     >
       <td className="w-full max-w-0 border-b border-border py-3 pr-3 pl-4 align-middle">
         <div className="flex min-w-0 items-center gap-2">
-          <McpServerIcon iconUrl={server.iconUrl} name={server.name} />
+          <McpServerIcon iconUrl={server.iconUrl} name={mcpDisplayName(server)} />
           <div className="min-w-0">
             <NameButton server={server} actions={actions} />
           </div>
@@ -460,7 +460,7 @@ export function McpServerCard(props: McpServerItemProps) {
     >
       <McpServerIcon
         iconUrl={server.iconUrl}
-        name={server.name}
+        name={mcpDisplayName(server)}
         className="size-10"
       />
       <div className="min-w-0 flex-1 space-y-1">

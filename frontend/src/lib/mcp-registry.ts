@@ -297,3 +297,8 @@ export function directoryServerName(displayName: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
+
+/** The name a server is shown under: its own title when it has one. */
+export function mcpDisplayName(server: Pick<McpServer, "name" | "probedTitle">): string {
+  return server.probedTitle?.trim() || server.name;
+}

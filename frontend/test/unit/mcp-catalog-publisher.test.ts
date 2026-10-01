@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 
-import { catalogPublisher, directoryServerName } from "@/lib/mcp-registry";
+import { catalogPublisher, directoryServerName, mcpDisplayName } from "@/lib/mcp-registry";
 import { McpServerIcon } from "@/views/connections/McpServerTable";
 
 describe("catalogPublisher", () => {
@@ -61,5 +61,13 @@ describe("directoryServerName", () => {
     expect(directoryServerName("Atlassian Rovo MCP Server")).toBe("atlassian-rovo-mcp-server");
     expect(directoryServerName("inference.sh")).toBe("inference-sh");
     expect(directoryServerName("  — ")).toBe("");
+  });
+});
+
+describe("mcpDisplayName", () => {
+  it("shows a server under its own title, and its name when it has none", () => {
+    expect(mcpDisplayName({ name: "notion", probedTitle: "Notion" })).toBe("Notion");
+    expect(mcpDisplayName({ name: "notion", probedTitle: "  " })).toBe("notion");
+    expect(mcpDisplayName({ name: "deepwiki" })).toBe("deepwiki");
   });
 });
