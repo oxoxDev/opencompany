@@ -489,11 +489,19 @@ export function McpDiscover({
       </div>
 
       {state.kind === "loading" ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {Array.from({ length: 4 }, (_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
-          ))}
-        </div>
+        layout === "cards" ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {Array.from({ length: 4 }, (_, i) => (
+              <Skeleton key={i} className="h-24 rounded-xl" />
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {Array.from({ length: 4 }, (_, i) => (
+              <Skeleton key={i} className="h-12 rounded-md" />
+            ))}
+          </div>
+        )
       ) : state.entries.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="mcp-search-nothing">
           {searching
