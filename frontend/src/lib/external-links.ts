@@ -111,6 +111,21 @@ export function openOutward(url: string): boolean {
 }
 
 /**
+ * Opens `url` in a new browser tab and reports whether one opened.
+ *
+ * `window.open` with `noopener` returns `null` even when the tab opens, so it
+ * cannot tell a popup blocker from success. The tab is opened blank instead,
+ * cut off from this page, then sent to `url`.
+ */
+export function openInNewTab(url: string): boolean {
+  const tab = window.open("", "_blank");
+  if (!tab) return false;
+  tab.opener = null;
+  tab.location.href = url;
+  return true;
+}
+
+/**
  * Whether this `href` leaves the console.
  *
  * Kept in step with `isExternalHref` in `components/markdown.tsx`, which is what

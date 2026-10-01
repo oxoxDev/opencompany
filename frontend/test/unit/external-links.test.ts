@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installExternalLinkOpener,
   isOutwardHref,
+  openInNewTab,
   openOutward,
 } from "@/lib/external-links";
 
@@ -276,5 +277,24 @@ describe("what must not be intercepted", () => {
       path: "https://example.com/x",
     });
     dispose();
+  });
+});
+
+describe("openInNewTab", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reports an opened tab, cut off from this page and sent to the address", () => {
+    const tab = { opener: window as unknown, location: { href: "" } };
+    const open = vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
+
+    expect(openInNewTab("https://mcp.notion.com/authorize?x=1")).toBe(true);
+    expect(open).toHaveBeenCalledWith("", "_blank");
+    expect(tab.opener).toBeNull();
+    expect(tab.location.href).toBe("https://mcp.notion.com/authorize?x=1");
+  });
+
+  it("reports a blocked popup as not opened", () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    expect(openInNewTab("https://mcp.notion.com/authorize")).toBe(false);
   });
 });
