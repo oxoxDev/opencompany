@@ -449,8 +449,8 @@ async fn a_failed_probe_still_persists_its_health() {
 /// fetched here — a loopback source is exactly what the outbound SSRF guard
 /// refuses — so the record carries no icon and the console draws its letter
 /// tile.
-#[tokio::test]
-async fn a_probe_records_what_the_server_says_about_itself() {
+/// A loopback MCP server whose handshake describes itself, returning its address.
+async fn self_describing_fixture() -> std::net::SocketAddr {
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::{Value, json};
@@ -489,6 +489,12 @@ async fn a_probe_records_what_the_server_says_about_itself() {
             .unwrap();
     });
 
+    addr
+}
+
+#[tokio::test]
+async fn a_probe_records_what_the_server_says_about_itself() {
+    let addr = self_describing_fixture().await;
     let company = CompanyId::new("acme");
     let secrets = RecordingSecrets::default();
     let decl = plain_decl("fixture", &format!("http://{addr}/mcp"));
@@ -535,4 +541,38 @@ async fn a_failed_probe_leaves_the_previous_description_standing() {
         mcp_server_info::load(&company, "fixture", &secrets).await,
         stored
     );
+}
+
+/// A server whose handshake carries no usable icon keeps the logo stored for it
+/// earlier, such as the directory's, while its own title still wins.
+#[tokio::test]
+async fn a_probe_keeps_a_stored_logo_the_handshake_does_not_replace() {
+    use crate::company::mcp_server_info::{self, McpServerInfo};
+
+    let addr = self_describing_fixture().await;
+    let company = CompanyId::new("acme");
+    let secrets = RecordingSecrets::default();
+    let logo = "data:image/png;base64,iVBORw0KGgo=".to_string();
+    mcp_server_info::save(
+        &company,
+        "fixture",
+        &McpServerInfo {
+            title: Some("Stored".to_string()),
+            description: None,
+            website_url: None,
+            icon_data_url: Some(logo.clone()),
+        },
+        &secrets,
+    )
+    .await
+    .unwrap();
+
+    let decl = plain_decl("fixture", &format!("http://{addr}/mcp"));
+    assert_eq!(
+        probe_and_record(&company, &decl, &secrets).await.status,
+        McpStatus::Ok
+    );
+    let info = mcp_server_info::load(&company, "fixture", &secrets).await;
+    assert_eq!(info.title.as_deref(), Some("Fixture Docs"));
+    assert_eq!(info.icon_data_url, Some(logo));
 }

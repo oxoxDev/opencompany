@@ -441,6 +441,10 @@ pub async fn probe_and_record(
         if let Some(source) = mcp_server_info::icon_source(&server_info) {
             info.icon_data_url = mcp_server_info::fetch_icon(&source).await;
         }
+        let stored = mcp_server_info::load(company, &decl.name, secrets).await;
+        info.title = info.title.or(stored.title);
+        info.website_url = info.website_url.or(stored.website_url);
+        info.icon_data_url = info.icon_data_url.or(stored.icon_data_url);
         let _ = mcp_server_info::save(company, &decl.name, &info, secrets).await;
     }
     health
