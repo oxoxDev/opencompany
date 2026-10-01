@@ -17,6 +17,7 @@
 //! [`ScopedCompany`], matching `GET …/mcp/servers`.
 
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use axum::Json;
 use axum::extract::{Path, Query};
@@ -26,8 +27,10 @@ use serde::{Deserialize, Serialize};
 
 use oh::mcp::registry::types::{ConnStatus, InstalledServer};
 use openhuman_core as oh;
+use tinymcp::registry::curation::OFFICIAL_SERVERS;
 
 use crate::company::mcp::{McpHealth, stdio_install_refusal};
+use crate::company::mcp_server_info::fetch_icon;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
@@ -38,7 +41,10 @@ use crate::server::ops::mcp::{
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
-use super::catalogue::{catalogue_detail, catalogue_search, health_from_status};
+use super::catalogue::{
+    catalogue_detail, catalogue_search, featured_entry, health_from_status, inline_icon,
+    inline_icons, merge_featured, rank_catalogue,
+};
 
 // ---------------------------------------------------------------------------
 // Request and response bodies
@@ -152,13 +158,48 @@ pub(in crate::server::ops) async fn installs(runtime: &CompanyRuntime) -> Vec<Re
         .map(|state| (state.server_id.clone(), state))
         .collect();
     let now = now_millis();
-    servers
+    let mut installs: Vec<RegistryInstall> = servers
         .into_iter()
         .map(|server| {
             let state = status.get(&server.server_id);
             project(server, state, now)
         })
-        .collect()
+        .collect();
+    let icons = futures::future::join_all(
+        installs
+            .iter()
+            .map(|install| inline_icon(install.icon_url.clone(), &cached_icon)),
+    )
+    .await;
+    for (install, icon) in installs.iter_mut().zip(icons) {
+        install.icon_url = icon;
+    }
+    installs
+}
+
+/// Entries kept before the icon cache starts over.
+const ICON_CACHE_LIMIT: usize = 512;
+
+static ICON_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`fetch_icon`], remembered per address for the life of the process.
+async fn cached_icon(url: String) -> Option<String> {
+    if let Some(hit) = ICON_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&url).cloned())
+    {
+        return hit;
+    }
+    let icon = fetch_icon(&url).await;
+    if let Ok(mut cache) = ICON_CACHE.lock() {
+        if cache.len() >= ICON_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(url, icon.clone());
+    }
+    icon
 }
 
 /// One store record plus its live connection state.
@@ -193,21 +234,38 @@ fn project(server: InstalledServer, state: Option<&ConnStatus>, now: u64) -> Reg
 
 /// `GET …/mcp/registry/search` — browse the upstream MCP directory.
 ///
-/// The open `modelcontextprotocol/registry` and nothing else. The Smithery
-/// half, with the per-company API key that decided whether it was queried at
-/// all, was removed: one vendor's credential slot on a console tab is a
-/// credential to rotate, revoke and explain, and what it bought — one
-/// directory's hosted listings — is not worth the surface. Entries that declare
-/// no remote endpoint are filtered out here as they always were, since this
-/// deployment launches no local subprocess.
+/// The open `modelcontextprotocol/registry`, plus Smithery only where the host
+/// process sets `SMITHERY_API_KEY`. Entries that declare no remote endpoint are
+/// filtered out, since this deployment launches no local subprocess. The first
+/// page of an empty query leads with the known vendor servers, every page is
+/// ordered official first and most-installed next, and icons are inlined so the
+/// browser never requests a remote address.
 pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQuery>) -> Response {
     let Some(mcp) = company.runtime.mcp() else {
         return not_wired("mcp registry");
     };
-    match mcp.search(query.q, query.page, query.page_size).await {
-        Ok(raw) => Json(catalogue_search(&raw)).into_response(),
-        Err(error) => ApiError(error).into_response(),
+    let browsing =
+        query.q.as_deref().is_none_or(|q| q.trim().is_empty()) && query.page.unwrap_or(1) <= 1;
+    let mut results = match mcp.search(query.q, query.page, query.page_size).await {
+        Ok(raw) => catalogue_search(&raw),
+        Err(error) => return ApiError(error).into_response(),
+    };
+    if browsing {
+        let featured = futures::future::join_all(
+            OFFICIAL_SERVERS
+                .iter()
+                .map(|name| mcp.registry_get((*name).to_string())),
+        )
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|raw| featured_entry(&raw))
+        .collect();
+        results.servers = merge_featured(featured, results.servers);
     }
+    rank_catalogue(&mut results.servers, OFFICIAL_SERVERS);
+    inline_icons(&mut results.servers, cached_icon).await;
+    Json(results).into_response()
 }
 
 /// `GET …/mcp/registry/entry?qualifiedName=…` — one directory entry in full,
@@ -229,7 +287,10 @@ pub(super) async fn entry(company: ScopedCompany, Query(query): Query<EntryQuery
         Err(error) => return ApiError(error).into_response(),
     };
     match catalogue_detail(&raw) {
-        Some(detail) => Json(detail).into_response(),
+        Some(mut detail) => {
+            detail.icon_url = inline_icon(detail.icon_url.take(), &cached_icon).await;
+            Json(detail).into_response()
+        }
         None => ApiError(OpenCompanyError::McpServerNotFound(qualified_name)).into_response(),
     }
 }
