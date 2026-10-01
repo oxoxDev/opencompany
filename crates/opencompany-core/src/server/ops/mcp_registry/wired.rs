@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, Query};
@@ -35,6 +36,7 @@ use crate::company::mcp_endpoint::normalize_endpoint;
 use crate::company::mcp_server_info::{self, fetch_icon};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::harness::mcp::McpRuntime;
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
 use crate::server::ops::mcp::{
@@ -45,9 +47,9 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
 use super::catalogue::{
-    InstallName, brand_logo, brand_name, browse_upstream_page, catalogue_detail, catalogue_search,
-    featured_entry, featured_page, health_from_status, inline_icon, inline_icons, install_name_for,
-    rank_catalogue, shift_browse_page,
+    CatalogueEntryDto, InstallName, brand_logo, brand_name, browse_upstream_page, catalogue_detail,
+    catalogue_search, featured_entry, featured_page, health_from_status, inline_icon, inline_icons,
+    install_name_for, rank_catalogue, shift_browse_page,
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +183,57 @@ pub(in crate::server::ops) async fn installs(runtime: &CompanyRuntime) -> Vec<Re
     installs
 }
 
+/// How long an official entry is served from memory before it is looked up
+/// again. A failed refresh keeps serving the entry it already has.
+const FEATURED_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+static FEATURED: LazyLock<Mutex<HashMap<&'static str, (Instant, CatalogueEntryDto)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The official connectors, in their listed order. Each is looked up once and
+/// kept: the registry answers some of these lookups slower than the request
+/// timeout, so fetching all of them on every visit drops a different few each
+/// time.
+async fn featured_servers(mcp: &McpRuntime) -> Vec<CatalogueEntryDto> {
+    let now = Instant::now();
+    let due: Vec<&'static str> = {
+        let cache = FEATURED
+            .lock()
+            .map(|cache| cache.clone())
+            .unwrap_or_default();
+        OFFICIAL_SERVERS
+            .iter()
+            .copied()
+            .filter(|name| {
+                cache
+                    .get(name)
+                    .is_none_or(|(at, _)| now.duration_since(*at) > FEATURED_TTL)
+            })
+            .collect()
+    };
+    let fetched = futures::future::join_all(due.into_iter().map(|name| async move {
+        let entry = mcp
+            .registry_get(name.to_string())
+            .await
+            .ok()
+            .and_then(|raw| featured_entry(&raw));
+        (name, entry)
+    }))
+    .await;
+    let Ok(mut cache) = FEATURED.lock() else {
+        return fetched.into_iter().filter_map(|(_, entry)| entry).collect();
+    };
+    for (name, entry) in fetched {
+        if let Some(entry) = entry {
+            cache.insert(name, (now, entry));
+        }
+    }
+    OFFICIAL_SERVERS
+        .iter()
+        .filter_map(|name| cache.get(name).map(|(_, entry)| entry.clone()))
+        .collect()
+}
+
 /// Entries kept before the icon cache starts over.
 const ICON_CACHE_LIMIT: usize = 512;
 
@@ -255,16 +308,7 @@ pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQue
     let browsing = query.q.as_deref().is_none_or(|q| q.trim().is_empty());
     let shown_page = query.page.unwrap_or(1).max(1);
     if browsing && shown_page == 1 {
-        let featured: Vec<_> = futures::future::join_all(
-            OFFICIAL_SERVERS
-                .iter()
-                .map(|name| mcp.registry_get((*name).to_string())),
-        )
-        .await
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter_map(|raw| featured_entry(&raw))
-        .collect();
+        let featured = featured_servers(mcp).await;
         if !featured.is_empty() {
             let mut page = featured_page(featured);
             rank_catalogue(&mut page.servers, OFFICIAL_SERVERS);

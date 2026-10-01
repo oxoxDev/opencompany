@@ -98,7 +98,7 @@ pub(in crate::server::ops) fn health_from_status(
 /// Upstream's `SmitheryServerSummary` ends in `#[serde(flatten)] extra`, so it
 /// round-trips every key the two registries emit. Naming what we forward is what
 /// keeps an upstream payload change from becoming an OpenCompany API change.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::server::ops) struct CatalogueEntryDto {
     pub(in crate::server::ops) qualified_name: String,
