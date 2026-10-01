@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   catalogPublisher,
   REGISTRY_UNWIRED_NOTICE,
+  directoryServerName,
   registryOutage,
   type McpRegistryOutage,
 } from "@/lib/mcp-registry";
@@ -138,10 +139,12 @@ export function installedAs(
   entry: McpCatalogueEntry,
 ): string | null {
   const byQualified = servers.find(
-    (s) => s.qualifiedName === entry.qualifiedName,
+    (s) =>
+      s.qualifiedName === entry.qualifiedName ||
+      s.name.trim() === entry.qualifiedName,
   );
   if (byQualified) return byQualified.name;
-  const slug = entry.displayName.trim().toLowerCase();
+  const slug = directoryServerName(entry.displayName);
   const byName = servers.find((s) => s.name.trim().toLowerCase() === slug);
   return byName?.name ?? null;
 }

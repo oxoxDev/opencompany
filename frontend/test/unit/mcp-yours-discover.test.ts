@@ -262,6 +262,21 @@ describe("Discover", () => {
     expect(offers[0]?.getAttribute("aria-label")).toBe("Install GitHub");
   });
 
+  it("marks a Discover install saved under the slug of its shown name", async () => {
+    registryApi.searchMcpRegistry.mockResolvedValue({
+      page: 1,
+      totalPages: 1,
+      servers: [LINEAR, GITHUB],
+    });
+    await mount([{ ...row({ source: "runtime", name: "github" }), health: OK }]);
+
+    await click("mcp-mode-discover");
+
+    const offers = all('[data-testid="mcp-discover-install"]');
+    expect(offers).toHaveLength(1);
+    expect(offers[0]?.getAttribute("aria-label")).toBe("Install Linear");
+  });
+
   it("searches the directory with its own field", async () => {
     registryApi.searchMcpRegistry.mockResolvedValue({ page: 1, totalPages: 1, servers: [GITHUB] });
     await mount([{ ...row({ source: "runtime" }), health: OK }]);

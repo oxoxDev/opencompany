@@ -289,3 +289,11 @@ export function catalogPublisher(entry: {
   }
   return parts.reverse().join(".");
 }
+
+/** The name the host saves a directory install under: its shown name as a slug. */
+export function directoryServerName(displayName: string): string {
+  return displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}

@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 
-import { catalogPublisher } from "@/lib/mcp-registry";
+import { catalogPublisher, directoryServerName } from "@/lib/mcp-registry";
 import { McpServerIcon } from "@/views/connections/McpServerTable";
 
 describe("catalogPublisher", () => {
@@ -52,5 +52,14 @@ describe("McpServerIcon", () => {
   it("never asks the browser to fetch a remote address", () => {
     expect(render("https://icons.example/notion.png").img).toBeNull();
     expect(render("javascript:alert(1)").img).toBeNull();
+  });
+});
+
+describe("directoryServerName", () => {
+  it("slugs the shown name the way the host saves an install", () => {
+    expect(directoryServerName("Notion")).toBe("notion");
+    expect(directoryServerName("Atlassian Rovo MCP Server")).toBe("atlassian-rovo-mcp-server");
+    expect(directoryServerName("inference.sh")).toBe("inference-sh");
+    expect(directoryServerName("  — ")).toBe("");
   });
 });
