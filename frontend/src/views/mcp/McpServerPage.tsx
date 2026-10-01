@@ -109,7 +109,16 @@ export function McpServerPage({
   const reach = server.reachableBy;
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-6" data-testid="mcp-server-page">
+    <div
+      className="mx-auto w-full max-w-3xl space-y-6"
+      data-testid="mcp-server-page"
+      onMouseDown={(event) => {
+        const target = event.target as HTMLElement | null;
+        if (event.detail > 1 && !target?.closest(".select-text, input, textarea")) {
+          event.preventDefault();
+        }
+      }}
+    >
       <Button
         size="sm"
         variant="ghost"
