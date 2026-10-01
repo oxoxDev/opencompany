@@ -157,3 +157,69 @@ async fn every_row_gets_its_own_inlined_icon() {
     );
     assert_eq!(servers[2].icon_url, None);
 }
+
+#[test]
+fn an_official_server_is_named_and_given_a_logo() {
+    assert_eq!(
+        brand_name("com.notion/mcp", Some("mcp".to_string())),
+        "Notion"
+    );
+    assert_eq!(brand_name("com.paypal.mcp/mcp", None), "PayPal");
+    assert_eq!(
+        brand_logo("com.notion/mcp").as_deref(),
+        Some("https://avatars.githubusercontent.com/u/4792552?s=128")
+    );
+    assert_eq!(brand_logo("ai.smithery/smithery-notion"), None);
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn every_official_server_has_a_brand() {
+    for name in tinymcp::registry::curation::OFFICIAL_SERVERS {
+        assert!(brand_logo(name).is_some(), "{name} has no logo");
+    }
+}
+
+#[test]
+fn a_generic_upstream_name_falls_back_to_the_publisher() {
+    assert_eq!(brand_name("com.acme/mcp", Some("mcp".to_string())), "Acme");
+    assert_eq!(
+        brand_name(
+            "io.github.acme/remote-mcp-server",
+            Some("remote mcp server".to_string())
+        ),
+        "Acme"
+    );
+    assert_eq!(brand_name("dev.acme.mcp/mcp", None), "Acme");
+    assert_eq!(brand_name("@acme/mcp", Some("mcp".to_string())), "Acme");
+}
+
+#[test]
+fn a_descriptive_upstream_name_is_kept() {
+    assert_eq!(
+        brand_name(
+            "io.github.someone/weather-tools",
+            Some("weather tools".to_string())
+        ),
+        "weather tools"
+    );
+    assert_eq!(
+        brand_name("com.acme/mcp-github", Some("mcp github".to_string())),
+        "mcp github"
+    );
+}
+
+#[test]
+fn a_search_row_carries_the_brand() {
+    let page = catalogue_search(&json!({
+        "servers": [{ "qualified_name": "com.stripe/mcp", "display_name": "mcp" }],
+        "page": 1,
+        "total_pages": 1
+    }));
+    let row = &page.servers[0];
+    assert_eq!(row.display_name, "Stripe");
+    assert_eq!(
+        row.icon_url.as_deref(),
+        Some("https://avatars.githubusercontent.com/u/856813?s=128")
+    );
+}

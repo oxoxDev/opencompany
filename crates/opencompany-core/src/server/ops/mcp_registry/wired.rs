@@ -42,8 +42,8 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
 use super::catalogue::{
-    catalogue_detail, catalogue_search, featured_entry, health_from_status, inline_icon,
-    inline_icons, merge_featured, rank_catalogue,
+    brand_logo, brand_name, catalogue_detail, catalogue_search, featured_entry, health_from_status,
+    inline_icon, inline_icons, merge_featured, rank_catalogue,
 };
 
 // ---------------------------------------------------------------------------
@@ -216,12 +216,16 @@ fn project(server: InstalledServer, state: Option<&ConnStatus>, now: u64) -> Reg
             now,
         )
     });
+    let display_name = brand_name(&server.qualified_name, Some(server.display_name));
+    let icon_url = server
+        .icon_url
+        .or_else(|| brand_logo(&server.qualified_name));
     RegistryInstall {
         server_id: server.server_id,
         qualified_name: server.qualified_name,
-        display_name: server.display_name,
+        display_name,
+        icon_url,
         description: server.description,
-        icon_url: server.icon_url,
         endpoint,
         transport,
         enabled: server.enabled,

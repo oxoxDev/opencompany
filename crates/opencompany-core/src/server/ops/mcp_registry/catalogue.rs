@@ -202,10 +202,10 @@ pub(in crate::server::ops) fn catalogue_search(raw: &Value) -> CatalogueSearchDt
 fn catalogue_entry(raw: &Value) -> Option<CatalogueEntryDto> {
     let qualified_name = text(raw, "qualified_name")?;
     Some(CatalogueEntryDto {
-        display_name: text(raw, "display_name").unwrap_or_else(|| qualified_name.clone()),
+        display_name: brand_name(&qualified_name, text(raw, "display_name")),
+        icon_url: text(raw, "icon_url").or_else(|| brand_logo(&qualified_name)),
         qualified_name,
         description: text(raw, "description"),
-        icon_url: text(raw, "icon_url"),
         source: text(raw, "source").unwrap_or_default(),
         official: raw
             .get("official")
@@ -214,6 +214,80 @@ fn catalogue_entry(raw: &Value) -> Option<CatalogueEntryDto> {
         use_count: raw.get("use_count").and_then(Value::as_u64).unwrap_or(0),
         website_url: text(raw, "website_url"),
     })
+}
+
+/// First-party servers by qualified name, with the name and GitHub account id
+/// their logo is read from. The registry carries neither for most of them.
+const OFFICIAL_BRANDS: &[(&str, &str, u64)] = &[
+    ("io.github.github/github-mcp-server", "GitHub", 9919),
+    ("com.notion/mcp", "Notion", 4792552),
+    ("com.stripe/mcp", "Stripe", 856813),
+    ("com.atlassian/atlassian-mcp-server", "Atlassian", 168166),
+    ("app.linear/linear", "Linear", 46686594),
+    ("com.gitlab/mcp", "GitLab", 1086321),
+    ("com.paypal.mcp/mcp", "PayPal", 476675),
+    ("com.cloudflare.mcp/mcp", "Cloudflare", 314135),
+    ("com.airtable/mcp", "Airtable", 9687261),
+    ("com.supabase/mcp", "Supabase", 54469796),
+    ("com.vercel/vercel-mcp", "Vercel", 14985020),
+    ("com.webflow/mcp", "Webflow", 1229663),
+    ("com.wix/mcp", "Wix", 686511),
+];
+
+fn official_brand(qualified_name: &str) -> Option<&'static (&'static str, &'static str, u64)> {
+    OFFICIAL_BRANDS
+        .iter()
+        .find(|(name, _, _)| *name == qualified_name)
+}
+
+/// The name a directory row is shown under: the first-party brand, upstream's
+/// name when it says something, or the publisher's namespace when upstream's
+/// is only a word like `mcp`.
+pub(in crate::server::ops) fn brand_name(qualified_name: &str, upstream: Option<String>) -> String {
+    if let Some((_, brand, _)) = official_brand(qualified_name) {
+        return (*brand).to_string();
+    }
+    match upstream {
+        Some(name) if !is_generic_name(&name) => name,
+        upstream => publisher_name(qualified_name)
+            .or(upstream)
+            .unwrap_or_else(|| qualified_name.to_string()),
+    }
+}
+
+/// Where a first-party server's logo is fetched from, for the host to inline.
+pub(in crate::server::ops) fn brand_logo(qualified_name: &str) -> Option<String> {
+    official_brand(qualified_name)
+        .map(|(_, _, account)| format!("https://avatars.githubusercontent.com/u/{account}?s=128"))
+}
+
+fn is_generic_name(name: &str) -> bool {
+    name.split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+        .filter(|word| !word.is_empty())
+        .all(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "mcp" | "server" | "remote" | "official"
+            )
+        })
+}
+
+fn publisher_name(qualified_name: &str) -> Option<String> {
+    let namespace = qualified_name
+        .split_once('/')
+        .map_or(qualified_name, |(ns, _)| ns);
+    let parts: Vec<&str> = namespace.trim_start_matches('@').split('.').collect();
+    let candidates: &[&str] = match parts.as_slice() {
+        ["io", "github", rest @ ..] => rest,
+        [_tld, rest @ ..] if !rest.is_empty() => rest,
+        all => all,
+    };
+    let word = candidates
+        .iter()
+        .find(|part| !part.is_empty() && !part.eq_ignore_ascii_case("mcp"))?;
+    let mut chars = word.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
 }
 
 /// Badges the servers named in `official` by exact qualified name, then orders
@@ -296,10 +370,10 @@ pub(in crate::server::ops) fn catalogue_detail(raw: &Value) -> Option<CatalogueD
         .is_none()
         .then(|| stdio_install_refusal(&qualified_name));
     Some(CatalogueDetailDto {
-        display_name: text(server, "display_name").unwrap_or_else(|| qualified_name.clone()),
+        display_name: brand_name(&qualified_name, text(server, "display_name")),
+        icon_url: text(server, "icon_url").or_else(|| brand_logo(&qualified_name)),
         qualified_name,
         description: text(server, "description"),
-        icon_url: text(server, "icon_url"),
         source: text(server, "source").unwrap_or_default(),
         installable: endpoint.is_some(),
         endpoint,
