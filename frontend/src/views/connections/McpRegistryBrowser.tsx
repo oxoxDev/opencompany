@@ -162,7 +162,7 @@ function Verified({ official }: { official: boolean }) {
   if (!official) return null;
   return (
     <BadgeCheck
-      className="size-4 shrink-0 text-muted-foreground"
+      className="size-4 shrink-0 text-status-done"
       aria-label="Verified publisher"
       data-testid="mcp-discover-verified"
     />
