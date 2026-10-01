@@ -28,9 +28,15 @@ interface Posted {
   body: Record<string, unknown>;
 }
 
-function clientAs(role: "admin" | "member", posted: Posted[] = []): OpenCompanyClient {
+function clientAs(
+  role: "admin" | "member",
+  posted: Posted[] = [],
+  /** What `…/inference` answers, or `undefined` for a host that does not say. */
+  inference?: { designsProfiles: boolean },
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
         return Promise.resolve({
@@ -40,6 +46,11 @@ function clientAs(role: "admin" | "member", posted: Posted[] = []): OpenCompanyC
           company: "acme",
           hasPassword: true,
         });
+      }
+      if (path.endsWith("/inference")) {
+        return inference
+          ? Promise.resolve(inference)
+          : Promise.reject(new Error("this host does not report inference"));
       }
       if (path.endsWith("/skills/registry")) return Promise.resolve(REGISTRY);
       if (path.endsWith("/skills")) return Promise.resolve(INSTALLED);
@@ -74,17 +85,26 @@ async function show(client: OpenCompanyClient) {
 
 /** Every match, not the first — the whole point of this file. */
 function all(testid: string): HTMLElement[] {
-  return [...container.querySelectorAll<HTMLElement>(`[data-testid="${testid}"]`)];
+  return [
+    ...container.querySelectorAll<HTMLElement>(`[data-testid="${testid}"]`),
+  ];
 }
 
 function click(el: Element | null | undefined) {
   return act(async () => {
-    (el as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    (el as HTMLElement).dispatchEvent(
+      new MouseEvent("click", { bubbles: true }),
+    );
   });
 }
 
-function button(label: string, within: ParentNode = document.body): HTMLButtonElement {
-  const found = [...within.querySelectorAll("button")].find((b) => b.textContent?.includes(label));
+function button(
+  label: string,
+  within: ParentNode = document.body,
+): HTMLButtonElement {
+  const found = [...within.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(label),
+  );
   if (!found) throw new Error(`no button labelled ${label}`);
   return found;
 }
@@ -98,10 +118,14 @@ function submitButton(): HTMLButtonElement {
 
 /** Radix portals the dialog onto `document.body`, so fields live there. */
 async function type(id: string, value: string) {
-  const field = document.body.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#${id}`);
+  const field = document.body.querySelector<
+    HTMLInputElement | HTMLTextAreaElement
+  >(`#${id}`);
   if (!field) throw new Error(`no field #${id}`);
   const proto =
-    field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    field instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
   // React installs its own value setter on the element; go through the
   // prototype's so the change event carries the new value.
   Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(field, value);
@@ -110,14 +134,26 @@ async function type(id: string, value: string) {
   });
 }
 
+/** The page header is one menu: its trigger, then the item that writes one here. */
+async function openAddDialog() {
+  await click(button("Add skill"));
+  const item = document.body.querySelector<HTMLElement>(
+    '[data-testid="skills-add-write"]',
+  );
+  if (!item) throw new Error("the Add-skill menu did not open");
+  await click(item);
+}
+
 async function openDialog(posted: Posted[]) {
   await show(clientAs("admin", posted));
-  await click(button("Add skill")); // the page header trigger
+  await openAddDialog();
 }
 
 beforeEach(() => {
   window.location.hash = "";
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -161,7 +197,10 @@ describe("SkillsView authoring", () => {
 
     await type("skill-name", "Press Outreach");
     await type("skill-desc", "Pitch journalists a story.");
-    await type("skill-body", "1. Shortlist five reporters.\n2. Send the pitch.");
+    await type(
+      "skill-body",
+      "1. Shortlist five reporters.\n2. Send the pitch.",
+    );
     await click(submitButton());
 
     expect(posted).toHaveLength(1);
@@ -200,7 +239,7 @@ describe("SkillsView authoring", () => {
     // The view closes the dialog by flipping `open`, which never reaches
     // `onOpenChange` — so a reset that only runs on dismiss never runs at all,
     // and the next skill inherits a whole procedure nobody wrote for it.
-    await click(button("Add skill"));
+    await openAddDialog();
     for (const id of ["skill-name", "skill-desc", "skill-body"]) {
       const field = document.body.querySelector<HTMLInputElement>(`#${id}`);
       expect(field?.value).toBe("");
@@ -216,5 +255,36 @@ describe("SkillsView authoring", () => {
 
     await type("skill-desc", "Pitch journalists a story.");
     expect(submit.disabled).toBe(false);
+  });
+});
+
+describe("the Add-skill menu", () => {
+  it("carries all three ways in, under one control", async () => {
+    // They were three buttons of equal weight in the page header, which read as
+    // three different things to do rather than three ways to do one thing.
+    await show(clientAs("admin", []));
+    await click(button("Add skill"));
+    for (const id of [
+      "skills-add-write",
+      "skills-add-upload",
+      "skills-draft-trigger",
+    ]) {
+      expect(
+        document.body.querySelector(`[data-testid="${id}"]`),
+        id,
+      ).not.toBeNull();
+    }
+  });
+
+  it("leaves the draft entry out when the host reports no drafting model", async () => {
+    await show(clientAs("admin", [], { designsProfiles: false }));
+    await click(button("Add skill"));
+    expect(
+      document.body.querySelector('[data-testid="skills-add-write"]'),
+    ).not.toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="skills-draft-trigger"]'),
+      "nothing offers a draft the route could only refuse",
+    ).toBeNull();
   });
 });

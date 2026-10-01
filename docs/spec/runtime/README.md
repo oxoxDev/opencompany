@@ -88,8 +88,9 @@ Supporting docs:
   how a company supersedes or disables one, and why provenance is persisted
 - [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
   form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
-  prompts, checked-in briefing documents versus routed workspace documents, and
-  the `classes` routing exclusions
+  prompts, checked-in briefing documents versus routed workspace documents, the
+  `classes` routing exclusions, and the `skills` scope that narrows which of the
+  company's skills it reads
   - [agents-turn-limits.md](agents-turn-limits.md) — the two ceilings on one
     turn: the 25-round tool-iteration cap, the in-turn spend brake armed only
     for a teammate with a declared daily budget, and why a cap pause and a

@@ -20,6 +20,7 @@ fn overlay(id: &str) -> OverlayAgent {
         role: "Worker".into(),
         description: None,
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     }

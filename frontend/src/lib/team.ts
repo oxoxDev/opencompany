@@ -165,6 +165,12 @@ export function roleSubtitle(name: string, role: string): string | null {
   return trimmed.toLowerCase() === name.trim().toLowerCase() ? null : trimmed;
 }
 
+/** A teammate's display name, falling back to its role and then to its id. */
+export function teammateName(id: string, team: TeamMemberDto[] | null): string {
+  const member = team?.find((candidate) => candidate.id === id);
+  return member?.name?.trim() || member?.role?.trim() || id;
+}
+
 /** What a roster card says a teammate thinks with. */
 export interface ModelSummary {
   /** The one line the card draws. Never a fabricated model name. */

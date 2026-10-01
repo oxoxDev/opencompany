@@ -185,6 +185,12 @@ mod graphql_test_group_4;
 #[cfg(test)]
 #[path = "graphql_test_support_1.rs"]
 mod graphql_test_support_1;
+#[cfg(test)]
+#[path = "skills_drift_tests.rs"]
+mod skills_drift_tests;
+#[cfg(test)]
+#[path = "skills_scope_tests.rs"]
+mod skills_scope_tests;
 
 /// What a page authored by an agent can reach when its `oc:graphql` request is
 /// bridged to this handler.

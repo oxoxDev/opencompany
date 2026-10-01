@@ -15,6 +15,7 @@ fn installed(slug: &str) -> SkillState {
         enabled: true,
         source: SkillSource::Registry,
         custom_doc: Some("---\nname: Web research\nversion: 1.2.0\n---\nsteps".to_string()),
+        updated_at_millis: None,
         install: Some(SkillInstall {
             digest: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string(),
             version: Some("1.2.0".to_string()),
@@ -24,7 +25,6 @@ fn installed(slug: &str) -> SkillState {
             }),
             installed_at_millis: 1_700_000_000_000,
         }),
-        updated_at_millis: None,
     }
 }
 
@@ -114,8 +114,8 @@ async fn a_row_without_provenance_writes_no_install_key() {
             enabled: false,
             source: SkillSource::Company,
             custom_doc: None,
-            install: None,
             updated_at_millis: None,
+            install: None,
         },
     )
     .await

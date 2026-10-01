@@ -386,6 +386,36 @@ fn projects_workflow_updated_and_deleted_without_the_actor() {
     assert!(!v.to_string().contains("secret-user-id"));
 }
 
+/// The skill signal, projected so a console holding the Skills tab open
+/// re-reads instead of showing a list — and a drift badge — that is already
+/// wrong. Before an explicit arm this fell to `_ => return None` and never
+/// reached the stream at all.
+///
+/// `by` is dropped like every other attributed arm, and `digest` with it: it is
+/// the audit anchor that matches a journal row to an install's pin, and a live
+/// console reacts by re-reading the row rather than by comparing hashes.
+#[test]
+fn projects_skill_changed_without_the_actor_or_the_digest() {
+    let v = super::project_event(&stored(CompanyEvent::SkillChanged {
+        slug: "cold-outreach".into(),
+        change: crate::ports::types::SkillChange::Updated,
+        tier: crate::ports::skills_state::SkillTier::Registry,
+        digest: Some("f00dcafe".into()),
+        by: Some(Actor {
+            kind: ActorKind::User,
+            id: "secret-user-id".into(),
+        }),
+    }))
+    .expect("skill_changed is an attention signal");
+    assert_eq!(v["type"], "skill_changed");
+    assert_eq!(v["slug"], "cold-outreach");
+    assert_eq!(v["change"], "updated");
+    assert_eq!(v["tier"], "registry");
+    let wire = v.to_string();
+    assert!(!wire.contains("secret-user-id"), "{wire}");
+    assert!(!wire.contains("f00dcafe"), "{wire}");
+}
+
 #[test]
 fn projects_lifecycle_changed_without_the_actor() {
     let v = super::project_event(&stored(CompanyEvent::LifecycleChanged {

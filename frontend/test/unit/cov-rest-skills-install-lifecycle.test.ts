@@ -53,6 +53,7 @@ function clientAs(opts: {
   const role = opts.role ?? "admin";
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.includes("/skills/registry")) return Promise.resolve([REGISTRY]);
       if (path.endsWith("/auth/me"))
@@ -148,7 +149,7 @@ describe("uninstall lifecycle", () => {
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="installed-card"] [data-testid="skill-row-menu"]',
+          '[data-testid="installed-row"] [data-testid="skill-row-menu"]',
         )!
         .click();
     });

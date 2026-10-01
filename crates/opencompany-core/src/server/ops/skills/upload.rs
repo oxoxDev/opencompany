@@ -22,7 +22,7 @@
 //! override the install path carries applies here — there is deliberately no
 //! setting that silences a class of finding for a whole host.
 
-use axum::extract::{DefaultBodyLimit, Multipart, multipart::MultipartError};
+use axum::extract::{DefaultBodyLimit, Multipart, State, multipart::MultipartError};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -32,6 +32,7 @@ use crate::AppState;
 use crate::company::skill_upload::read_upload;
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::types::SkillChange;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, scoped};
 
@@ -120,6 +121,7 @@ struct Part {
 /// the files it applies to and a stream position must not decide whether an
 /// override was honoured.
 async fn upload(
+    State(app): State<AppState>,
     company: AdminScopedCompany,
     mut multipart: Multipart,
 ) -> Result<Json<UploadedDto>, ApiError> {
@@ -170,40 +172,78 @@ async fn upload(
         )));
     }
 
+    let registry = app.shared_skill_registry()?;
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
+    // One roster read for the whole batch: a scope is a property of the
+    // teammates, and no file in this upload changes one.
+    let roster = super::scope::roster_scopes(&company.runtime).await?;
     let mut results = Vec::with_capacity(parts.len());
     for part in parts {
-        match store(&company, &part, force).await {
-            Ok(skill) => results.push(UploadRow::stored(part.filename, skill)),
+        match store(&company, &registry, &part, force, &roster).await {
+            Ok((skill, delta)) => {
+                // Out of the per-file rows on purpose. Those exist for a file
+                // that is not a skill; a journal the host cannot append to is
+                // not one file's problem, and an upload reported as stored
+                // with no record that it happened is the outcome this must
+                // never produce.
+                super::journal::journal_write(
+                    &company.runtime,
+                    &company.actor(),
+                    &delta,
+                    SkillChange::Installed,
+                )
+                .await?;
+                results.push(UploadRow::stored(part.filename, skill));
+            }
             Err(problem) => results.push(UploadRow::refused(part.filename, problem)),
         }
     }
     Ok(Json(UploadedDto { results }))
 }
 
-/// Reads, vets and stores one uploaded file.
+/// Reads, vets and stores one uploaded file, returning the response row and the
+/// delta that was persisted — the caller journals from the delta rather than
+/// from a second description of the same write.
 ///
 /// Returns the refusal as a sentence rather than an [`ApiError`] because it
 /// lands on one row of a multi-file answer; a status code cannot say which of
 /// five files was the bad one.
 async fn store(
     company: &AdminScopedCompany,
+    registry: &[crate::company::SkillDoc],
     part: &Part,
     force: bool,
-) -> Result<InstalledSkill, Refusal> {
+    roster: &[crate::company::skill_scope::AgentSkillScope],
+) -> Result<(InstalledSkill, SkillState), Refusal> {
     let read = read_upload(&part.filename, &part.bytes).map_err(Refusal::plain)?;
     check_skill_doc_size(&read.doc)
         .map_err(problem_text)
         .map_err(Refusal::plain)?;
     let scan: ScanSummary = vet_skill(&read.slug, &read.doc, force).map_err(Refusal::from)?;
+    // An upload replaces the document, not the install. A row that already
+    // pins one keeps its pin and its provenance, so the stored copy reads as
+    // modified against what was installed rather than as never having been
+    // installed at all.
+    let pinned = company
+        .runtime
+        .skills()
+        .list(company.id())
+        .await
+        .map_err(|error| Refusal::plain(error.to_string()))?
+        .into_iter()
+        .find(|row| row.slug == read.slug && row.install.is_some());
+    let (source, install) = match pinned {
+        Some(row) => (row.source, row.install),
+        None => (SkillSource::Custom, None),
+    };
     let delta = SkillState {
         slug: read.slug,
         enabled: true,
-        source: SkillSource::Custom,
+        source,
         custom_doc: Some(read.doc),
         updated_at_millis: Some(crate::ports::now_millis()),
-        install: None,
+        install,
     };
     company
         .runtime
@@ -211,7 +251,19 @@ async fn store(
         .set(company.id(), &delta)
         .await
         .map_err(|error| Refusal::plain(error.to_string()))?;
-    Ok(InstalledSkill::from_state(&delta).with_scan(scan))
+    // An upload over a pinned install is what makes one read as modified, so the
+    // row this answers with has to carry that: the console folds it straight
+    // into the list, and a default would blank the badge it just earned.
+    let stood = super::drift::row_drift(registry, &delta);
+    let skill = InstalledSkill::from_state(&delta)
+        .with_scan(scan)
+        .with_drift(stood)
+        .with_agents(crate::company::skill_scope::agents_for_skill(
+            &delta.slug,
+            delta.enabled,
+            roster,
+        ));
+    Ok((skill, delta))
 }
 
 /// One file's refusal: the sentence an operator reads, and whether resending

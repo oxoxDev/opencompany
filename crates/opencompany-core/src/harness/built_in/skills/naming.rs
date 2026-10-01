@@ -202,13 +202,22 @@ impl SkillTool {
     }
 
     /// Rewrites one execution's outcome: result payloads and error prose.
+    ///
+    /// The `Err` arm becomes a reported failure rather than staying an `Err`.
+    /// `ToolResult::is_error` means the tool ran and said no; `Err` means it
+    /// could not run at all, and a dispatcher that receives `Err` has no
+    /// answer to put in the transcript against the model's call. All three
+    /// inner tools are reads over an already-materialized tree, so every way
+    /// they fail — an unknown slug, a slug outside this teammate's scope, a
+    /// path that escapes the bundle, a file that is not there — is settled
+    /// before the turn starts and cannot come good on a second attempt. That
+    /// makes `failed` right for all of them, and spares this wrapper a
+    /// classifier keyed on the inner tool's prose.
     fn rewrite_outcome(&self, out: anyhow::Result<ToolResult>) -> anyhow::Result<ToolResult> {
-        match out {
-            Ok(result) => Ok(rewrite_result(result)),
-            // The inner tools return their "not found" / bad-argument cases as
-            // `Err`, and that string reaches the agent too.
-            Err(err) => Err(anyhow::anyhow!(rewrite_prose(&err.to_string()))),
-        }
+        Ok(match out {
+            Ok(result) => rewrite_result(result),
+            Err(err) => ToolResult::failed(rewrite_prose(&err.to_string())),
+        })
     }
 }
 

@@ -943,6 +943,7 @@ fn skill_change_word(change: SkillChange) -> &'static str {
     match change {
         SkillChange::Installed => "installed",
         SkillChange::Updated => "updated",
+        SkillChange::Edited => "edited",
         SkillChange::Removed => "removed",
     }
 }

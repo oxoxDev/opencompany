@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use crate::company::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 use crate::error::Result;
-use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
 
 /// Where an effective skill's `SKILL.md` comes from.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +66,15 @@ pub struct EffectiveSkill {
     /// skill is authored in the repository, not edited here, so it has no
     /// operator edit to date.
     pub updated_at_millis: Option<u64>,
+    /// What the install that produced this entry pinned, when one did.
+    ///
+    /// `None` for the baseline and bundle layers, for a delta that installed
+    /// nothing, and for an entry the library healed — a healed entry is serving
+    /// the library's live document rather than its own snapshot, so there is no
+    /// longer a pinned copy for
+    /// [`effective_drift`](crate::company::skill_provenance::effective_drift)
+    /// to measure against.
+    pub install: Option<SkillInstall>,
 }
 
 impl EffectiveSkill {
@@ -155,6 +164,7 @@ pub fn resolve(
                     body: SkillBody::Inline(render_skill_md(doc)),
                 }),
                 updated_at_millis: None,
+                install: None,
             },
         );
     }
@@ -175,6 +185,7 @@ pub fn resolve(
                         body: SkillBody::Bundle(bundle),
                     }),
                     updated_at_millis: None,
+                    install: None,
                 },
             );
         }
@@ -200,6 +211,7 @@ pub fn resolve(
                 source: delta.source,
                 content: None,
                 updated_at_millis: delta.updated_at_millis,
+                install: delta.install.clone(),
             });
         entry.enabled = delta.enabled;
         entry.source = delta.source;
@@ -209,8 +221,16 @@ pub fn resolve(
         if delta.updated_at_millis.is_some() {
             entry.updated_at_millis = delta.updated_at_millis;
         }
-        if let Some(content) = delta_content(delta, registry) {
-            entry.content = Some(content);
+        // Same reason as the stamp above: a manifest-synthesized disable pins
+        // nothing, and must not erase the pin the store's own row supplied.
+        if delta.install.is_some() {
+            entry.install = delta.install.clone();
+        }
+        if let Some(resolved) = delta_content(delta, registry) {
+            if resolved.healed {
+                entry.install = None;
+            }
+            entry.content = Some(resolved.content);
         }
     }
 
@@ -223,24 +243,117 @@ pub fn resolve(
     Ok(entries.into_values().collect())
 }
 
+/// One agent's slice of [`resolve`]: the company's effective set narrowed to
+/// the skills that agent's scope admits.
+///
+/// `None` admits every enabled skill, which is what every company had before a
+/// scope could be written, so an unscoped roster materializes exactly what it
+/// did before.
+///
+/// Disabled entries are dropped rather than carried through. [`resolve`] reports
+/// them so the console can render the switch that turns them back on; an agent
+/// has no such switch, and the harness skips them anyway.
+///
+/// The narrowing itself is
+/// [`agent_effective_skills`](crate::runtime::builder::agent_effective_skills),
+/// the same function the agent detail route reports from, so what the console
+/// says a teammate has and what the harness writes for it cannot drift.
+///
+/// A scope entry the company does not have enabled is dropped — retiring a
+/// skill must not brick a manifest that still names it — but never silently:
+/// [`unmet_scope_slugs`] names the agent and the entries in a warning, so a
+/// typo in `company.toml` reads as a typo instead of as a scope that quietly
+/// confers nothing.
+pub fn resolve_for_agent(
+    source_dir: Option<&Path>,
+    registry: &[SkillDoc],
+    deltas: &[SkillState],
+    agent: &str,
+    agent_skills: Option<&[String]>,
+) -> Result<Vec<EffectiveSkill>> {
+    let effective = resolve(source_dir, registry, deltas)?;
+    let enabled: Vec<String> = effective
+        .iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| skill.slug.clone())
+        .collect();
+    let unmet = unmet_scope_slugs(&enabled, agent_skills);
+    if !unmet.is_empty() {
+        tracing::warn!(
+            "[skills] dropping skill scope entries for agent '{agent}' that this company does \
+             not have enabled: {}",
+            unmet.join(", ")
+        );
+    }
+    let scoped: HashSet<String> =
+        crate::runtime::builder::agent_effective_skills(&enabled, agent_skills)
+            .into_iter()
+            .collect();
+    Ok(effective
+        .into_iter()
+        .filter(|skill| scoped.contains(&skill.slug))
+        .collect())
+}
+
+/// The entries of an agent's skill scope that `company_enabled` does not carry
+/// — exactly what [`resolve_for_agent`] drops, in the order the scope wrote
+/// them and without repeats.
+///
+/// Separate from the warning it feeds so the drop set is assertable rather than
+/// only observable in a log line, and so a reader that wants to *report* the
+/// set has one derivation to share rather than a second one to invent.
+///
+/// `None` is the inherit state: it names nothing, so it drops nothing. An empty
+/// list is a deliberate no-skills scope, which likewise names nothing.
+pub fn unmet_scope_slugs(
+    company_enabled: &[String],
+    agent_skills: Option<&[String]>,
+) -> Vec<String> {
+    let Some(slugs) = agent_skills else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<&str> = HashSet::new();
+    slugs
+        .iter()
+        .filter(|slug| !company_enabled.iter().any(|have| have == *slug))
+        .filter(|slug| seen.insert(slug.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// A delta's document and where it came from.
+struct Resolved {
+    content: SkillContent,
+    /// Whether [`registry_heal`] supplied the library's live document in place
+    /// of the delta's own snapshot.
+    healed: bool,
+}
+
 /// The document a delta contributes, or `None` when it contributes none.
-fn delta_content(delta: &SkillState, registry: &[SkillDoc]) -> Option<SkillContent> {
+fn delta_content(delta: &SkillState, registry: &[SkillDoc]) -> Option<Resolved> {
     let src = delta.custom_doc.as_deref()?;
     let parsed = parse_skill_md(&delta.slug, src);
     if let Some(live) = registry_heal(delta, parsed.as_ref().ok(), registry) {
         tracing::info!(
-            "[skills] healing pre-fix registry install '{}' from the shared library",
+            "[skills] healing pre-fix registry install '{}' from the shared library; its install \
+             pin no longer describes what is being served, so drift is not checkable for it",
             delta.slug
         );
-        return Some(SkillContent {
-            doc: live.clone(),
-            body: SkillBody::Inline(render_skill_md(live)),
+        return Some(Resolved {
+            content: SkillContent {
+                doc: live.clone(),
+                body: SkillBody::Inline(render_skill_md(live)),
+            },
+            healed: true,
         });
     }
     match parsed {
-        Ok(doc) => Some(SkillContent {
-            doc,
-            body: SkillBody::Inline(src.to_string()),
+        Ok(doc) => Some(Resolved {
+            content: SkillContent {
+                doc,
+                body: SkillBody::Inline(src.to_string()),
+            },
+            healed: false,
         }),
         Err(err) => {
             tracing::warn!(
@@ -282,10 +395,14 @@ fn is_registry_stub(doc: &SkillDoc) -> bool {
 ///
 /// * **Only `Registry`-sourced rows.** A `Custom` row is operator-authored and a
 ///   `Company` row is committed to the repo; neither is ever second-guessed, so
-///   the heal cannot clobber content a human wrote. There is no route that
-///   writes an operator-authored body onto a `Registry` row — `install` upserts
-///   a snapshot and `set_enabled` only carries the existing doc forward — so a
-///   `Registry` body is always machine-generated.
+///   the heal cannot clobber content a human wrote.
+/// * **Only a row still matching its own pin.** A `Registry` body is normally
+///   machine-generated — `install` upserts a snapshot and `set_enabled` carries
+///   the existing doc forward — but the skill editor
+///   (`PUT …/skills/{slug}/doc`) can store an operator's text onto one. Such a
+///   row no longer digests to what its install pinned, and that is what tells
+///   the two apart: without this arm, an operator whose edit happened to be
+///   degenerate would have it silently replaced by the library's copy.
 /// * **Only a degenerate or unparseable snapshot.** A real snapshot is left
 ///   pinned, so an install does not silently track later library edits.
 /// * **Only when the slug is in the library**, so an install of a skill that has
@@ -296,6 +413,11 @@ fn registry_heal<'a>(
     registry: &'a [SkillDoc],
 ) -> Option<&'a SkillDoc> {
     if delta.source != SkillSource::Registry {
+        return None;
+    }
+    if let (Some(install), Some(stored_doc)) = (&delta.install, &delta.custom_doc)
+        && crate::company::skill_digest(stored_doc) != install.digest
+    {
         return None;
     }
     if stored.is_some_and(|doc| !is_registry_stub(doc)) {

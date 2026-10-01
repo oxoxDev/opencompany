@@ -285,6 +285,7 @@ fn everyone_on_a_named_desk_still_names_only_that_desk() {
         role: "Designer".to_string(),
         description: None,
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     });
@@ -321,6 +322,7 @@ fn a_teammate_added_to_the_roster_is_in_general_with_no_membership_write() {
         role: "Designer".to_string(),
         description: None,
         tools: None,
+        skills: None,
         model: None,
         harness: None,
     });

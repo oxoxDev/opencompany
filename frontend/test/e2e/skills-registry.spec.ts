@@ -94,7 +94,7 @@ test("installing from the registry lands a skill the host can serve", async ({
   // It shows up in the company's effective set…
   await page.getByRole("tab", { name: /^Installed/ }).click();
   await expect(
-    page.getByTestId("installed-card").filter({ hasText: "Competitor Scan" }),
+    page.getByTestId("installed-row").filter({ hasText: "Competitor Scan" }),
   ).toBeVisible({ timeout: 30_000 });
 
   // …and the registry payload the tab rendered carries no skill bodies: browse
@@ -106,4 +106,51 @@ test("installing from the registry lands a skill the host can serve", async ({
   for (const row of rows) {
     expect(row).not.toHaveProperty("body");
   }
+});
+
+test("the registry offers the same drawings the installed set does", async ({
+  page,
+}) => {
+  await page.goto("/#/settings/skills");
+  await dismissOnboarding(page);
+  await page.getByRole("tab", { name: /^Registry/ }).click();
+
+  // Browsing opens on cards.
+  const cards = page.getByTestId("registry-card");
+  await expect(cards.first()).toBeVisible({ timeout: 30_000 });
+  const count = await cards.count();
+  expect(count).toBeGreaterThan(0);
+  await expect(page.getByTestId("registry-row")).toHaveCount(0);
+
+  // The same switch the installed set carries, and every card becomes a row.
+  await page.getByTestId("skills-view-list").click();
+  await expect(page.getByTestId("registry-row")).toHaveCount(count);
+  await expect(cards).toHaveCount(0);
+
+  await page.getByTestId("skills-view-cards").click();
+  await expect(cards).toHaveCount(count);
+});
+
+test("the registry search does not reach the installed list", async ({
+  page,
+}) => {
+  await page.goto("/#/settings/skills");
+  await dismissOnboarding(page);
+
+  const installed = page.getByTestId("installed-row");
+  await expect(installed.first()).toBeVisible({ timeout: 30_000 });
+  const installedCount = await installed.count();
+
+  await page.getByRole("tab", { name: /^Registry/ }).click();
+  const cards = page.getByTestId("registry-card");
+  await expect(cards.first()).toBeVisible({ timeout: 30_000 });
+  const before = await cards.count();
+
+  // A query that cannot match everything the registry serves.
+  await page.getByTestId("registry-search").fill("competitor");
+  await expect.poll(() => cards.count()).toBeLessThan(before);
+
+  // The installed set is untouched by it.
+  await page.getByRole("tab", { name: /^Installed/ }).click();
+  await expect(installed).toHaveCount(installedCount);
 });

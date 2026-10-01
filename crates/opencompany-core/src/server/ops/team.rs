@@ -180,6 +180,19 @@ struct TeamMemberDto {
     /// grant, `[globs]` = narrow), and a row that dropped the ceiling would leave
     /// a client no way to say which of the three it was looking at.
     tools: super::team_agent::AgentToolsDto,
+    /// This teammate's skill scope, in the **same shape and from the same
+    /// constructor** as `GET …/team/{agent_id}` — the three states the record
+    /// carries (`requested` / `companyAvailable` / `effective` / `overridden`).
+    ///
+    /// On the list for the reason `tools` is, and for one more: a skill's detail
+    /// panel scopes **one skill across many teammates**, and to tick teammate B
+    /// it has to send B's whole `skills` list. The next list is a function of
+    /// B's *stored* one — `["a","b"]` plus the slug is `["a","b",S]`, never
+    /// `[S]` — and a surface that did not hold B's stored list would strip every
+    /// other skill B has while reporting success. The per-skill `agents`
+    /// projection cannot carry it: that payload is O(skills × agents × slugs).
+    /// This one read carries it for the whole roster.
+    skills: super::team_agent::AgentSkillsDto,
     /// The desks this teammate sits on, resolved through the same helper the
     /// detail read uses (issue #601). Desks are the company's real grouping —
     /// the overview graph draws its department pillars from these.
@@ -375,8 +388,14 @@ pub(super) struct AgentPath {
 /// rather than 404ing.
 ///
 /// [`InboxStore`]: crate::ports::InboxStore
-async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, ApiError> {
+async fn list_team(
+    company: ScopedCompany,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<TeamMemberDto>>, ApiError> {
     let record = company.runtime.store().load(company.id()).await?;
+    // Resolved once for the roster, not once per row: the ceiling is the
+    // company's, so N reads of it would be N answers to the same question.
+    let company_skills = super::team_agent::company_enabled_skills(&state, &company).await?;
     // Inbox metadata is keyed by agent id, so the roster can be tagged without
     // a per-teammate read. An inbox that was never toggled is simply absent.
     let enabled_inboxes: std::collections::HashMap<String, bool> = company
@@ -410,11 +429,14 @@ async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, A
                     member_row(
                         &record,
                         &agent.id,
-                        agent.name.clone(),
-                        agent.role.clone(),
-                        agent.description.clone(),
+                        MemberIdentity {
+                            name: agent.name.clone(),
+                            role: agent.role.clone(),
+                            description: agent.description.clone(),
+                        },
                         enabled(&agent.id),
                         &spent,
+                        &company_skills,
                     )
                 })
                 .collect();
@@ -422,17 +444,31 @@ async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, A
                 member_row(
                     &record,
                     &agent.id,
-                    Some(agent.name.clone()),
-                    agent.role.clone(),
-                    agent.description.clone(),
+                    MemberIdentity {
+                        name: Some(agent.name.clone()),
+                        role: agent.role.clone(),
+                        description: agent.description.clone(),
+                    },
                     enabled(&agent.id),
                     &spent,
+                    &company_skills,
                 )
             }));
             members
         })
         .unwrap_or_default();
     Ok(Json(members))
+}
+
+/// The three fields a roster row is named by, resolved by the caller.
+///
+/// Carried together because they are resolved together — through the record, so
+/// a manifest teammate an operator has renamed from the console answers under
+/// the name it now has whichever route is asking.
+struct MemberIdentity {
+    name: Option<String>,
+    role: String,
+    description: Option<String>,
 }
 
 /// Builds one roster row, resolving the cap and its attribution through the
@@ -443,19 +479,18 @@ async fn list_team(company: ScopedCompany) -> Result<Json<Vec<TeamMemberDto>>, A
 fn member_row(
     record: &CompanyRecord,
     agent_id: &str,
-    name: Option<String>,
-    role: String,
-    description: Option<String>,
+    identity: MemberIdentity,
     inbox_enabled: bool,
     spent: &dyn Fn(&str) -> Option<f64>,
+    company_enabled_skills: &[String],
 ) -> TeamMemberDto {
     let cap = record.effective_budget(agent_id);
     let attribution = record.budget_override(agent_id);
     TeamMemberDto {
         id: agent_id.to_string(),
-        name,
-        role,
-        description,
+        name: identity.name,
+        role: identity.role,
+        description: identity.description,
         // Through `team_agent`'s helpers, never recomputed here: the
         // roster list and the detail read must not be able to disagree about
         // the same teammate (issues #264, #601, #643). A second copy of the
@@ -467,6 +502,10 @@ fn member_row(
         provider: super::team_agent::declared_provider(record, agent_id),
         is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
         tools: super::team_agent::agent_tools(record, agent_id),
+        // Takes the ceiling as an argument because resolving a company's enabled
+        // set is I/O and this row is built synchronously — the same reason
+        // `agent_skills` itself takes it rather than reading the record.
+        skills: super::team_agent::agent_skills(record, agent_id, company_enabled_skills),
         desks: super::team_agent::desks_for(record, agent_id),
         // Read off the effective agent, so an overlay teammate and a manifest
         // one answer the same way.
@@ -529,7 +568,7 @@ pub(super) async fn daily_spend_samples(
 /// Every roster teammate's id — manifest agents first, then overlay teammates,
 /// minus the ones the operator has removed. The same union
 /// `CompanyRecord::is_roster_agent` accepts.
-fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
+pub(crate) fn roster_ids(record: &CompanyRecord) -> impl Iterator<Item = &String> {
     record
         .manifest
         .agents
@@ -713,6 +752,7 @@ async fn add_member(
         // "inherit" and "narrow"; the deny-all state is reachable by editing the
         // teammate afterwards (`PATCH …/team/{id}` with `tools: []`).
         tools: if tools.is_empty() { None } else { Some(tools) },
+        skills: None,
         model: None,
         harness: None,
     };
@@ -797,6 +837,13 @@ async fn add_member(
     let provider = super::team_agent::declared_provider(&record, &agent.id);
     let is_orchestrator = super::team_agent::is_orchestrator(&record, &agent.id);
     let tools = super::team_agent::agent_tools(&record, &agent.id);
+    let skills = super::team_agent::agent_skills(
+        &record,
+        &agent.id,
+        &super::team_agent::company_enabled_skills(&state, &company)
+            .await
+            .map_err(|e| e.into_response())?,
+    );
     let desks = super::team_agent::desks_for(&record, &agent.id);
     Ok(Json(TeamMemberDto {
         id: agent.id,
@@ -809,6 +856,7 @@ async fn add_member(
         provider,
         is_orchestrator,
         tools,
+        skills,
         desks,
         // A console-created teammate delegates nowhere until somebody says so:
         // `delegates_to` is a manifest field and the overlay carries none.
@@ -953,7 +1001,7 @@ async fn set_budget(
     record.upsert_budget_override(entry);
     company.runtime.store().save(&record).await?;
 
-    updated_row(&company, &record, &agent_id).await
+    updated_row(&company, &state, &record, &agent_id).await
 }
 
 /// `DELETE {scope}/team/{agent_id}/budget` — drop the override so the manifest
@@ -984,7 +1032,7 @@ async fn clear_budget(
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
     company.runtime.store().save(&record).await?;
 
-    updated_row(&company, &record, &agent_id).await
+    updated_row(&company, &state, &record, &agent_id).await
 }
 
 /// Rejects a cap that is not a spendable amount of money, mirroring the
@@ -1050,6 +1098,7 @@ fn require_roster_teammate(record: &CompanyRecord, agent_id: &str) -> Option<Res
 /// card from the response instead of refetching the whole team.
 async fn updated_row(
     company: &ScopedCompany,
+    state: &AppState,
     record: &CompanyRecord,
     agent_id: &str,
 ) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
@@ -1076,31 +1125,33 @@ async fn updated_row(
     // touched it — a rename would show on the roster and vanish the moment a cap
     // was set.
     let overlay = record.overlay_agents.iter().find(|a| a.id == agent_id);
-    let (name, role, description) = match overlay {
-        Some(agent) => (
-            Some(agent.name.clone()),
-            agent.role.clone(),
-            agent.description.clone(),
-        ),
+    let identity = match overlay {
+        Some(agent) => MemberIdentity {
+            name: Some(agent.name.clone()),
+            role: agent.role.clone(),
+            description: agent.description.clone(),
+        },
         None => {
             let agent = record
                 .effective_agent(agent_id)
                 .expect("roster membership was checked before the write");
-            (
-                agent.name.clone(),
-                agent.role.clone(),
-                agent.description.clone(),
-            )
+            MemberIdentity {
+                name: agent.name.clone(),
+                role: agent.role.clone(),
+                description: agent.description.clone(),
+            }
         }
     };
+    let company_skills = super::team_agent::company_enabled_skills(state, company)
+        .await
+        .map_err(|e| e.into_response())?;
     Ok(Json(member_row(
         record,
         agent_id,
-        name,
-        role,
-        description,
+        identity,
         inbox_enabled,
         &spent,
+        &company_skills,
     )))
 }
 

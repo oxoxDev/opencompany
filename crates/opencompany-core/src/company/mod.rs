@@ -150,6 +150,10 @@ pub mod skill_provenance;
 /// the write plane runs it on every install in every build, and the sanitizer
 /// is the structural half of the same control.
 pub mod skill_scan;
+/// One skill's answer to "who is this scoped to" — the read-side inversion of
+/// the per-agent allowlist, shared by both transports so a skill's detail panel
+/// and a teammate's page cannot disagree about the same scope.
+pub mod skill_scope;
 /// Reading a skill an operator uploaded — a bare `SKILL.md`, or an archive
 /// carrying one — with the archive's shape refused before anything is
 /// decompressed.
@@ -239,7 +243,9 @@ pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
 pub use skill_file::{
     SkillDoc, load_catalog_skills, load_dir_skills, parse_skill_md, render_skill_md,
 };
-pub use skill_provenance::{SkillDrift, VersionChange, drift, skill_digest, trust_tier};
+pub use skill_provenance::{
+    SkillDrift, VersionChange, drift, effective_drift, skill_digest, trust_tier,
+};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,

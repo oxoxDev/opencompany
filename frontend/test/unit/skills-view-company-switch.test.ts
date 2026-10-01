@@ -24,6 +24,7 @@ import { SkillsView } from "@/views/SkillsView";
 function clientFor(company: string, role: "admin" | "member"): OpenCompanyClient {
   return {
     scopeFor: () => `/api/v1/companies/${company}`,
+    listTeam: () => Promise.resolve([]),
     carriesPlatformBearer: false,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {

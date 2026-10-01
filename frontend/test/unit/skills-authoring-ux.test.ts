@@ -5,7 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { SKILL_DESCRIPTION_MAX_CHARS, skillDescriptionCount } from "@/lib/skills";
+import {
+  SKILL_DESCRIPTION_MAX_CHARS,
+  skillDescriptionCount,
+} from "@/lib/skills";
 import { SkillsView } from "@/views/SkillsView";
 
 /**
@@ -35,6 +38,7 @@ function clientWith(options: {
 }): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
         return Promise.resolve({
@@ -80,12 +84,19 @@ async function show(client: OpenCompanyClient) {
 
 function click(el: Element | null | undefined) {
   return act(async () => {
-    (el as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    (el as HTMLElement).dispatchEvent(
+      new MouseEvent("click", { bubbles: true }),
+    );
   });
 }
 
-function button(label: string, within: ParentNode = document.body): HTMLButtonElement {
-  const found = [...within.querySelectorAll("button")].find((b) => b.textContent?.includes(label));
+function button(
+  label: string,
+  within: ParentNode = document.body,
+): HTMLButtonElement {
+  const found = [...within.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(label),
+  );
   if (!found) throw new Error(`no button labelled ${label}`);
   return found;
 }
@@ -94,8 +105,22 @@ function testid(id: string): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 }
 
+/** The page header is one menu now; every way in is an item inside it. */
+async function openAddMenu() {
+  await click(button("Add skill"));
+}
+
+async function pickFromAddMenu(id: string) {
+  await openAddMenu();
+  const item = testid(id);
+  if (!item) throw new Error(`no \`${id}\` on the Add-skill menu`);
+  await click(item);
+}
+
 async function type(id: string, value: string) {
-  const field = document.body.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#${id}`);
+  const field = document.body.querySelector<
+    HTMLInputElement | HTMLTextAreaElement
+  >(`#${id}`);
   if (!field) throw new Error(`no field #${id}`);
   const proto =
     field instanceof HTMLTextAreaElement
@@ -109,7 +134,9 @@ async function type(id: string, value: string) {
 
 beforeEach(() => {
   window.location.hash = "";
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -124,9 +151,11 @@ afterEach(() => {
 describe("skill description guidance", () => {
   it("counts what is typed against the host's own limit", async () => {
     await show(clientWith({ designsProfiles: true }));
-    await click(button("Add skill"));
+    await pickFromAddMenu("skills-add-write");
 
-    expect(testid("skill-desc-count")?.textContent).toContain(`0 / ${SKILL_DESCRIPTION_MAX_CHARS}`);
+    expect(testid("skill-desc-count")?.textContent).toContain(
+      `0 / ${SKILL_DESCRIPTION_MAX_CHARS}`,
+    );
     await type("skill-desc", "Pitch a story. Use when asked for press.");
     expect(testid("skill-desc-count")?.textContent).toContain(
       `40 / ${SKILL_DESCRIPTION_MAX_CHARS}`,
@@ -135,7 +164,7 @@ describe("skill description guidance", () => {
 
   it("says what a description is for, under the field", async () => {
     await show(clientWith({}));
-    await click(button("Add skill"));
+    await pickFromAddMenu("skills-add-write");
 
     const hint = testid("skill-desc-hint");
     expect(hint?.textContent).toContain("when an agent should use it");
@@ -143,7 +172,7 @@ describe("skill description guidance", () => {
 
   it("refuses to submit a description past the limit rather than spending a round trip", async () => {
     await show(clientWith({}));
-    await click(button("Add skill"));
+    await pickFromAddMenu("skills-add-write");
 
     await type("skill-name", "Press Outreach");
     await type("skill-desc", "a".repeat(SKILL_DESCRIPTION_MAX_CHARS + 1));
@@ -169,13 +198,21 @@ describe("skill upload dialog", () => {
           {
             file: "good.md",
             ok: true,
-            skill: { id: "press-outreach", name: "Press Outreach", scan: { findings: [] } },
+            skill: {
+              id: "press-outreach",
+              name: "Press Outreach",
+              scan: { findings: [] },
+            },
           },
-          { file: "broken.md", ok: false, error: "that file has no `name` in its frontmatter." },
+          {
+            file: "broken.md",
+            ok: false,
+            error: "that file has no `name` in its frontmatter.",
+          },
         ],
       }),
     );
-    await click(button("Upload"));
+    await pickFromAddMenu("skills-add-upload");
 
     const input = testid("skill-upload-input") as HTMLInputElement;
     const files = [
@@ -190,7 +227,9 @@ describe("skill upload dialog", () => {
     const dialog = document.body.querySelector('[role="dialog"]')!;
     await click(button("Upload", dialog));
 
-    const rows = [...document.body.querySelectorAll('[data-testid="skill-upload-row"]')];
+    const rows = [
+      ...document.body.querySelectorAll('[data-testid="skill-upload-row"]'),
+    ];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("press-outreach");
     expect(rows[1].textContent).toContain("no `name` in its frontmatter");
@@ -203,13 +242,16 @@ describe("skill upload dialog", () => {
 describe("draft control visibility", () => {
   it("is offered when the host says it can draft", async () => {
     await show(clientWith({ designsProfiles: true }));
+    await openAddMenu();
 
     expect(testid("skills-draft-trigger")).not.toBeNull();
   });
 
   it("is hidden when the host says it cannot, rather than answering no_model", async () => {
     await show(clientWith({ designsProfiles: false }));
+    await openAddMenu();
 
+    expect(testid("skills-add-write"), "the menu did open").not.toBeNull();
     expect(testid("skills-draft-trigger")).toBeNull();
   });
 
@@ -217,6 +259,7 @@ describe("draft control visibility", () => {
     // An older host omits the field, and a failed read says nothing either. A
     // network blip must not remove a working feature.
     await show(clientWith({ inferenceFails: true }));
+    await openAddMenu();
 
     expect(testid("skills-draft-trigger")).not.toBeNull();
   });

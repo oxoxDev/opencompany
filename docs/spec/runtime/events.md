@@ -346,6 +346,40 @@ sits on — rounds per episode, dms, broadcasts, cross-desk referrals).
 and dm rows are **prunable** — the reply rows they point at are the evidence,
 and a completed episode is replayed from those.
 
+## Skill changes
+
+`SkillChanged` records every write that changes a skill's document. The store
+keeps one row per slug and rewrites it in place, so this journal is the whole
+record that a playbook every agent reads was installed, replaced or removed.
+
+| field | meaning |
+| --- | --- |
+| `slug` | the skill's id |
+| `change` | `installed` \| `updated` \| `edited` \| `removed` |
+| `tier` | `builtin` \| `company` \| `registry` \| `custom`, from the row's provenance at the moment of the change |
+| `digest` | SHA-256 of the document written; absent on a removal, which writes none |
+| `by` | who did it, when the surface carried an attributed actor |
+
+Emitted by install (both arms), console authoring, each stored file of an upload,
+`POST …/skills/{slug}/update` and `PUT …/skills/{slug}/doc`
+([api-skill-authoring.md](api-skill-authoring.md)). `updated` and `edited` are
+separate words for a reason: the first takes the library's text, the second
+replaces it with the operator's, and a reader who cannot tell them apart cannot
+tell a re-pin from a local rewrite of what every agent reads. A **toggle emits nothing**:
+there is no variant for it, a toggle writes no document, and recording one as
+`updated` would tell a reader a re-pin happened that did not. The append
+propagates its failure rather than being dropped — an unrecordable change
+defeats the row's whole purpose.
+
+**No document text rides the row**, the rule `WorkflowUpdated` and
+`DeskRoutingConfigured` follow: a skill body is instructions an agent will read,
+and this journal is shared by chat, audit and run history. `digest` pins *which*
+document without reproducing it, and is the value the install recorded, so a row
+and a pin can be matched. Projected as `skill_changed` with `slug`, `change` and
+`tier`; `by` is dropped, the deny-by-default actor omission every attributed
+frame uses, and `digest` with it, since a live console reacts by re-reading the
+row. Permanent, and low-cardinality because an operator authors these by hand.
+
 ## Workflow run progress (issue #371)
 
 A workflow run brackets itself on the journal with four variants —

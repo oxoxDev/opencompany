@@ -186,8 +186,17 @@ mod tests_put_smtp_without_a;
 #[path = "write_saving_an_unpublished_note_tests.rs"]
 mod tests_saving_an_unpublished_note;
 #[cfg(test)]
+#[path = "write_skills_drift_tests.rs"]
+mod tests_skills_drift;
+#[cfg(test)]
 #[path = "write_skills_install_persists_the_tests.rs"]
 mod tests_skills_install_persists_the;
+#[cfg(test)]
+#[path = "write_skills_install_pin_tests.rs"]
+mod tests_skills_install_pin;
+#[cfg(test)]
+#[path = "write_skills_journal_tests.rs"]
+mod tests_skills_journal;
 #[cfg(test)]
 #[path = "write_streamed_multipart_tests.rs"]
 mod tests_streamed_multipart;

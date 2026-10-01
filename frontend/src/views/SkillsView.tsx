@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
-  Check,
-  Download,
+  ChevronDown,
   Info,
   Loader2,
   Plus,
-  Search,
   Sparkles,
   Upload,
 } from "lucide-react";
@@ -25,15 +23,16 @@ import {
   type SkillUploadRow,
 } from "@/api/skills";
 import { getInferenceStatus } from "@/api/inference";
+import type { TeamMemberDto } from "@/api/types";
 import { DraftSkillDialog } from "@/views/skills/DraftSkillDialog";
 import { InstalledSkillsList } from "@/views/skills/InstalledSkillsList";
+import { SkillPage } from "@/views/skills/SkillPage";
+import { UpdateSkillDialog } from "@/views/skills/UpdateSkillDialog";
 import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -42,6 +41,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -53,17 +58,17 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { RegistryList } from "@/views/skills/RegistryList";
+import { useHashParam } from "@/hooks/use-hash-param";
 import { useHashTab } from "@/hooks/use-hash-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_SKILL_FILTERS,
   type SkillListFilters,
-  type SkillSort,
+  type SkillListView,
 } from "@/lib/skills-list";
 import {
-  CATEGORY_STYLES,
-  registryEmptyLabel,
   SKILL_DESCRIPTION_HINT,
   SKILL_DESCRIPTION_MAX_CHARS,
   SKILL_DESCRIPTION_PLACEHOLDER,
@@ -77,15 +82,14 @@ interface Props {
   company: string | null;
 }
 
-const CATEGORIES: SkillCategory[] = ["Marketing", "Research", "Ops", "Content", "Finance"];
+const CATEGORIES: SkillCategory[] = [
+  "Marketing",
+  "Research",
+  "Ops",
+  "Content",
+  "Finance",
+];
 
-/** Category badge styling, tolerating the host's free-form category strings. */
-function categoryStyle(category: string): string {
-  return (
-    CATEGORY_STYLES[category as SkillCategory] ??
-    "border-muted-foreground/30 bg-muted text-muted-foreground"
-  );
-}
 
 /**
  * The company's skills: the real effective set read from the host (`…/skills`),
@@ -117,6 +121,25 @@ export function SkillsView({ client, company }: Props) {
   const [addOpen, setAddOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [draftOpen, setDraftOpen] = useState(false);
+  // The row under update review, or `null` for closed. The row rather than a
+  // boolean, because the dialog compares this install against the registry and
+  // a flag would leave it guessing which one the menu meant.
+  const [updating, setUpdating] = useState<Skill | null>(null);
+  // The slug of the skill whose page is open, or `null` for the list. It rides
+  // the address the way an open MCP server does (`?server=`), so a teammate's
+  // Skills tab can link straight at one and an operator can send the link. One
+  // piece of state for every way in — a card click, the row menu's `Scope…`, a
+  // pasted address — so they cannot open different things.
+  const [openedId, setOpenedId] = useHashParam("skill");
+  // Cards or rows. On the address like the open skill, so the choice survives a
+  // reload and can be sent with the link; `cards` is the default and therefore
+  // drops the key rather than spelling itself out.
+  const [viewParam, setViewParam] = useHashParam("view");
+  // The roster, for the panel's write. Each row carries that teammate's stored
+  // skill list, and the panel computes the next one from it; `null` means the
+  // read has not landed or failed, which is what stops the panel offering a
+  // change it could not make safely.
+  const [team, setTeam] = useState<TeamMemberDto[] | null>(null);
   // Whether this host can draft at all. `undefined` is "it did not say" — an
   // older host omits the field — and is read as unknown rather than as `false`,
   // exactly as the Add-teammate dialog reads it. Only an explicit `false` hides
@@ -124,11 +147,12 @@ export function SkillsView({ client, company }: Props) {
   // ever return `no_model`.
   const [canDraft, setCanDraft] = useState<boolean | undefined>(undefined);
   const [query, setQuery] = useState("");
-  // The Installed tab's own filter/sort selection. Separate from `query`, which
+  // The Installed tab's own filter selection. Separate from `query`, which
   // belongs to the registry tab: a search typed while browsing what could be
   // added must not silently hide half of what already is.
-  const [filters, setFilters] = useState<SkillListFilters>(DEFAULT_SKILL_FILTERS);
-  const [sort, setSort] = useState<SkillSort>("edited");
+  const [filters, setFilters] = useState<SkillListFilters>(
+    DEFAULT_SKILL_FILTERS,
+  );
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
@@ -154,6 +178,9 @@ export function SkillsView({ client, company }: Props) {
     setAddOpen(false);
     setUploadOpen(false);
     setDraftOpen(false);
+    setUpdating(null);
+    setOpenedId(null);
+    setTeam(null);
     setCanDraft(undefined);
     setScopeGen((g) => g + 1);
     setFilters(DEFAULT_SKILL_FILTERS);
@@ -209,24 +236,36 @@ export function SkillsView({ client, company }: Props) {
   // re-read: the host returns the stored skill, so refetching would only be a
   // second chance to disagree with what it just said.
   const takeUploaded = useCallback((rows: SkillUploadRow[]) => {
-    const stored = rows.flatMap((row) => (row.skill ? [row.skill as Skill] : []));
+    const stored = rows.flatMap((row) =>
+      row.skill ? [row.skill as Skill] : [],
+    );
     if (stored.length === 0) return;
     setSkills((all) => [
       ...stored,
       ...all.filter((skill) => !stored.some((one) => one.id === skill.id)),
     ]);
-    toast.success(stored.length === 1 ? `Added ${stored[0].name}.` : `Added ${stored.length} skills.`);
+    toast.success(
+      stored.length === 1
+        ? `Added ${stored[0].name}.`
+        : `Added ${stored.length} skills.`,
+    );
   }, []);
 
   const refresh = useCallback(async () => {
     const mine = ++gen.current;
     // Independent requests: a failing registry must not blank the installed
     // list (or the reverse), so each settles on its own.
-    const [installed, shared] = await Promise.allSettled([
+    const [installed, shared, roster] = await Promise.allSettled([
       listSkills(client, company),
       listRegistrySkills(client, company),
+      client.listTeam(company),
     ]);
     if (mine !== gen.current) return;
+
+    // A failed roster read leaves `null` rather than an empty array: "nobody is
+    // on this company" and "this read did not answer" are different, and the
+    // panel must not offer to rewrite a skill list it could not read.
+    setTeam(roster.status === "fulfilled" ? roster.value : null);
 
     if (installed.status === "fulfilled") {
       setSkills(installed.value);
@@ -242,7 +281,9 @@ export function SkillsView({ client, company }: Props) {
       setRegistryError(null);
     } else {
       const e = shared.reason;
-      setRegistryError(e instanceof Error ? e.message : "could not load the registry");
+      setRegistryError(
+        e instanceof Error ? e.message : "could not load the registry",
+      );
     }
     setRegistryLoading(false);
   }, [client, company]);
@@ -252,6 +293,7 @@ export function SkillsView({ client, company }: Props) {
     setRegistryLoading(true);
     setSkills([]); // drop the previous scope's skills while the new set loads
     setRegistry([]);
+    setTeam(null);
     void refresh();
     // Invalidate any in-flight request on scope change / unmount.
     return () => {
@@ -259,23 +301,45 @@ export function SkillsView({ client, company }: Props) {
     };
   }, [refresh]);
 
-  const installedIds = useMemo(() => new Set(skills.map((s) => s.id)), [skills]);
+  const installedIds = useMemo(
+    () => new Set(skills.map((s) => s.id)),
+    [skills],
+  );
+  // The page reads the row out of the list rather than holding its own copy, so
+  // a refetch shows what is stored instead of the snapshot the click captured. A
+  // row that has gone (uninstalled elsewhere) falls back to the list, and an
+  // address naming a skill this company does not have does the same.
+  const openedRow =
+    openedId === null ? null : (skills.find((s) => s.id === openedId) ?? null);
+  // Each tab opens in the shape that suits what it holds: the installed set is
+  // scanned, so rows; the registry is browsed, so cards. An address naming no
+  // view, or naming one this console does not have, is that tab's default
+  // rather than an error — a link is a thing people edit by hand.
+  const defaultView: SkillListView = tab === "registry" ? "cards" : "list";
+  const listView: SkillListView =
+    viewParam === "list" || viewParam === "cards" ? viewParam : defaultView;
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
 
   async function toggle(skill: Skill) {
     const next = !skill.enabled;
-    setSkills((all) => all.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)));
+    setSkills((all) =>
+      all.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)),
+    );
     try {
       const saved = await setSkillEnabled(client, company, skill.id, next);
       setSkills((all) => all.map((s) => (s.id === saved.id ? saved : s)));
     } catch (e) {
       // Revert only this skill, so a concurrent mutation isn't clobbered.
       setSkills((all) =>
-        all.map((s) => (s.id === skill.id ? { ...s, enabled: skill.enabled } : s)),
+        all.map((s) =>
+          s.id === skill.id ? { ...s, enabled: skill.enabled } : s,
+        ),
       );
-      toast.error(e instanceof Error ? e.message : "could not update the skill");
+      toast.error(
+        e instanceof Error ? e.message : "could not update the skill",
+      );
     }
   }
 
@@ -285,8 +349,12 @@ export function SkillsView({ client, company }: Props) {
       await uninstallSkill(client, company, skill.id);
     } catch (e) {
       // Re-insert only this skill on failure (no whole-list rollback).
-      setSkills((all) => (all.some((s) => s.id === skill.id) ? all : [...all, skill]));
-      toast.error(e instanceof Error ? e.message : "could not uninstall the skill");
+      setSkills((all) =>
+        all.some((s) => s.id === skill.id) ? all : [...all, skill],
+      );
+      toast.error(
+        e instanceof Error ? e.message : "could not uninstall the skill",
+      );
     }
   }
 
@@ -301,14 +369,19 @@ export function SkillsView({ client, company }: Props) {
       setSkills((all) => [...all.filter((s) => s.id !== saved.id), saved]);
       toast.success(`Installed ${skill.name}.`);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not install the skill");
+      toast.error(
+        e instanceof Error ? e.message : "could not install the skill",
+      );
     }
   }
 
   const visibleRegistry = useMemo(() => {
     const q = query.trim().toLowerCase();
     return registry.filter(
-      (s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+      (s) =>
+        !q ||
+        s.name.toLowerCase().includes(q) ||
+        s.description.toLowerCase().includes(q),
     );
   }, [query, registry]);
 
@@ -319,28 +392,46 @@ export function SkillsView({ client, company }: Props) {
         width="full"
         description={
           <>
-            Playbooks your agents read. Enable, install from the registry, or add your own.
+            Playbooks your agents read. Enable, install from the registry, or
+            add your own.
           </>
         }
         actions={
-          canManage ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" onClick={() => setUploadOpen(true)}>
-                <Upload className="size-4" /> Upload
-              </Button>
-              {canDraft !== false && (
-                <Button
-                  variant="outline"
-                  data-testid="skills-draft-trigger"
-                  onClick={() => setDraftOpen(true)}
-                >
-                  <Sparkles className="size-4" /> Draft with a teammate
-                </Button>
-              )}
-              <Button onClick={() => setAddOpen(true)}>
+          // One control, three ways in. They were three buttons of equal weight
+          // — Upload, Draft with a teammate, Add skill — which read as three
+          // different things to do rather than three ways to do one thing, and
+          // the widest of them named a teammate in a page header.
+          canManage && openedRow === null ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={<Button data-testid="skills-add-menu" />}
+              >
                 <Plus className="size-4" /> Add skill
-              </Button>
-            </div>
+                <ChevronDown className="size-4 opacity-60" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuItem
+                  data-testid="skills-add-write"
+                  onClick={() => setAddOpen(true)}
+                >
+                  <Plus className="size-4" /> Write one here
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid="skills-add-upload"
+                  onClick={() => setUploadOpen(true)}
+                >
+                  <Upload className="size-4" /> Upload a document
+                </DropdownMenuItem>
+                {canDraft !== false && (
+                  <DropdownMenuItem
+                    data-testid="skills-draft-trigger"
+                    onClick={() => setDraftOpen(true)}
+                  >
+                    <Sparkles className="size-4" /> Draft with a teammate
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : undefined
         }
         tabs={
@@ -351,100 +442,116 @@ export function SkillsView({ client, company }: Props) {
               t.id === "installed" ? { ...t, count: skills.length } : t,
             )}
             value={tab}
-            onChange={setTab}
+            onChange={(next) => {
+              setOpenedId(null);
+              setTab(next);
+            }}
             idBase="skills"
             aria-label="Skill views"
           />
         }
       />
       <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
-        {!canManage && (
-          <Alert data-testid="skills-admin-only">
-            <Info className="size-4" />
-            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
-            <AlertDescription>
-              Enabling, installing, uninstalling and adding a skill change what every agent is
-              told to do, so an admin makes those calls. You can see what is installed and browse
-              the registry.
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {/* What install / enable actually buy. A desk agent can list, describe
-            and read a skill and can never run one — deliberate, and pinned by
-            `dispatched_belt_excludes_every_deferred_family` — but this screen's
-            vocabulary is the vocabulary of switching a capability on, so
-            without saying it the operator learns the difference by asking an
-            agent to do something and watching nothing happen. */}
-        <Alert data-testid="skills-read-only-note">
-          <BookOpen className="size-4" />
-          <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
-        </Alert>
-
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        <PageTabPanel idBase="skills" id="installed" value={tab}>
-            {loading ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Skeleton className="h-32 rounded-xl" />
-                <Skeleton className="h-32 rounded-xl" />
-              </div>
-            ) : skills.length === 0 ? (
-              <Empty label="No skills installed yet." />
-            ) : (
-              <InstalledSkillsList
-                skills={skills}
-                filters={filters}
-                onFilters={setFilters}
-                sort={sort}
-                onSort={setSort}
-                canManage={canManage}
-                now={now}
-                onToggle={(s) => void toggle(s)}
-                onUninstall={(s) => void uninstall(s)}
-              />
-            )}
-        </PageTabPanel>
-
-        <PageTabPanel idBase="skills" id="registry" value={tab} className="space-y-3">
-            <div className="relative sm:max-w-xs">
-              <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search the registry…" className="pl-8" />
-            </div>
-            {registryError && (
-              <Alert variant="destructive">
-                <AlertDescription>{registryError}</AlertDescription>
+        {/* A page swap rather than a sheet beside the list, the way an MCP
+            server opens (`McpServersSection`): the scope list carries a face, a
+            name, a reach verdict and a link per teammate, and a 384px sheet is
+            narrower than that answer. The header stays above it — a routed view
+            names itself in every state (#1785) — so this branches in the body
+            rather than returning early. */}
+        {openedRow !== null ? (
+          <SkillPage
+            client={client}
+            company={company}
+            skill={openedRow}
+            team={team}
+            canManage={canManage}
+            onClose={() => setOpenedId(null)}
+            onSaved={() => void refresh()}
+          />
+        ) : (
+          <>
+            {!canManage && (
+              <Alert data-testid="skills-admin-only">
+                <Info className="size-4" />
+                <AlertTitle>
+                  Only an admin can change this company&apos;s skills
+                </AlertTitle>
+                <AlertDescription>
+                  Enabling, installing, uninstalling and adding a skill change
+                  what every agent is told to do, so an admin makes those calls.
+                  You can see what is installed and browse the registry.
+                </AlertDescription>
               </Alert>
             )}
-            {registryLoading ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Skeleton className="h-32 rounded-xl" />
-                <Skeleton className="h-32 rounded-xl" />
-              </div>
-            ) : visibleRegistry.length === 0 ? (
-              // A failed read leaves `registry` empty too, so the label must not
-              // derive "serves no registry" from the same failure the alert above
-              // already reports (issue #1467). The decider keeps the three cases
-              // apart.
-              <Empty label={registryEmptyLabel(registryError !== null, registry.length === 0)} />
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {visibleRegistry.map((s) => (
-                  <RegistryCard
-                    key={s.id}
-                    skill={s}
-                    installed={installedIds.has(s.id)}
-                    canManage={canManage}
-                    onInstall={() => void install(s)}
-                  />
-                ))}
-              </div>
+
+            {/* What install / enable actually buy. A desk agent can list, describe
+              and read a skill and can never run one — deliberate, and pinned by
+              `dispatched_belt_excludes_every_deferred_family` — but this screen's
+              vocabulary is the vocabulary of switching a capability on, so
+              without saying it the operator learns the difference by asking an
+              agent to do something and watching nothing happen. */}
+            <Alert data-testid="skills-read-only-note">
+              <BookOpen className="size-4" />
+              <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
+            </Alert>
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
             )}
-        </PageTabPanel>
+
+            <PageTabPanel idBase="skills" id="installed" value={tab}>
+              {loading ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Skeleton className="h-32 rounded-xl" />
+                  <Skeleton className="h-32 rounded-xl" />
+                </div>
+              ) : skills.length === 0 ? (
+                <Empty label="No skills installed yet." />
+              ) : (
+                <InstalledSkillsList
+                  skills={skills}
+                  filters={filters}
+                  onFilters={setFilters}
+                  canManage={canManage}
+                  now={now}
+                  onToggle={(s) => void toggle(s)}
+                  onUninstall={(s) => void uninstall(s)}
+                  onUpdate={setUpdating}
+                  onOpen={(skill) => setOpenedId(skill.id)}
+                  view={listView}
+                  onView={(next) =>
+                    setViewParam(next === defaultView ? null : next)
+                  }
+                />
+              )}
+            </PageTabPanel>
+
+            <PageTabPanel
+              idBase="skills"
+              id="registry"
+              value={tab}
+              className="space-y-3"
+            >
+              <RegistryList
+                skills={registry}
+                visible={visibleRegistry}
+                installedIds={installedIds}
+                canManage={canManage}
+                loading={registryLoading}
+                error={registryError}
+                query={query}
+                onQuery={setQuery}
+                view={listView}
+                onView={(next) =>
+                  setViewParam(next === defaultView ? null : next)
+                }
+                onInstall={(s) => void install(s)}
+              />
+            </PageTabPanel>
+          </>
+        )}
       </div>
 
       <AddSkillDialog
@@ -479,53 +586,23 @@ export function SkillsView({ client, company }: Props) {
         onOpenChange={setDraftOpen}
         onSaved={takeUploaded}
       />
+      <UpdateSkillDialog
+        client={client}
+        company={company}
+        skill={updating}
+        registry={registry}
+        onOpenChange={(open) => {
+          if (!open) setUpdating(null);
+        }}
+        onUpdated={(saved) => {
+          // The host answers with the re-pinned row and its post-update drift,
+          // so this is the row — a refetch would only be a second chance to
+          // disagree with what it just said.
+          setSkills((all) => all.map((s) => (s.id === saved.id ? saved : s)));
+          toast.success(`Updated ${saved.name}.`);
+        }}
+      />
     </div>
-  );
-}
-
-function RegistryCard({
-  skill,
-  installed,
-  canManage,
-  onInstall,
-}: {
-  skill: RegistrySkill;
-  installed: boolean;
-  canManage: boolean;
-  onInstall: () => void;
-}) {
-  return (
-    <Card data-testid="registry-card">
-      <CardContent className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Sparkles className="size-4 text-muted-foreground" />
-          <p className="font-medium">{skill.name}</p>
-        </div>
-        <p className="text-sm text-muted-foreground">{skill.description}</p>
-        <div className="flex items-center justify-between pt-1">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={cn("capitalize", categoryStyle(skill.category))}>
-              {skill.category}
-            </Badge>
-            <span className="text-xs text-muted-foreground">
-              {skill.publisher}
-              {skill.version ? ` · v${skill.version}` : ""}
-            </span>
-          </div>
-          {installed ? (
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-status-done-text">
-              <Check className="size-3.5" /> Installed
-            </span>
-          ) : (
-            canManage && (
-              <Button variant="outline" size="sm" onClick={onInstall}>
-                <Download className="size-4" /> Install
-              </Button>
-            )
-          )}
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -571,7 +648,8 @@ function AddSkillDialog({
     // The host rejects a blank description and one past the limit, so gate on
     // all three here rather than spending a round trip to be told.
     if (!name.trim() || !description.trim()) return;
-    if (skillDescriptionCount(description) > SKILL_DESCRIPTION_MAX_CHARS) return;
+    if (skillDescriptionCount(description) > SKILL_DESCRIPTION_MAX_CHARS)
+      return;
     setBusy(true);
     try {
       await onAdd({ name, description, category, body });
@@ -598,12 +676,18 @@ function AddSkillDialog({
         <DialogHeader>
           <DialogTitle>Add a skill</DialogTitle>
           <DialogDescription>
-            Describe a playbook your agents should follow — what to do, and when.
+            Describe a playbook your agents should follow — what to do, and
+            when.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
           <Label htmlFor="skill-name">Name</Label>
-          <Input id="skill-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Press Outreach" />
+          <Input
+            id="skill-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Press Outreach"
+          />
         </div>
         <div className="grid gap-2">
           <Label htmlFor="skill-cat">Category</Label>
@@ -653,7 +737,11 @@ function AddSkillDialog({
             placeholder={SKILL_DESCRIPTION_PLACEHOLDER}
             aria-describedby="skill-desc-hint"
           />
-          <p id="skill-desc-hint" data-testid="skill-desc-hint" className="text-xs text-muted-foreground">
+          <p
+            id="skill-desc-hint"
+            data-testid="skill-desc-hint"
+            className="text-xs text-muted-foreground"
+          >
             {SKILL_DESCRIPTION_HINT}
           </p>
         </div>
@@ -670,7 +758,11 @@ function AddSkillDialog({
           />
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
             Cancel
           </Button>
           <Button

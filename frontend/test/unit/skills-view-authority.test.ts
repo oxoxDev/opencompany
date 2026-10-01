@@ -71,6 +71,7 @@ function clientWith(
 ): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
+    listTeam: () => Promise.resolve([]),
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
@@ -142,17 +143,17 @@ describe("SkillsView authority", () => {
       Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
     ).toBe(false);
 
-    const toggle = at("installed-card")?.querySelector('[aria-label="Enable skill"]');
+    const toggle = at("installed-row")?.querySelector('[aria-label="Enable skill"]');
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute("aria-disabled")).toBe("true");
 
-    expect(at("installed-card")?.querySelector('[aria-label="Uninstall"]')).toBeNull();
+    expect(at("installed-row")?.querySelector('[aria-label="Uninstall"]')).toBeNull();
 
-    // Not a blank page: the installed skill's name and reach are still shown.
-    // Checked before switching tabs — the Installed panel unmounts once the
-    // Registry tab takes its place.
+    // Not a blank page: the installed skill's name and its metadata are still
+    // shown. Checked before switching tabs — the Installed panel unmounts once
+    // the Registry tab takes its place.
     expect(container.textContent).toContain("SEO audit");
-    expect(container.textContent).toContain("Agents can read this");
+    expect(at("installed-row")?.querySelector('[data-testid="skill-last-edited"]')).not.toBeNull();
 
     await openRegistryTab();
     expect(
@@ -170,7 +171,7 @@ describe("SkillsView authority", () => {
       Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
     ).toBe(true);
 
-    const toggle = at("installed-card")?.querySelector('[aria-label="Enable skill"]');
+    const toggle = at("installed-row")?.querySelector('[aria-label="Enable skill"]');
     expect(toggle?.getAttribute("aria-disabled")).not.toBe("true");
 
     await openRegistryTab();

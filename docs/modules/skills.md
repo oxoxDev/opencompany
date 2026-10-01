@@ -164,6 +164,107 @@ have.
 `resolve` reports **disabled** entries too — the console needs the row to render
 its switch. The harness filters to the enabled ones.
 
+## Per-agent scope: the second operand
+
+The company's enabled set says what exists. A teammate's `skills` list says
+which of it that teammate reads. The effective answer is the intersection, and
+it is **narrow-only by construction**: a scope filters the enabled set, so it
+can never confer a skill the company has not enabled.
+
+The field carries three states, the same shape a teammate's tools use:
+
+| Stored | Means |
+| --- | --- |
+| absent (`None`) | inherits — every skill the company enables, including ones enabled later |
+| a list | exactly those slugs, intersected with the enabled set |
+| `[]` | deliberately none |
+
+`inherits` and `[]` both read nothing while a skill is disabled, and only the
+first takes it back when the switch returns — so the two are never collapsed.
+
+`agent_effective_skills`
+([`runtime/builder.rs`](../../crates/opencompany-core/src/runtime/builder.rs))
+is the one derivation; `resolve_for_agent` and the team route's `agent_skills`
+both call it, so the console cannot report a scope the harness does not apply.
+
+Entries match **exactly**. A trailing-`*` prefix was considered and refused: a
+prefix silently admits a skill installed after the scope was written, which is
+the one direction a narrowing mechanism must not move on its own. The route
+rejects a `*` rather than storing it.
+
+A stored slug the company does not have enabled is kept rather than refused, and
+reported as dropped (`unmet_scope_slugs`), so a scope that confers nothing says
+so instead of looking empty.
+
+### Enforced where the files are written
+
+Scope is applied at **materialization**, not by hiding rows from a catalogue.
+`build.rs` passes the teammate's list into `EffectiveSkills::materialize`, which
+filters before the write loop — so a skill outside an agent's scope is never
+written into that agent's `skill-catalog/` at all, and `read_skill_resource`
+cannot reach it however the agent asks. `skills_scope_tests.rs` asserts that
+directly, from the other agent's side.
+
+### Who reaches a skill
+
+`agents_for_skill`
+([`company/skill_scope.rs`](../../crates/opencompany-core/src/company/skill_scope.rs))
+inverts the same arithmetic into a per-skill answer, so `GET …/skills` can say
+who each row reaches. It is a read-side projection only — the write is always to
+the teammate's own field.
+
+## What a document must pass before it is stored
+
+Three gates, shared by every write path and living together in
+[`server/ops/skills/vet.rs`](../../crates/opencompany-core/src/server/ops/skills/vet.rs):
+the size cap, the scanner's verdict, and the per-company write lock.
+
+`scan_skill`
+([`company/skill_scan.rs`](../../crates/opencompany-core/src/company/skill_scan.rs))
+runs on install, authoring, upload, draft and update — every path that can put
+text in front of an agent. It **warns** by default and **blocks** on three
+classes: invisible or bidirectional code points, hard-coded credentials, and a
+resource path that escapes the skill directory. A block writes nothing.
+
+The override is a per-request `force` on that one write, never a host-wide
+setting. A switch that silences a class of finding for a whole host is an alarm
+turned off; a `force` is a decision an operator makes about one document, and it
+is recorded with it.
+
+Whatever survives, the prompt catalogue still renders name and description as
+**quoted data** with invisible code points stripped and lengths capped, so a
+warn-level document cannot restructure the prompt around it.
+
+## Provenance: what an install pinned
+
+An install snapshots the library's document and records what it pinned —
+digest, version, who installed it, when
+([`ports/skills_state.rs`](../../crates/opencompany-core/src/ports/skills_state.rs)).
+The company reads its own copy from then on, so the library can move without
+changing what agents read.
+
+Two comparisons fall out of that pin, and they are separate answers:
+
+| Field | True when | Meaning |
+| --- | --- | --- |
+| `updateAvailable` | the library's current digest ≠ the pinned digest | somebody republished the skill upstream |
+| `modified` | the stored copy's digest ≠ the pinned digest | somebody edited this company's copy |
+
+Both can hold at once. `POST …/skills/{slug}/update` re-pins onto the library's
+current document and re-runs the scan — and **refuses while `modified`**, with a
+`409`, because applying it would discard an operator's edit with nothing to
+recover it from. Nothing ever updates on a read: a pinned install stays pinned
+until an admin acts.
+
+An empty registry means the host serves no shared library at all, so that
+install is recorded as `Custom` rather than `Registry` — the client's own
+metadata is not a library snapshot, and labelling it one would make an
+uncheckable row indistinguishable from a checkable one.
+
+Every write that changes a skill's document appends a `SkillChanged` row —
+slug, change, tier, digest, actor, and never the body. A failed append fails the
+write, so the store and the journal cannot disagree.
+
 ## Lifecycle, route by route
 
 Routes are registered by `router()` in
@@ -179,6 +280,11 @@ alias).
 | Author | `POST …/skills` → `create_custom` | `AdminScopedCompany` | assembles a `SKILL.md`, capped at `MAX_SKILL_DOC_BYTES` = 256 KiB on the assembled document |
 | Toggle | `PUT …/skills/{slug}` → `set_enabled` | `AdminScopedCompany` | read-modify-write under the per-company write lock |
 | Uninstall | `POST …/skills/{slug}/uninstall` → `uninstall` | `AdminScopedCompany` | `Registry` and `Custom` only; a `Company` bundle skill can only be disabled |
+| Upload | `POST …/skills/upload` → `upload` | `AdminScopedCompany` | multipart `.md` / `.zip` / `.skill`, one result row per file; archive hardening in [`company/skill_upload.rs`](../../crates/opencompany-core/src/company/skill_upload.rs) |
+| Draft | `POST …/skills/draft` → `draft` | `AdminScopedCompany` | writes nothing; returns a drafted document, scanned before it is shown |
+| Update | `POST …/skills/{slug}/update` → `update` | `AdminScopedCompany` | re-pins an install onto the library's current document, re-running the scan; refuses a locally edited copy |
+| Read a document | `GET …/skills/{slug}/doc` → `read_doc` | `ScopedCompany` (any member) | the whole `SKILL.md` an agent reads, resolved through the same effective set `GET …/skills` reports; a bundle entry off disk |
+| Rewrite a document | `PUT …/skills/{slug}/doc` → `write_doc` | `AdminScopedCompany` | `Registry` and `Custom` only, the same arms uninstall accepts; carries the install pin through, so the edit reports as `modified` |
 
 `/skills/registry` is a static segment, so it wins over the `{slug}` pattern
 regardless of registration order — and the methods differ anyway.
@@ -308,10 +414,11 @@ is written against this fact. It changes the day execution ships.
 
 | Gap | Effect today |
 | --- | --- |
-| No per-agent or per-desk scope | A skill installed for a company reaches every agent in it. Tools get a three-level grant; skills get nothing analogous |
-| No install-time scanning | Neither `install` nor `create_custom` inspects content. A description reaches the prompt verbatim |
-| No drift signal | `version` is stored and never compared, so an installed snapshot cannot be told from a library that has moved on |
-| No provenance beyond `source` | The empty-registry fallback and a real library install are indistinguishable on read |
+| No per-desk scope | A scope is the company's enabled set intersected with one teammate's list. There is no desk level between them |
+| Trust tier is computed but not published | `trust_tier` reaches the journal row; both read APIs expose `source`, so a baseline skill and a company-bundle one carry the same console label. Installer and install time are stored and never returned |
+| No diff before an update | No route serves a skill's body, so the review names the two revisions rather than showing what changes |
+| No dry run | A verdict is only ever produced by a write attempt: a block returns the report, writes nothing, and offers a per-request `force` |
+| Scope changes and scan verdicts are not journalled | `SkillChange` covers `Installed` / `Updated` / `Removed`; a scope edit goes through the team route, which appends no company event |
 | Validation narrower than the spec | See [Spec deltas](#spec-deltas-worth-knowing) |
 
 ## Where this lives
@@ -321,11 +428,18 @@ is written against this fact. It changes the day execution ships.
 | Document shape, parse and render | `crates/opencompany-core/src/company/skill_file.rs` |
 | The effective-set fold, slug validation, `[globals].disable` synthesis | `crates/opencompany-core/src/company/skill_effective.rs` |
 | Operator deltas (port + conformance) | `crates/opencompany-core/src/ports/skills_state.rs` |
-| Write routes and the per-company lock | `crates/opencompany-core/src/server/ops/skills.rs` |
+| Write routes | `crates/opencompany-core/src/server/ops/skills.rs`, and `skills/` beside it for registry, upload, draft and update |
+| Size cap, scan verdict, per-company lock | `crates/opencompany-core/src/server/ops/skills/vet.rs` |
+| Content scanning | `crates/opencompany-core/src/company/skill_scan.rs` |
+| Shared validation | `crates/opencompany-core/src/company/skill_validate.rs` |
+| Archive hardening | `crates/opencompany-core/src/company/skill_upload.rs` |
+| Install pin, drift, trust tier | `crates/opencompany-core/src/company/skill_provenance.rs` |
+| Per-agent scope: the derivation | `crates/opencompany-core/src/runtime/builder.rs` |
+| Per-agent scope: the per-skill inversion | `crates/opencompany-core/src/company/skill_scope.rs` |
 | `Company.skills` and `skillRegistry` reads | `crates/opencompany-core/src/server/graphql/skills.rs` |
 | Materialization, read tools, prompt catalogue | `crates/opencompany-core/src/harness/built_in/skills.rs` |
 | Tool consequence classification | `crates/opencompany-core/src/policy/consequence.rs` |
-| Console surface | `frontend/src/views/SkillsView.tsx`, `frontend/src/api/skills.ts`, `frontend/src/lib/skills.ts` |
+| Console surface | `frontend/src/views/SkillsView.tsx`, `frontend/src/views/skills/`, `frontend/src/api/skills.ts`, `frontend/src/lib/skills.ts` |
 
 The harness half compiles only under `--features openhuman`; the document,
 fold and port halves are always compiled.

@@ -1,11 +1,11 @@
-// The Installed tab's list: the filter/sort bar above it and one card per
+// The Installed tab's list: the filter bar above it and one card per
 // skill.
 //
 // Split out of `SkillsView` because that file is the tab shell — it owns the
 // host reads, the write handlers and the three dialogs — and this is the one
 // surface an operator spends time in. All of the rules the list obeys (what a
 // provenance label says, which rows a filter drops, where an unedited skill
-// sorts) live in `@/lib/skills-list` as pure functions under the unit runner;
+// ordering) live in `@/lib/skills-list` as pure functions under the unit runner;
 // what is left here is layout and the menu.
 //
 // Sized for the real cap rather than a demo: a company's installed set is the
@@ -13,7 +13,15 @@
 // the meta row wraps and the filter bar collapses to one control per line on a
 // phone.
 
-import { MoreHorizontal, Pencil, Power, Sparkles, Trash2 } from "lucide-react";
+import {
+  ArrowUpCircle,
+  MoreHorizontal,
+  Pencil,
+  Power,
+  Sparkles,
+  Trash2,
+  Users,
+} from "lucide-react";
 
 import type { Skill } from "@/api/skills";
 import { Badge } from "@/components/ui/badge";
@@ -36,70 +44,66 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { CATEGORY_STYLES, skillReachLabel, type SkillCategory } from "@/lib/skills";
+import { categoryStyle } from "@/lib/skills";
+import { SkillViewToggle } from "@/views/skills/SkillViewToggle";
+import { SkillsTable } from "@/views/skills/SkillsTable";
 import {
-  canEditSkill,
   canUninstallSkill,
+  canUpdateSkill,
+  skillDriftLabel,
+  skillUpdateUnavailableReason,
   SKILL_BUILTIN_UNINSTALL_REASON,
+  SKILL_DRIFT_FILTERS,
   SKILL_ENABLED_FILTERS,
-  SKILL_SORT_LABELS,
-  SKILL_SORTS,
   SKILL_SOURCE_FILTERS,
   skillCategories,
   skillLastEditedLabel,
   skillSourceLabel,
   visibleSkills,
+  type SkillDriftFilter,
+  type SkillListView,
   type SkillEnabledFilter,
   type SkillListFilters,
-  type SkillSort,
   type SkillSourceFilter,
 } from "@/lib/skills-list";
 
-/**
- * Why Edit is offered but never enabled.
- *
- * No route serves a skill's `SKILL.md`: `GET …/skills` and the registry listing
- * are both metadata only. An Edit dialog could therefore load a name, a
- * description and a category — and would save that back over a playbook body it
- * never read. Greying it with the reason says so; hiding it would leave an
- * operator hunting for an action that is not there.
- */
-const EDIT_UNAVAILABLE_REASON =
-  "Editing needs the skill's full text, which the host does not serve yet.";
-
 /** Category badge styling, tolerating the host's free-form category strings. */
-function categoryStyle(category: string): string {
-  return (
-    CATEGORY_STYLES[category as SkillCategory] ??
-    "border-muted-foreground/30 bg-muted text-muted-foreground"
-  );
-}
-
 export function InstalledSkillsList({
   skills,
   filters,
   onFilters,
-  sort,
-  onSort,
+  view,
+  onView,
   canManage,
   now,
   onToggle,
   onUninstall,
+  onUpdate,
+  onOpen,
 }: {
   skills: Skill[];
   filters: SkillListFilters;
   onFilters: (next: SkillListFilters) => void;
-  sort: SkillSort;
-  onSort: (next: SkillSort) => void;
+  /** Cards or rows. Held by the view, so it rides the address. */
+  view: SkillListView;
+  onView: (next: SkillListView) => void;
   canManage: boolean;
   /** Taken once per render by the caller, so every row dates itself against the
    * same instant and the list cannot report two "now"s. */
   now: number;
   onToggle: (skill: Skill) => void;
   onUninstall: (skill: Skill) => void;
+  /** Opens the review the operator sees before a newer library document is
+   * applied. The list never writes — it names the row and the view decides. */
+  onUpdate: (skill: Skill) => void;
+  /** Opens the skill's detail panel, where its scope is set.
+   *
+   * One handler for both ways in — the card and the row menu's `Scope…` — so the
+   * two entry points cannot open different things. */
+  onOpen: (skill: Skill) => void;
 }) {
   const categories = skillCategories(skills);
-  const rows = visibleSkills(skills, filters, sort) as Skill[];
+  const rows = visibleSkills(skills, filters) as Skill[];
   const enabledCount = skills.filter((s) => s.enabled).length;
 
   return (
@@ -117,30 +121,49 @@ export function InstalledSkillsList({
           id="skills-filter-source"
           label="Source"
           value={filters.source}
-          options={SKILL_SOURCE_FILTERS.map((v) => [v, v === "all" ? "Any source" : labelFor(v)])}
-          onChange={(v) => onFilters({ ...filters, source: v as SkillSourceFilter })}
+          options={SKILL_SOURCE_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any source" : labelFor(v),
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, source: v as SkillSourceFilter })
+          }
         />
         <FilterSelect
           id="skills-filter-enabled"
           label="State"
           value={filters.enabled}
-          options={SKILL_ENABLED_FILTERS.map((v) => [v, v === "all" ? "Any state" : labelFor(v)])}
-          onChange={(v) => onFilters({ ...filters, enabled: v as SkillEnabledFilter })}
+          options={SKILL_ENABLED_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any state" : labelFor(v),
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, enabled: v as SkillEnabledFilter })
+          }
+        />
+        <FilterSelect
+          id="skills-filter-drift"
+          label="Updates"
+          value={filters.drift}
+          options={SKILL_DRIFT_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any version" : "Has update",
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, drift: v as SkillDriftFilter })
+          }
         />
         <FilterSelect
           id="skills-filter-category"
           label="Category"
           value={filters.category}
-          options={[["all", "Any category"] as const, ...categories.map((c) => [c, c] as const)]}
+          options={[
+            ["all", "Any category"] as const,
+            ...categories.map((c) => [c, c] as const),
+          ]}
           onChange={(v) => onFilters({ ...filters, category: v })}
         />
-        <FilterSelect
-          id="skills-sort"
-          label="Sort by"
-          value={sort}
-          options={SKILL_SORTS.map((v) => [v, SKILL_SORT_LABELS[v]])}
-          onChange={(v) => onSort(v as SkillSort)}
-        />
+        <SkillViewToggle view={view} onView={onView} />
       </div>
 
       <p className="text-xs text-muted-foreground" data-testid="skills-count">
@@ -153,6 +176,25 @@ export function InstalledSkillsList({
         <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
           No skills match those filters.
         </p>
+      ) : view === "list" ? (
+        <SkillsTable
+          skills={rows}
+          canManage={canManage}
+          now={now}
+          onToggle={onToggle}
+          onUninstall={onUninstall}
+          onUpdate={onUpdate}
+          onOpen={onOpen}
+          renderMenu={(skill) => (
+            <SkillRowMenu
+              skill={skill}
+              onToggle={() => onToggle(skill)}
+              onUninstall={() => onUninstall(skill)}
+              onUpdate={() => onUpdate(skill)}
+              onOpen={() => onOpen(skill)}
+            />
+          )}
+        />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {rows.map((s) => (
@@ -163,6 +205,8 @@ export function InstalledSkillsList({
               now={now}
               onToggle={() => onToggle(s)}
               onUninstall={() => onUninstall(s)}
+              onUpdate={() => onUpdate(s)}
+              onOpen={() => onOpen(s)}
             />
           ))}
         </div>
@@ -194,7 +238,12 @@ function FilterSelect({
       onValueChange={(v) => v && onChange(v)}
       items={Object.fromEntries(options)}
     >
-      <SelectTrigger id={id} aria-label={label} data-testid={id} className="w-full sm:w-auto">
+      <SelectTrigger
+        id={id}
+        aria-label={label}
+        data-testid={id}
+        className="w-full sm:w-auto"
+      >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -208,27 +257,51 @@ function FilterSelect({
   );
 }
 
+/**
+ * Cards or rows, as two buttons that read as one control.
+ *
+ * `aria-pressed` rather than a radio group: these are two states of one
+ * setting, and a screen reader announcing "pressed" is what the pair means.
+ * Labelled by what each draws, because "grid" and "table" name the markup
+ * rather than the choice.
+ */
 function InstalledCard({
   skill,
   canManage,
   now,
   onToggle,
   onUninstall,
+  onUpdate,
+  onOpen,
 }: {
   skill: Skill;
   canManage: boolean;
   now: number;
   onToggle: () => void;
   onUninstall: () => void;
+  onUpdate: () => void;
+  onOpen: () => void;
 }) {
+  const drift = skillDriftLabel(skill);
   return (
-    <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
+    <Card
+      data-testid="installed-card"
+      className={cn(!skill.enabled && "opacity-70")}
+    >
       <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
+          {/* A real button, not a click handler on the card: focus, Enter and
+              Space come free, and the switch and the ⋮ menu stay outside it —
+              nesting them inside would put one interactive element in another. */}
+          <button
+            type="button"
+            onClick={onOpen}
+            data-testid="skill-card-open"
+            className="flex min-w-0 items-center gap-2 text-left transition-opacity hover:opacity-80"
+          >
             <Sparkles className="size-4 shrink-0 text-muted-foreground" />
             <p className="truncate font-medium">{skill.name}</p>
-          </div>
+          </button>
           <div className="flex shrink-0 items-center gap-1">
             <Switch
               checked={skill.enabled}
@@ -238,7 +311,13 @@ function InstalledCard({
               aria-label="Enable skill"
             />
             {canManage && (
-              <SkillRowMenu skill={skill} onToggle={onToggle} onUninstall={onUninstall} />
+              <SkillRowMenu
+                skill={skill}
+                onToggle={onToggle}
+                onUninstall={onUninstall}
+                onUpdate={onUpdate}
+                onOpen={onOpen}
+              />
             )}
           </div>
         </div>
@@ -253,16 +332,31 @@ function InstalledCard({
               {skill.category}
             </Badge>
           ) : null}
-          <span data-testid="skill-source" className="text-xs text-muted-foreground">
+          <span
+            data-testid="skill-source"
+            className="text-xs text-muted-foreground"
+          >
             {skillSourceLabel(skill)}
           </span>
-          <span data-testid="skill-last-edited" className="text-xs text-muted-foreground">
+          {/* After the provenance, so the row reads "Registry v1.2 · Update
+              available" — the badge is about that install, and in front of it
+              it would read as a claim about the skill in general. */}
+          {drift ? (
+            <Badge
+              variant="outline"
+              data-testid={
+                skill.modified ? "skill-modified" : "skill-update-available"
+              }
+              className="bg-status-blocked-soft text-status-blocked-text"
+            >
+              {drift}
+            </Badge>
+          ) : null}
+          <span
+            data-testid="skill-last-edited"
+            className="text-xs text-muted-foreground"
+          >
             · {skillLastEditedLabel(skill.updatedAtMillis, now)}
-          </span>
-          {/* What the switch above decides, in the terms it actually decides
-              them: reach, not capability (issue #569). */}
-          <span data-testid="skill-reach" className="text-xs text-muted-foreground">
-            · {skillReachLabel(skill.enabled)}
           </span>
         </div>
       </CardContent>
@@ -282,13 +376,18 @@ function SkillRowMenu({
   skill,
   onToggle,
   onUninstall,
+  onUpdate,
+  onOpen,
 }: {
   skill: Skill;
   onToggle: () => void;
   onUninstall: () => void;
+  onUpdate: () => void;
+  onOpen: () => void;
 }) {
   const removable = canUninstallSkill(skill.source);
-  const editable = canEditSkill(skill.source);
+  const updatable = canUpdateSkill(skill);
+  const updateReason = skillUpdateUnavailableReason(skill);
 
   return (
     <DropdownMenu>
@@ -307,21 +406,37 @@ function SkillRowMenu({
         <MoreHorizontal className="size-4" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-w-64">
-        <DropdownMenuItem disabled data-testid="skill-menu-edit">
+        {/* Opens the page, where the playbook carries its own Edit. One entry
+            rather than two that go to the same place; a skill the repository
+            authored says so there, on the document it is about. */}
+        <DropdownMenuItem onClick={onOpen} data-testid="skill-menu-edit">
           <Pencil className="mr-2 size-4" />
           Edit
         </DropdownMenuItem>
-        {!editable ? (
-          <MenuReason testId="skill-menu-edit-reason">
-            Only a skill you wrote here can be edited.
-          </MenuReason>
-        ) : (
-          <MenuReason testId="skill-menu-edit-reason">{EDIT_UNAVAILABLE_REASON}</MenuReason>
-        )}
         <DropdownMenuItem onClick={onToggle} data-testid="skill-menu-toggle">
           <Power className="mr-2 size-4" />
           {skill.enabled ? "Disable" : "Enable"}
         </DropdownMenuItem>
+        {/* Between Enable/Disable and Update, the position the screen flow
+            names. There is no `Details` entry beside it: the card click is the
+            way into the panel, and this opens the same one. */}
+        <DropdownMenuItem onClick={onOpen} data-testid="skill-menu-scope">
+          <Users className="mr-2 size-4" />
+          Scope…
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!updatable}
+          onClick={updatable ? onUpdate : undefined}
+          data-testid="skill-menu-update"
+        >
+          <ArrowUpCircle className="mr-2 size-4" />
+          Update
+        </DropdownMenuItem>
+        {updateReason && (
+          <MenuReason testId="skill-menu-update-reason">
+            {updateReason}
+          </MenuReason>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           variant={removable ? "destructive" : undefined}
@@ -342,9 +457,18 @@ function SkillRowMenu({
   );
 }
 
-function MenuReason({ testId, children }: { testId: string; children: React.ReactNode }) {
+function MenuReason({
+  testId,
+  children,
+}: {
+  testId: string;
+  children: React.ReactNode;
+}) {
   return (
-    <p className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground" data-testid={testId}>
+    <p
+      className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground"
+      data-testid={testId}
+    >
       {children}
     </p>
   );

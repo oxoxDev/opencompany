@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMember } from "@/lib/team";
+import { AGENT_FIELDS } from "@/lib/agent";
 import { AddMemberDialog } from "@/views/room/AddMemberDialog";
 import { MembersPane } from "@/views/room/MembersPane";
 
@@ -173,5 +174,125 @@ describe("AddMemberDialog, when the write is refused", () => {
     ) as HTMLButtonElement | undefined;
     expect(retry).not.toBeUndefined();
     expect(retry?.disabled).toBe(false);
+  });
+});
+
+describe("the add-agent dialog asks what they do", () => {
+  const spec = AGENT_FIELDS.find((f) => f.key === "description")!;
+
+  function clientAs(): OpenCompanyClient {
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: (path: string) =>
+        path.endsWith("/inference")
+          ? Promise.resolve({ cognition: "echo" })
+          : Promise.resolve({}),
+    } as unknown as OpenCompanyClient;
+  }
+
+  async function flush() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function openDialog(onAdd: ReturnType<typeof vi.fn>) {
+    await act(async () => {
+      root.render(
+        createElement(AddMemberDialog, {
+          open: true,
+          onOpenChange: vi.fn(),
+          onAdd,
+          client: clientAs(),
+          company: "acme",
+        }),
+      );
+    });
+    await flush();
+  }
+
+  function setValue(el: HTMLInputElement | HTMLTextAreaElement, text: string) {
+    const proto =
+      el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+    act(() => {
+      setter.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function field() {
+    return document.body.querySelector(
+      "#agent-add-description",
+    ) as HTMLTextAreaElement | null;
+  }
+
+  it("offers the field, labelled the way the edit form labels it", async () => {
+    await openDialog(vi.fn(() => Promise.resolve(true)));
+    expect(field(), "the dialog asks for it").not.toBeNull();
+    expect(field()?.placeholder).toBe(spec.placeholder);
+    expect(document.body.textContent).toContain(spec.label);
+  });
+
+  it("does not repeat that label as the post's hint", async () => {
+    // Two controls both headed "What they do" is what made the field look
+    // missing rather than removed.
+    await openDialog(vi.fn(() => Promise.resolve(true)));
+    const occurrences = (
+      document.body.textContent?.match(new RegExp(spec.label, "g")) ?? []
+    ).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it("sends what was typed, trimmed", async () => {
+    const onAdd = vi.fn(() => Promise.resolve(true));
+    await openDialog(onAdd);
+
+    setValue(
+      document.body.querySelector("#agent-add-name") as HTMLInputElement,
+      "Nova",
+    );
+    setValue(
+      document.body.querySelector("#agent-add-role") as HTMLInputElement,
+      "Growth Marketer",
+    );
+    setValue(field()!, "  Runs paid acquisition.  ");
+
+    const create = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add agent",
+    ) as HTMLButtonElement;
+    await act(async () => create.click());
+    await flush();
+
+    expect(onAdd).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "Runs paid acquisition." }),
+    );
+  });
+
+  it("does not require it: a name and a post are still enough", async () => {
+    const onAdd = vi.fn(() => Promise.resolve(true));
+    await openDialog(onAdd);
+
+    setValue(
+      document.body.querySelector("#agent-add-name") as HTMLInputElement,
+      "Nova",
+    );
+    setValue(
+      document.body.querySelector("#agent-add-role") as HTMLInputElement,
+      "Growth Marketer",
+    );
+
+    const create = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add agent",
+    ) as HTMLButtonElement;
+    expect(create.disabled, "creatable without a description").toBe(false);
+    await act(async () => create.click());
+    await flush();
+    expect(onAdd).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "" }),
+    );
   });
 });

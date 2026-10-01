@@ -23,6 +23,14 @@ export interface HostSkill {
   enabled: boolean;
   version?: string | null;
   updatedAtMillis?: number | null;
+  /** The revisions either side of a library change, when the library has moved
+   * since this install pinned its snapshot. */
+  updateAvailable?: { from?: string | null; to?: string | null } | null;
+  /** Whether the stored copy no longer matches what was recorded at install. */
+  modified?: boolean;
+  /** Every teammate the host resolved a stance for, and whether it holds the
+   * skill right now. */
+  agents?: { id: string; state: string; holds: boolean }[];
 }
 
 /**
@@ -37,25 +45,46 @@ export interface HostSkill {
 export async function suppressTour(page: Page) {
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+    for (const key of [
+      "oc-tour:single",
+      "oc-tour:e2e-harness-co",
+      "oc-tour:null",
+    ]) {
       window.localStorage.setItem(key, seen);
     }
   });
 }
 
-/** Opens the Skills tab and waits for the list to have rendered. */
-export async function openSkills(page: Page) {
-  await page.goto(SKILLS_URL);
-  await expect(page.getByTestId("skills-read-only-note")).toBeVisible({ timeout: 30_000 });
+/**
+ * Opens the Skills tab and waits for the list to have rendered.
+ *
+ * Asks for cards by default. The Installed tab opens on rows, and the helpers
+ * below — and most specs using them — assert against `installed-card`; naming
+ * the view here keeps those assertions driving the drawing they were written
+ * for, instead of each spec silently testing whichever shape the tab defaults
+ * to this month. Pass `"list"` to drive rows deliberately.
+ */
+export async function openSkills(page: Page, view: "cards" | "list" = "cards") {
+  await page.goto(`${SKILLS_URL}?view=${view}`);
+  await expect(page.getByTestId("skills-read-only-note")).toBeVisible({
+    timeout: 30_000,
+  });
 }
 
-/** The installed row for `name`. */
+/** The installed card for `name`, in the cards drawing. */
 export function installedCard(page: Page, name: string) {
   return page.getByTestId("installed-card").filter({ hasText: name });
 }
 
+/** The installed row for `name`, in the rows drawing the tab opens on. */
+export function installedRow(page: Page, name: string) {
+  return page.getByTestId("installed-row").filter({ hasText: name });
+}
+
 /** The company's effective skill set, read straight from the host. */
-export async function hostSkills(request: APIRequestContext): Promise<HostSkill[]> {
+export async function hostSkills(
+  request: APIRequestContext,
+): Promise<HostSkill[]> {
   const answer = await request.get("/api/v1/company/skills");
   expect(answer.ok(), `GET …/skills failed: ${answer.status()}`).toBeTruthy();
   return (await answer.json()) as HostSkill[];
@@ -96,12 +125,20 @@ export function skillDoc(fields: {
 
 /** What `setInputFiles` wants for a document held in memory. */
 export function markdownUpload(filename: string, doc: string) {
-  return { name: filename, mimeType: "text/markdown", buffer: Buffer.from(doc, "utf8") };
+  return {
+    name: filename,
+    mimeType: "text/markdown",
+    buffer: Buffer.from(doc, "utf8"),
+  };
 }
 
 /** What `setInputFiles` wants for an archive built in memory. */
 export function archiveUpload(filename: string, slug: string, doc: string) {
-  return { name: filename, mimeType: "application/zip", buffer: zipOneSkill(slug, doc) };
+  return {
+    name: filename,
+    mimeType: "application/zip",
+    buffer: zipOneSkill(slug, doc),
+  };
 }
 
 /**
@@ -218,6 +255,51 @@ export async function signInAsMember(
   const verified = await context.post("/api/v1/company/auth/verify", {
     data: { code: devCode },
   });
-  expect(verified.ok(), `member sign-in failed: ${await verified.text()}`).toBeTruthy();
+  expect(
+    verified.ok(),
+    `member sign-in failed: ${await verified.text()}`,
+  ).toBeTruthy();
   expect((await verified.json()).role).toBe("member");
+}
+
+/** A skill's own page, addressed directly. */
+export function skillPageUrl(slug: string): string {
+  return `/#/connections/skills?skill=${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Amends the host's own `…/skills` answer on its way to the browser.
+ *
+ * The suite's usual rule is that a Skills spec asserts against whatever the
+ * host serves, and `skills-console.spec.ts` says why `updateAvailable` is not
+ * reachable from a browser: the shared library is read once per process, so
+ * nothing the console can do republishes it under a running host.
+ *
+ * Two states are therefore unreachable and still worth driving on screen — a
+ * row carrying an available update, and a scope wider than the reach cell has
+ * room for. This fetches the host's real answer and rewrites one field of it,
+ * the pattern `approval-blocker-verdicts.spec.ts` established: the rows, their
+ * provenance, their scopes and every other route on the page stay the host's.
+ * What a spec built this way cannot claim is that the host computes the field —
+ * that belongs to the Rust drift tests, and a spec here must say which half it
+ * is proving.
+ */
+export async function amendSkills(
+  page: Page,
+  amend: (skills: HostSkill[]) => HostSkill[],
+) {
+  // The browser's own path is company-scoped (`…/companies/<id>/skills`), not
+  // the `…/company/skills` alias the specs' API requests use — so match the
+  // collection by its tail and leave `…/skills/registry` and the write routes
+  // alone, none of which end there.
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/v1/") && url.pathname.endsWith("/skills"),
+    async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const answer = await route.fetch();
+      if (!answer.ok()) return route.fulfill({ response: answer });
+      route.fulfill({ json: amend((await answer.json()) as HostSkill[]) });
+    },
+  );
 }

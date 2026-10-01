@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SKILLS_READ_ONLY_NOTE, skillReachLabel } from "@/lib/skills";
+import { SKILLS_READ_ONLY_NOTE } from "@/lib/skills";
 
 /**
  * The Skills tab's honesty about what a skill is (issue #569).
@@ -32,21 +32,5 @@ describe("SKILLS_READ_ONLY_NOTE", () => {
     // handing a teammate something it will carry out.
     expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/agents? (can|will) (run|execute|use)/i);
     expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/agents? (can|will) (run|execute)/i);
-  });
-});
-
-describe("skillReachLabel", () => {
-  it("describes an enabled skill as readable, not as runnable", () => {
-    const label = skillReachLabel(true);
-    expect(label).toMatch(/read/i);
-    expect(label).not.toMatch(/run|execute/i);
-  });
-
-  it("describes a disabled skill as out of an agent's sight", () => {
-    expect(skillReachLabel(false)).toMatch(/hidden/i);
-  });
-
-  it("distinguishes the two states", () => {
-    expect(skillReachLabel(true)).not.toBe(skillReachLabel(false));
   });
 });

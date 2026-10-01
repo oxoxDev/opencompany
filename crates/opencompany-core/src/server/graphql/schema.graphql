@@ -1136,6 +1136,78 @@ type Skill {
 	The library revision this skill's document carries, when it has one.
 	"""
 	version: String
+	"""
+	The revisions either side of a library change, when the library's
+	document has moved since this install pinned its snapshot. `None` when it
+	has not, and on a row that pinned nothing.
+	"""
+	updateAvailable: SkillUpdate
+	"""
+	Whether the stored document no longer matches the digest recorded at
+	install. `false` on a row that pinned nothing, so a reader never has to
+	tell "clean" apart from "absent".
+	"""
+	modified: Boolean!
+	"""
+	Where every roster agent stands on this skill — the read-side inversion
+	of the per-agent allowlist, the same projection `GET …/skills` reports.
+	
+	A list, never null: this resolver loads the company record, so it can
+	always say. An empty list means the company has no teammates.
+	"""
+	agents: [SkillAgentScope!]!
+}
+
+"""
+One roster agent's standing on one skill.
+
+A GraphQL type of its own rather than an `async_graphql` derive on
+[`SkillAgentScope`]: that type is `company`'s vocabulary, shared with the
+REST projection, and a transport's schema attributes have no business on it.
+"""
+type SkillAgentScope {
+	"""
+	The roster agent's id.
+	"""
+	id: ID!
+	"""
+	Which of the three stored states this agent is in for this skill:
+	`inherited` | `included` | `excluded`.
+	
+	`inherited` and `excluded` are not interchangeable. An agent that has
+	never been scoped and one given an explicit empty list both hold nothing
+	while the skill is disabled, and only the first holds it again when the
+	switch goes back on.
+	"""
+	state: String!
+	"""
+	Whether the agent actually gets this skill right now — the scope resolved
+	against the company's switch, not the scope alone.
+	"""
+	holds: Boolean!
+}
+
+"""
+The two revisions either side of a library change.
+
+A GraphQL type of its own rather than an `async_graphql` derive on
+[`VersionChange`]: that type is `company`'s vocabulary, shared with the REST
+projection and the store, and a transport's schema attributes have no
+business on it.
+
+Neither side is ordered against the other — `version` is free text a
+publisher writes, so a reader may say the document *changed*, never that it
+is *newer*.
+"""
+type SkillUpdate {
+	"""
+	The revision recorded when the install pinned its snapshot.
+	"""
+	from: String
+	"""
+	The revision the library's current document declares.
+	"""
+	to: String
 }
 
 """

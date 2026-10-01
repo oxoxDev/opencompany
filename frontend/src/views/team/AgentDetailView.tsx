@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ChevronRight,
   Cpu,
@@ -19,7 +25,12 @@ import {
   ensureAcpModels,
   type AcpHarnessModel,
 } from "@/api/transport/desktop";
-import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } from "@/api/types";
+import {
+  ApiError,
+  type AgentDetailDto,
+  type EditAgentInput,
+  type HarnessDto,
+} from "@/api/types";
 import { AgentFace } from "@/components/agent-face";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
@@ -85,7 +96,11 @@ import {
 import { HarnessDetailDialog } from "@/components/harness-detail";
 import { useHarnessRows } from "@/lib/use-harness-rows";
 import { draftAgentField } from "@/api/agent-copilot";
-import { getInferenceStatus, type CognitionPath, type InferenceStatus } from "@/api/inference";
+import {
+  getInferenceStatus,
+  type CognitionPath,
+  type InferenceStatus,
+} from "@/api/inference";
 import { checkModelId, modelIdErrorCopy } from "@/inference/connect";
 import { ModelField } from "@/inference/ModelField";
 import type { DefaultChoice, Provider } from "@/inference/types";
@@ -95,6 +110,14 @@ import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { usd } from "@/lib/money";
+import { skillHref } from "@/lib/skills";
+import {
+  SCOPE_ONLY_TAKES_AWAY,
+  droppedSlugs,
+  scopeUnchanged,
+  showingInherited,
+  toggleSkillInScope,
+} from "@/lib/skill-scope";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
@@ -165,7 +188,9 @@ async function classifyFailure(
   if (!(error instanceof ApiError) || error.status !== 404) return "error";
   const members = await roster().catch(() => null);
   if (members === null) return "error";
-  return members.some((member) => member.id === agentId) ? "unsupported" : "missing";
+  return members.some((member) => member.id === agentId)
+    ? "unsupported"
+    : "missing";
 }
 
 /**
@@ -206,14 +231,27 @@ async function classifyFailure(
  * its definition, and each one is a thing you change rather than read.
  */
 const AGENT_TABS = [
-  { id: "overview", label: "Overview", hint: "What it is doing, and what it has done" },
+  {
+    id: "overview",
+    label: "Overview",
+    hint: "What it is doing, and what it has done",
+  },
   // What it has said and heard, across every channel it can read, in one
   // stream. Second because it is the tab that answers "what is this teammate
   // actually like to work with" — the question an operator arrives with — and
   // because everything below it describes configuration rather than conduct.
   { id: "session", label: "Session", hint: "Everything it has said and heard" },
-  { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
+  {
+    id: "instructions",
+    label: "Instructions",
+    hint: "What it owns and how it is told to work",
+  },
   { id: "tools", label: "Tools", hint: "What it is allowed to call" },
+  // Skills is its own tab rather than a card under Tools. A tool grant is what
+  // this teammate may *call*; a skill is a playbook it *reads*, and the two are
+  // stored, resolved and refused separately. Sharing a tab made the skill scope
+  // read as a kind of tool permission, which is the one thing it is not.
+  { id: "skills", label: "Skills", hint: "Which playbooks it reads" },
   // Tools is the grant — which servers this teammate may reach. Permissions is
   // what that resolves to once each server's own tool modes and this teammate's
   // own narrowing are composed.
@@ -322,9 +360,9 @@ export function AgentDetailView({
    * match. A write's own id is what both the disable and the cleanup key on,
    * so a write in flight for one agent never touches another's switch.
    */
-  const [pendingInboxAgentIds, setPendingInboxAgentIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [pendingInboxAgentIds, setPendingInboxAgentIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
@@ -390,7 +428,9 @@ export function AgentDetailView({
    */
   const [avatarOpen, setAvatarOpen] = useState(false);
 
-  const missing = agent ? missingRequired(draft, (key) => isEditable(agent, key)) : [];
+  const missing = agent
+    ? missingRequired(draft, (key) => isEditable(agent, key))
+    : [];
 
   // Issue #1776: read the cognition path while the edit form is open, so the
   // copilot can say "no model is configured" instead of offering a draft that
@@ -449,7 +489,9 @@ export function AgentDetailView({
       setLoad("ready");
     } catch (error) {
       setAgent(null);
-      setLoad(await classifyFailure(error, () => client.listTeam(company), agentId));
+      setLoad(
+        await classifyFailure(error, () => client.listTeam(company), agentId),
+      );
     }
   }, [client, company, agentId]);
 
@@ -506,10 +548,20 @@ export function AgentDetailView({
         setOpenTasks(null);
         return;
       }
-      setWorkload(workloadByAssignee(tasks, columns).get(agentId) ?? { open: 0, status: "idle" });
-      const closed = new Set(columns.filter((column) => column.closed).map((column) => column.id));
+      setWorkload(
+        workloadByAssignee(tasks, columns).get(agentId) ?? {
+          open: 0,
+          status: "idle",
+        },
+      );
+      const closed = new Set(
+        columns.filter((column) => column.closed).map((column) => column.id),
+      );
       setOpenTasks(
-        tasks.filter((task) => task.assignee.trim() === agentId && !closed.has(task.column)),
+        tasks.filter(
+          (task) =>
+            task.assignee.trim() === agentId && !closed.has(task.column),
+        ),
       );
     })();
     return () => {
@@ -537,9 +589,6 @@ export function AgentDetailView({
     };
   }, [client, company, harnessNonce]);
 
-
-
-
   /**
    * Save a chosen face, or `undefined` to go back to the hashed default.
    *
@@ -556,13 +605,19 @@ export function AgentDetailView({
     // land after a newer choice was saved.
     setAvatarSaving(true);
     try {
-      const updated = await client.updateAgent(agentId, { avatar: avatar ?? null }, company);
+      const updated = await client.updateAgent(
+        agentId,
+        { avatar: avatar ?? null },
+        company,
+      );
       if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
       toast.success(avatar ? "Icon updated." : "Back to the default icon.");
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Couldn't change this agent's icon.",
+        error instanceof Error
+          ? error.message
+          : "Couldn't change this agent's icon.",
       );
     } finally {
       setAvatarSaving(false);
@@ -599,7 +654,9 @@ export function AgentDetailView({
     } catch (error) {
       if (displayedAgentIdRef.current === id) setAgent(previous);
       toast.error(
-        error instanceof Error ? error.message : "Couldn't change this agent's inbox.",
+        error instanceof Error
+          ? error.message
+          : "Couldn't change this agent's inbox.",
       );
     } finally {
       // Cleared unconditionally, unlike the `setAgent` revert above — the
@@ -665,7 +722,11 @@ export function AgentDetailView({
       // Three-state (issue #1804): `null` resets to the standard company grant,
       // `[]` is a deliberate deny-all, a non-empty list narrows. All three are
       // meaningful on the wire, so the value is passed through untouched.
-      const updated = await client.updateAgent(agentId, { tools: globs }, company);
+      const updated = await client.updateAgent(
+        agentId,
+        { tools: globs },
+        company,
+      );
       // A slow save must not clobber the active detail: only fold the response
       // in when the agent on screen is still the one we saved (the same guard
       // the ordinary save, reset, budget and inbox writes use).
@@ -689,6 +750,43 @@ export function AgentDetailView({
   }
 
   /**
+   * Save the teammate's skill scope.
+   *
+   * Its own write for the same reason `saveTools` is: the host gates `skills`
+   * on admin where name, role and instructions are member-open, so folding it
+   * into `save()` would 403 an ordinary member edit the moment a stale scope
+   * rode along.
+   */
+  async function saveSkills(slugs: string[] | null) {
+    if (!agent) return;
+    setSaving(true);
+    try {
+      // Three-state on the wire: `null` restores every enabled skill, `[]` is a
+      // deliberate no-skills scope, a non-empty list narrows. Passed through
+      // untouched, because all three are meaningful.
+      const updated = await client.updateAgent(
+        agentId,
+        { skills: slugs },
+        company,
+      );
+      if (displayedAgentIdRef.current !== agentId) return;
+      setAgent(updated);
+      toast.success("Skill scope updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save this skill scope.",
+      );
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /**
    * Save the harness binding, the model override, or both (issue #1245's
    * harness-picker follow-up) — one `PATCH`, so the host's cross-field check
    * (a model only means anything on the harness this same save leaves the
@@ -699,8 +797,14 @@ export function AgentDetailView({
    */
   async function saveHarnessAndModel(opts?: { confirmed?: boolean }) {
     if (!agent) return;
-    const harness = harnessEdit(agent.harness, harnessDraft === HARNESS_DEFAULT ? "" : harnessDraft);
-    const draftKind = resolvedHarnessKind(harnesses, harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft);
+    const harness = harnessEdit(
+      agent.harness,
+      harnessDraft === HARNESS_DEFAULT ? "" : harnessDraft,
+    );
+    const draftKind = resolvedHarnessKind(
+      harnesses,
+      harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft,
+    );
     const edits: EditAgentInput = {};
     if (harness !== undefined) edits.harness = harness;
 
@@ -748,7 +852,8 @@ export function AgentDetailView({
       toast.success("Harness updated.");
     } catch (error) {
       toast.error(
-        error instanceof ApiError && (error.status === 403 || error.status === 400)
+        error instanceof ApiError &&
+          (error.status === 403 || error.status === 400)
           ? error.message
           : error instanceof Error
             ? error.message
@@ -769,7 +874,11 @@ export function AgentDetailView({
     if (!agent) return;
     setSaving(true);
     try {
-      const updated = await client.updateAgent(agentId, { instructions: null }, company);
+      const updated = await client.updateAgent(
+        agentId,
+        { instructions: null },
+        company,
+      );
       // A slow reset must not clobber the active detail: only fold the response
       // in when the agent on screen is still the one we asked to reset (the same
       // identity guard the budget writes and inbox toggle use).
@@ -824,7 +933,10 @@ export function AgentDetailView({
                 Company
               </button>
             </li>
-            <li aria-hidden className="flex items-center text-muted-foreground/60">
+            <li
+              aria-hidden
+              className="flex items-center text-muted-foreground/60"
+            >
               <ChevronRight className="size-3.5" />
             </li>
             <li
@@ -834,7 +946,7 @@ export function AgentDetailView({
               {/* Named as soon as there is a name, and "Agent" until then.
                   A crumb that appeared only once the read landed would move
                   the page's controls across the row as it settled. */}
-              {agent ? (agent.name?.trim() || agent.role) : "Agent"}
+              {agent ? agent.name?.trim() || agent.role : "Agent"}
             </li>
           </ol>
         </nav>
@@ -921,35 +1033,43 @@ export function AgentDetailView({
               />
             </div>
 
-            <PageTabPanel idBase="agent" id="overview" value={tab} className="space-y-6">
-            <FactLine agent={agent} workload={workload} />
-            {/* One control, not a tab (see `AGENT_TABS`'s own doc comment) —
+            <PageTabPanel
+              idBase="agent"
+              id="overview"
+              value={tab}
+              className="space-y-6"
+            >
+              <FactLine agent={agent} workload={workload} />
+              {/* One control, not a tab (see `AGENT_TABS`'s own doc comment) —
                 whether this teammate receives mail at all. */}
-            <div className="flex items-center gap-2">
-              <Switch
-                id="agent-inbox-toggle"
-                data-testid="agent-inbox-toggle"
-                checked={agent.inboxEnabled ?? false}
-                disabled={pendingInboxAgentIds.has(agent.id)}
-                onCheckedChange={(on) => void toggleInbox(on)}
-              />
-              <Label htmlFor="agent-inbox-toggle" className="text-sm font-normal">
-                Inbox
-              </Label>
-            </div>
-            <OpenTasks tasks={openTasks} />
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="agent-inbox-toggle"
+                  data-testid="agent-inbox-toggle"
+                  checked={agent.inboxEnabled ?? false}
+                  disabled={pendingInboxAgentIds.has(agent.id)}
+                  onCheckedChange={(on) => void toggleInbox(on)}
+                />
+                <Label
+                  htmlFor="agent-inbox-toggle"
+                  className="text-sm font-normal"
+                >
+                  Inbox
+                </Label>
+              </div>
+              <OpenTasks tasks={openTasks} />
 
-            {/* What this agent has actually done (issue #1573), directly
+              {/* What this agent has actually done (issue #1573), directly
                 under what it is doing now. Everything below this point defines
                 the agent — instructions, tools, inbox, budget — and the
                 record of its work reads before its definition, not after four
                 cards of configuration. */}
-            <AgentRuns
-              client={client}
-              company={company}
-              agentId={agent.id}
-              agentName={agent.name?.trim() || agent.role}
-            />
+              <AgentRuns
+                client={client}
+                company={company}
+                agentId={agent.id}
+                agentName={agent.name?.trim() || agent.role}
+              />
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="session" value={tab}>
@@ -970,326 +1090,364 @@ export function AgentDetailView({
                 appears on one tab and nowhere else, offered identically from
                 all six. Each tab now carries its own way in. */}
             <PageTabPanel idBase="agent" id="instructions" value={tab}>
-            <Section
-              title="Instructions"
-              // Names both halves, because the card holds both and the operator
-              // has to be able to tell them apart. It used to say only "What
-              // this teammate was defined to do. It frames every turn they
-              // take." over a body that was the *description* with no label on
-              // it — so a teammate with no persona showed one sentence under a
-              // heading naming the other field, and nothing on screen said the
-              // persona was empty. See the two labelled blocks below.
-              subtitle="What this agent owns, and the standing instructions that frame every turn they take."
-              action={
-                <div className="flex items-center gap-2">
-                  {/* Reset is offered only when an override is actually masking
+              <Section
+                title="Instructions"
+                // Names both halves, because the card holds both and the operator
+                // has to be able to tell them apart. It used to say only "What
+                // this teammate was defined to do. It frames every turn they
+                // take." over a body that was the *description* with no label on
+                // it — so a teammate with no persona showed one sentence under a
+                // heading naming the other field, and nothing on screen said the
+                // persona was empty. See the two labelled blocks below.
+                subtitle="What this agent owns, and the standing instructions that frame every turn they take."
+                action={
+                  <div className="flex items-center gap-2">
+                    {/* Reset is offered only when an override is actually masking
                       the blueprint, and only to a viewer the host will let
                       write instructions — otherwise it is a control that can
                       only 409. */}
-                  {isEditable(agent, "instructions") && agent.instructionsOverridden && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => void resetInstructions()}
-                      disabled={saving}
-                      data-testid="agent-instructions-reset"
-                    >
-                      Reset to blueprint
-                    </Button>
-                  )}
-                  {!editing && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setEditing(true)}
-                      // Disabled with the reason, never absent — an operator
-                      // looking for the edit needs to find out *why* there
-                      // isn't one, not to conclude the console forgot to build
-                      // it. What makes a teammate uneditable is the host's own
-                      // `editable` list and nothing this file decides.
-                      disabled={agent.editable.length === 0}
-                      title={
-                        agent.editable.length === 0
-                          ? "This agent can't be edited from here."
-                          : undefined
+                    {isEditable(agent, "instructions") &&
+                      agent.instructionsOverridden && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void resetInstructions()}
+                          disabled={saving}
+                          data-testid="agent-instructions-reset"
+                        >
+                          Reset to blueprint
+                        </Button>
+                      )}
+                    {!editing && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setEditing(true)}
+                        // Disabled with the reason, never absent — an operator
+                        // looking for the edit needs to find out *why* there
+                        // isn't one, not to conclude the console forgot to build
+                        // it. What makes a teammate uneditable is the host's own
+                        // `editable` list and nothing this file decides.
+                        disabled={agent.editable.length === 0}
+                        title={
+                          agent.editable.length === 0
+                            ? "This agent can't be edited from here."
+                            : undefined
+                        }
+                        data-testid="agent-edit"
+                      >
+                        <Pencil className="size-4" /> Edit
+                      </Button>
+                    )}
+                  </div>
+                }
+              >
+                {editing ? (
+                  <div className="grid gap-4">
+                    <AgentFields
+                      idPrefix="agent-edit"
+                      draft={draft}
+                      onChange={(key: AgentFieldKey, value) =>
+                        setDraft((d) => ({ ...d, [key]: value }))
                       }
-                      data-testid="agent-edit"
-                    >
-                      <Pencil className="size-4" /> Edit
-                    </Button>
-                  )}
-                </div>
-              }
-            >
-              {editing ? (
-                <div className="grid gap-4">
-                  <AgentFields
-                    idPrefix="agent-edit"
-                    draft={draft}
-                    onChange={(key: AgentFieldKey, value) =>
-                      setDraft((d) => ({ ...d, [key]: value }))
-                    }
-                    readOnly={(key) => !isEditable(agent, key)}
-                    copilot={(key) =>
-                      key === "description" || key === "instructions" ? (
-                        <FieldCopilot
-                          field={key}
-                          // Addressed by id: this teammate exists, so the host
-                          // grounds the draft in its own record rather than in
-                          // anything this console sends.
-                          onTurn={(conversation) =>
-                            draftAgentField(client, company, agentId, key, conversation, {
-                              // The form's own values, not the host's. An
-                              // operator who took a draft and has not saved is
-                              // looking at something the record does not have,
-                              // and a copilot grounded in the record would
-                              // refine a version that is no longer on screen.
-                              description: draft.description,
-                              instructions: draft.instructions,
-                              // Identity too: both prompts are written FROM the
-                              // role, so a teammate repurposed on this form and
-                              // drafted for before Save would otherwise get a
-                              // mandate for the job it used to do.
-                              role: draft.role,
-                              name: draft.name,
-                            })
-                          }
-                          // Fills the form draft and nothing else. The Save
-                          // below is still what writes, which is what makes a
-                          // drafted persona no different from a typed one.
-                          onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
-                          // A blank role is refused here for the reason the
-                          // Add form refuses it: both briefs are written FROM
-                          // the role. The wire drops a blank one rather than
-                          // sending it, so the host would fall back to the
-                          // STORED role and draft for the job this teammate is
-                          // being moved off — the one thing the operator is
-                          // mid-way through changing.
-                          disabled={saving || cognition === "echo" || !draft.role.trim()}
-                          disabledNotice={
-                            cognition === "echo"
-                              ? "No model is configured, so the copilot can't draft yet."
-                              : !draft.role.trim()
-                                ? "Give this agent a role first — the copilot drafts from it."
-                                : undefined
-                          }
-                        />
-                      ) : null
-                    }
-                  />
-                  {agent.instructionsOverridden && agent.blueprintInstructions?.trim() && (
-                    <p
-                      className="whitespace-pre-wrap text-xs text-muted-foreground"
-                      data-testid="agent-blueprint-hint"
-                    >
-                      Overriding the blueprint. Clearing this field, or “Reset to blueprint”,
-                      restores: {agent.blueprintInstructions.trim()}
-                    </p>
-                  )}
-                  <div className="flex items-center justify-end gap-2">
-                    {/* Why Save is dead, next to Save (issue #1776). A manifest
+                      readOnly={(key) => !isEditable(agent, key)}
+                      copilot={(key) =>
+                        key === "description" || key === "instructions" ? (
+                          <FieldCopilot
+                            field={key}
+                            // Addressed by id: this teammate exists, so the host
+                            // grounds the draft in its own record rather than in
+                            // anything this console sends.
+                            onTurn={(conversation) =>
+                              draftAgentField(
+                                client,
+                                company,
+                                agentId,
+                                key,
+                                conversation,
+                                {
+                                  // The form's own values, not the host's. An
+                                  // operator who took a draft and has not saved is
+                                  // looking at something the record does not have,
+                                  // and a copilot grounded in the record would
+                                  // refine a version that is no longer on screen.
+                                  description: draft.description,
+                                  instructions: draft.instructions,
+                                  // Identity too: both prompts are written FROM the
+                                  // role, so a teammate repurposed on this form and
+                                  // drafted for before Save would otherwise get a
+                                  // mandate for the job it used to do.
+                                  role: draft.role,
+                                  name: draft.name,
+                                },
+                              )
+                            }
+                            // Fills the form draft and nothing else. The Save
+                            // below is still what writes, which is what makes a
+                            // drafted persona no different from a typed one.
+                            onAccept={(text) =>
+                              setDraft((d) => ({ ...d, [key]: text }))
+                            }
+                            // A blank role is refused here for the reason the
+                            // Add form refuses it: both briefs are written FROM
+                            // the role. The wire drops a blank one rather than
+                            // sending it, so the host would fall back to the
+                            // STORED role and draft for the job this teammate is
+                            // being moved off — the one thing the operator is
+                            // mid-way through changing.
+                            disabled={
+                              saving ||
+                              cognition === "echo" ||
+                              !draft.role.trim()
+                            }
+                            disabledNotice={
+                              cognition === "echo"
+                                ? "No model is configured, so the copilot can't draft yet."
+                                : !draft.role.trim()
+                                  ? "Give this agent a role first — the copilot drafts from it."
+                                  : undefined
+                            }
+                          />
+                        ) : null
+                      }
+                    />
+                    {agent.instructionsOverridden &&
+                      agent.blueprintInstructions?.trim() && (
+                        <p
+                          className="whitespace-pre-wrap text-xs text-muted-foreground"
+                          data-testid="agent-blueprint-hint"
+                        >
+                          Overriding the blueprint. Clearing this field, or
+                          “Reset to blueprint”, restores:{" "}
+                          {agent.blueprintInstructions.trim()}
+                        </p>
+                      )}
+                    <div className="flex items-center justify-end gap-2">
+                      {/* Why Save is dead, next to Save (issue #1776). A manifest
                         agent carries no name of its own, so this form opens
                         with Name blank and the button already disabled — and
                         until this line the only way to find that out was to
                         guess. The fields themselves are marked too; this says
                         it where the operator is looking when they wonder. */}
-                    {missing.length > 0 && (
-                      <p
-                        className="mr-auto text-2xs text-muted-foreground"
-                        data-testid="agent-save-blocked"
+                      {missing.length > 0 && (
+                        <p
+                          className="mr-auto text-2xs text-muted-foreground"
+                          data-testid="agent-save-blocked"
+                        >
+                          {missing.map((field) => field.label).join(" and ")}{" "}
+                          {missing.length > 1 ? "are" : "is"} required to save.
+                        </p>
+                      )}
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setDraft(draftFrom(agent));
+                          setEditing(false);
+                        }}
                       >
-                        {missing.map((field) => field.label).join(" and ")}{" "}
-                        {missing.length > 1 ? "are" : "is"} required to save.
-                      </p>
-                    )}
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setDraft(draftFrom(agent));
-                        setEditing(false);
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      onClick={() => void save()}
-                      disabled={saving || !draftIsValid(agent, draft)}
-                      data-testid="agent-save"
-                    >
-                      Save
-                    </Button>
+                        Cancel
+                      </Button>
+                      <Button
+                        onClick={() => void save()}
+                        disabled={saving || !draftIsValid(agent, draft)}
+                        data-testid="agent-save"
+                      >
+                        Save
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <>
-                  {/* Labelled, like the persona below it. Unlabelled, this
+                ) : (
+                  <>
+                    {/* Labelled, like the persona below it. Unlabelled, this
                       paragraph was read as the standing instructions the card's
                       heading names — and for an agent with no persona it was
                       the only thing on the card, so the mistake was the default
                       rather than an edge. */}
-                  <div className="space-y-1">
-                    <p className="text-xs font-medium">What they do</p>
-                    <p
-                      className="whitespace-pre-wrap text-sm text-muted-foreground"
-                      data-testid="agent-description"
-                    >
-                      {agent.description?.trim() ||
-                        "No description was written for this agent."}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-xs font-medium">
-                      Persona instructions
-                      {agent.instructions?.trim() && agent.instructionsOverridden
-                        ? " · overriding the blueprint"
-                        : ""}
-                    </p>
-                    {agent.instructions?.trim() ? (
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium">What they do</p>
                       <p
                         className="whitespace-pre-wrap text-sm text-muted-foreground"
-                        data-testid="agent-instructions"
+                        data-testid="agent-description"
                       >
-                        {agent.instructions.trim()}
+                        {agent.description?.trim() ||
+                          "No description was written for this agent."}
                       </p>
-                    ) : (
-                      // Said rather than left blank. An empty persona is a real
-                      // state with a consequence — this teammate runs on the
-                      // company's default wording — and the operator could
-                      // previously only find out by opening the edit form.
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium">
+                        Persona instructions
+                        {agent.instructions?.trim() &&
+                        agent.instructionsOverridden
+                          ? " · overriding the blueprint"
+                          : ""}
+                      </p>
+                      {agent.instructions?.trim() ? (
+                        <p
+                          className="whitespace-pre-wrap text-sm text-muted-foreground"
+                          data-testid="agent-instructions"
+                        >
+                          {agent.instructions.trim()}
+                        </p>
+                      ) : (
+                        // Said rather than left blank. An empty persona is a real
+                        // state with a consequence — this teammate runs on the
+                        // company's default wording — and the operator could
+                        // previously only find out by opening the edit form.
+                        <p
+                          className="text-sm text-muted-foreground"
+                          data-testid="agent-instructions-empty"
+                        >
+                          None yet, so this agent runs on the company&apos;s
+                          default wording. Edit to write some, or ask the
+                          copilot.
+                        </p>
+                      )}
+                    </div>
+                    {agent.editable.length === 0 && (
                       <p
-                        className="text-sm text-muted-foreground"
-                        data-testid="agent-instructions-empty"
+                        className="text-xs text-muted-foreground"
+                        data-testid="agent-readonly-note"
                       >
-                        None yet, so this agent runs on the company&apos;s default
-                        wording. Edit to write some, or ask the copilot.
+                        This agent can't be edited from here — its definition
+                        comes from the company's manifest.
                       </p>
                     )}
-                  </div>
-                  {agent.editable.length === 0 && (
-                    <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This agent can't be edited from here — its definition comes from the
-                      company's manifest.
-                    </p>
-                  )}
-                </>
-              )}
-            </Section>
-
+                  </>
+                )}
+              </Section>
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="tools" value={tab}>
-            <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
+              <Tools
+                agent={agent}
+                saving={saving}
+                onSave={(globs) => saveTools(globs)}
+              />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="skills" value={tab}>
+              <Skills
+                key={agent.id}
+                agent={agent}
+                saving={saving}
+                onSave={(slugs) => saveSkills(slugs)}
+              />
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="permissions" value={tab}>
-            <AgentMcpPermissions
-              client={client}
-              company={company}
-              agentId={agent.id}
-              agentName={agent.name?.trim() || agent.role}
-              onOpenServer={(name) => {
-                // `showing` is the permissions panel's own lens parameter, so the
-                // click lands on this teammate's rows rather than on the company
-                // document they are resolved against.
-                window.location.hash =
-                  `#/connections/mcp?server=${encodeURIComponent(name)}` +
-                  `&showing=${encodeURIComponent(agent.id)}`;
-              }}
-            />
+              <AgentMcpPermissions
+                client={client}
+                company={company}
+                agentId={agent.id}
+                agentName={agent.name?.trim() || agent.role}
+                onOpenServer={(name) => {
+                  // `showing` is the permissions panel's own lens parameter, so the
+                  // click lands on this teammate's rows rather than on the company
+                  // document they are resolved against.
+                  window.location.hash =
+                    `#/connections/mcp?server=${encodeURIComponent(name)}` +
+                    `&showing=${encodeURIComponent(agent.id)}`;
+                }}
+              />
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="model" value={tab}>
-            <HarnessAndModel
-              agent={agent}
-              harnesses={harnesses}
-              editing={editingHarness}
-              harnessDraft={harnessDraft}
-              modelDraft={modelDraft}
-              providerDraft={providerDraft}
-              // Round-2 review, P1-6: the FULL list, not enabled-only — a
-              // disabled provider still has to resolve to its own label and
-              // to `providerState`'s "disabled" (not "removed") through
-              // `pairLabel`/`agentPairBrokenCopy`/`resolveAgentDefault`, all
-              // of which this same list feeds. `HarnessAndModel` filters to
-              // enabled rows itself, only for the picker's new-pin options.
-              providers={inference?.providers ?? []}
-              defaultChoice={inference?.defaultChoice}
-              client={client}
-              company={company}
-              saving={savingHarness}
-              onRecheck={() => setHarnessNonce((n) => n + 1)}
-              onEdit={() => {
-                setHarnessDraft(agent.harness ?? HARNESS_DEFAULT);
-                setModelDraft(agent.model ?? "");
-                setProviderDraft(agent.provider ?? "");
-                setEditingHarness(true);
-              }}
-              onHarnessChange={(next) => {
-                setHarnessDraft(next);
-                // A model override only means anything against a harness that
-                // can be told which model to run. Switching to a `built_in`
-                // one — the host's own engine, whose model is the host's to
-                // choose — must drop the ACP override rather than save a value
-                // that will silently never apply, and switching to or from
-                // `acp` must drop the pair for the same reason in reverse: a
-                // pair is refused outright on an ACP harness (3a). Leaving
-                // either also made the form claim a binding it was not going
-                // to honour.
-                // The sentinel has to be resolved first, not excluded. "Company
-                // default" is a *binding*, not a kind — when the company
-                // default is `built_in`, picking it lands the teammate on a
-                // managed harness exactly as naming one explicitly would. The
-                // earlier version skipped the sentinel, so that route kept the
-                // model, hid the control, and then sent the model anyway: the
-                // host refused with a 400 against a field the operator could
-                // no longer see or clear.
-                const resolve = (id: string) =>
-                  id === HARNESS_DEFAULT
-                    ? harnesses.find((h) => h.default)
-                    : harnesses.find((h) => h.id === id);
-                const before = resolve(harnessDraft);
-                const bound = resolve(next);
+              <HarnessAndModel
+                agent={agent}
+                harnesses={harnesses}
+                editing={editingHarness}
+                harnessDraft={harnessDraft}
+                modelDraft={modelDraft}
+                providerDraft={providerDraft}
+                // Round-2 review, P1-6: the FULL list, not enabled-only — a
+                // disabled provider still has to resolve to its own label and
+                // to `providerState`'s "disabled" (not "removed") through
+                // `pairLabel`/`agentPairBrokenCopy`/`resolveAgentDefault`, all
+                // of which this same list feeds. `HarnessAndModel` filters to
+                // enabled rows itself, only for the picker's new-pin options.
+                providers={inference?.providers ?? []}
+                defaultChoice={inference?.defaultChoice}
+                client={client}
+                company={company}
+                saving={savingHarness}
+                onRecheck={() => setHarnessNonce((n) => n + 1)}
+                onEdit={() => {
+                  setHarnessDraft(agent.harness ?? HARNESS_DEFAULT);
+                  setModelDraft(agent.model ?? "");
+                  setProviderDraft(agent.provider ?? "");
+                  setEditingHarness(true);
+                }}
+                onHarnessChange={(next) => {
+                  setHarnessDraft(next);
+                  // A model override only means anything against a harness that
+                  // can be told which model to run. Switching to a `built_in`
+                  // one — the host's own engine, whose model is the host's to
+                  // choose — must drop the ACP override rather than save a value
+                  // that will silently never apply, and switching to or from
+                  // `acp` must drop the pair for the same reason in reverse: a
+                  // pair is refused outright on an ACP harness (3a). Leaving
+                  // either also made the form claim a binding it was not going
+                  // to honour.
+                  // The sentinel has to be resolved first, not excluded. "Company
+                  // default" is a *binding*, not a kind — when the company
+                  // default is `built_in`, picking it lands the teammate on a
+                  // managed harness exactly as naming one explicitly would. The
+                  // earlier version skipped the sentinel, so that route kept the
+                  // model, hid the control, and then sent the model anyway: the
+                  // host refused with a 400 against a field the operator could
+                  // no longer see or clear.
+                  const resolve = (id: string) =>
+                    id === HARNESS_DEFAULT
+                      ? harnesses.find((h) => h.default)
+                      : harnesses.find((h) => h.id === id);
+                  const before = resolve(harnessDraft);
+                  const bound = resolve(next);
 
-                // Two ways an ACP model override stops meaning anything, and
-                // both have to clear it:
-                //
-                //   - the target is managed, whose model is the host's choice;
-                //   - the target is a *different* ACP agent. Model ids are the
-                //     agent's own vocabulary, so a Claude model handed to
-                //     Codex is not refused — `model_config_id` simply fails to
-                //     find it and the session stays on its default, while the
-                //     page goes on claiming an override that is not applied.
-                //
-                // Compared on `agent` rather than harness id, since two
-                // harnesses can drive the same CLI and a model is valid across
-                // those.
-                const acpModelStillValid = bound?.kind === "acp" && bound.agent === before?.agent;
+                  // Two ways an ACP model override stops meaning anything, and
+                  // both have to clear it:
+                  //
+                  //   - the target is managed, whose model is the host's choice;
+                  //   - the target is a *different* ACP agent. Model ids are the
+                  //     agent's own vocabulary, so a Claude model handed to
+                  //     Codex is not refused — `model_config_id` simply fails to
+                  //     find it and the session stays on its default, while the
+                  //     page goes on claiming an override that is not applied.
+                  //
+                  // Compared on `agent` rather than harness id, since two
+                  // harnesses can drive the same CLI and a model is valid across
+                  // those.
+                  const acpModelStillValid =
+                    bound?.kind === "acp" && bound.agent === before?.agent;
 
-                // The pair kind boundary: crossing between `acp` and anything
-                // else drops both halves, restored from the agent's own stored
-                // pair only if the new kind lands back where it started —
-                // switching harness twice and returning should not have
-                // silently discarded a pin along the way.
-                const declaredKind = resolvedHarnessKind(harnesses, agent.harness);
-                const crossedPairBoundary = (bound?.kind === "acp") !== (before?.kind === "acp");
+                  // The pair kind boundary: crossing between `acp` and anything
+                  // else drops both halves, restored from the agent's own stored
+                  // pair only if the new kind lands back where it started —
+                  // switching harness twice and returning should not have
+                  // silently discarded a pin along the way.
+                  const declaredKind = resolvedHarnessKind(
+                    harnesses,
+                    agent.harness,
+                  );
+                  const crossedPairBoundary =
+                    (bound?.kind === "acp") !== (before?.kind === "acp");
 
-                if (!acpModelStillValid) setModelDraft("");
-                if (crossedPairBoundary) {
-                  if (bound?.kind === declaredKind) {
-                    setProviderDraft(agent.provider ?? "");
-                    if (declaredKind !== "acp") setModelDraft(agent.model ?? "");
-                  } else {
-                    setProviderDraft("");
+                  if (!acpModelStillValid) setModelDraft("");
+                  if (crossedPairBoundary) {
+                    if (bound?.kind === declaredKind) {
+                      setProviderDraft(agent.provider ?? "");
+                      if (declaredKind !== "acp")
+                        setModelDraft(agent.model ?? "");
+                    } else {
+                      setProviderDraft("");
+                    }
                   }
-                }
-              }}
-              onModelChange={setModelDraft}
-              onProviderChange={setProviderDraft}
-              onCancel={() => setEditingHarness(false)}
-              onSave={() => void saveHarnessAndModel()}
-            />
+                }}
+                onModelChange={setModelDraft}
+                onProviderChange={setProviderDraft}
+                onCancel={() => setEditingHarness(false)}
+                onSave={() => void saveHarnessAndModel()}
+              />
             </PageTabPanel>
-
           </>
         )}
       </div>
@@ -1310,16 +1468,22 @@ export function AgentDetailView({
           default" button. */}
       <Dialog
         open={confirmClearPair}
-        onOpenChange={(next) => !next && !savingHarness && setConfirmClearPair(false)}
+        onOpenChange={(next) =>
+          !next && !savingHarness && setConfirmClearPair(false)
+        }
       >
-        <DialogContent className="sm:max-w-md" data-testid="agent-pair-clear-confirm">
+        <DialogContent
+          className="sm:max-w-md"
+          data-testid="agent-pair-clear-confirm"
+        >
           <DialogHeader>
             <DialogTitle>
-              Clear {agent ? agentDisplayName(agent) : "this teammate"}&apos;s pair?
+              Clear {agent ? agentDisplayName(agent) : "this teammate"}&apos;s
+              pair?
             </DialogTitle>
             <DialogDescription>
-              It goes back to using the company default the moment you confirm — pin another
-              provider and model any time to change that.
+              It goes back to using the company default the moment you confirm —
+              pin another provider and model any time to change that.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1387,7 +1551,12 @@ function Identity({
             field named after it — and the hover ring is what says so, since an
             avatar that looks identical to an inert one is a button nobody
             finds. Falls back to a plain tile where there is no handler. */}
-        <AgentFace agentId={agent.id} size="md" surface="background" name={display}>
+        <AgentFace
+          agentId={agent.id}
+          size="md"
+          surface="background"
+          name={display}
+        >
           {onPickAvatar ? (
             <button
               type="button"
@@ -1418,17 +1587,27 @@ function Identity({
         </AgentFace>
         <div className="min-w-0 flex-1 space-y-2">
           <div>
-            <h1 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
+            <h1
+              className="truncate text-2xl font-semibold tracking-tight"
+              data-testid="agent-name"
+            >
               {display}
             </h1>
             {subtitle && (
-              <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
+              <p
+                className="truncate text-sm text-muted-foreground"
+                data-testid="agent-role"
+              >
                 {subtitle}
               </p>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary" className="gap-1" data-testid="agent-tier">
+            <Badge
+              variant="secondary"
+              className="gap-1"
+              data-testid="agent-tier"
+            >
               <Sparkles className="size-3" /> {tierLabel(agent)}
             </Badge>
             <Badge variant="outline" data-testid="agent-source">
@@ -1443,7 +1622,9 @@ function Identity({
               >
                 <Badge variant="secondary" className="gap-1">
                   <Users className="size-3" aria-hidden /> {desk.name}
-                  {desk.lead && <span className="text-xs opacity-70">(lead)</span>}
+                  {desk.lead && (
+                    <span className="text-xs opacity-70">(lead)</span>
+                  )}
                 </Badge>
               </a>
             ))}
@@ -1501,13 +1682,16 @@ function FactLine({
           </span>
           <span aria-hidden>·</span>
           <span data-testid="agent-tasks">
-            {workload.open === 1 ? "1 open task" : `${workload.open} open tasks`}
+            {workload.open === 1
+              ? "1 open task"
+              : `${workload.open} open tasks`}
           </span>
         </>
       )}
       {capped && (
         <span data-testid="agent-spend">
-          Today {usd(agent.spentTodayUsd ?? 0)} of {usd(agent.budgetUsdDaily ?? 0)}
+          Today {usd(agent.spentTodayUsd ?? 0)} of{" "}
+          {usd(agent.budgetUsdDaily ?? 0)}
         </span>
       )}
     </div>
@@ -1533,6 +1717,259 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * Which skills this teammate may read, as switches over the company's enabled
+ * set.
+ *
+ * Three states, the same shape the tool grant uses: inheriting (`null`) puts
+ * every enabled skill in front of this teammate, an explicit empty list gives
+ * it none, and a list narrows. There is no row for a skill the company has not
+ * enabled, because scoping to one would confer nothing.
+ *
+ * No desk level: desks carry a tool ceiling and no skills, so the resolution is
+ * the company's enabled set intersected with this list.
+ */
+function Skills({
+  agent,
+  saving,
+  onSave,
+}: {
+  agent: AgentDetailDto;
+  saving: boolean;
+  onSave: (slugs: string[] | null) => Promise<void>;
+}) {
+  const canEdit = isEditable(agent, "skills");
+  const available = agent.skills.companyAvailable;
+  const inherits = agent.skills.requested === null;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<string[]>(agent.skills.requested ?? []);
+  // Whether the operator has touched a switch in this editing session. An
+  // inherited scope renders every switch on, so without this the first switch
+  // turned off would render on again — the stored state still says "inherit".
+  const [touched, setTouched] = useState(false);
+
+  // The teammate on screen can change under this card, and a draft left over
+  // from the previous one would be saved onto the new teammate.
+  useEffect(() => {
+    setDraft(agent.skills.requested ?? []);
+    setEditing(false);
+    setTouched(false);
+  }, [agent.id, agent.skills.requested]);
+
+  const inherited = showingInherited(agent.skills.requested, touched);
+  const draftSet = new Set(draft);
+  const held = (slug: string) => (inherited ? true : draftSet.has(slug));
+  const unchanged = scopeUnchanged(agent.skills.requested, draft, available);
+  const dropped = droppedSlugs(agent.skills.requested, agent.skills.effective);
+
+  return (
+    <Section
+      title="Skills"
+      subtitle={
+        inherits
+          ? "This teammate lists no skills of its own, so it reads every skill the company has enabled."
+          : agent.skills.requested?.length === 0
+            ? "This teammate has been given an explicit empty scope, so it reads no skills at all."
+            : "The skills this teammate asked for, narrowed by what the company has enabled."
+      }
+      action={
+        canEdit && !editing ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setEditing(true)}
+            data-testid="agent-skills-edit"
+          >
+            <Pencil className="size-4" /> Edit
+          </Button>
+        ) : undefined
+      }
+    >
+      {editing && (
+        <div className="grid gap-3" data-testid="agent-skills-editor">
+          {available.length > 0 ? (
+            <div
+              className="divide-y rounded-lg border"
+              data-testid="agent-skills-toggles"
+            >
+              {available.map((slug) => (
+                <div
+                  key={slug}
+                  className="flex items-center justify-between gap-3 px-3 py-2"
+                >
+                  <Label
+                    htmlFor={`agent-skill-${slug}`}
+                    className="min-w-0 truncate font-mono text-xs font-normal"
+                  >
+                    {slug}
+                  </Label>
+                  <div className="flex shrink-0 items-center gap-3">
+                    {/* Two states here, not the skill page's three: from this
+                        teammate's side the question is only whether it reads
+                        the skill. Whether it reads it by inheriting or by
+                        naming it is the scope above, and it is what the
+                        subtitle says. */}
+                    <span
+                      className={
+                        held(slug)
+                          ? "text-2xs text-status-done-text"
+                          : "text-2xs text-muted-foreground"
+                      }
+                      data-testid={`agent-skill-state-${slug}`}
+                    >
+                      {held(slug) ? "Reads it" : "Not in its scope"}
+                    </span>
+                    <a
+                      href={skillHref(slug)}
+                      className="text-2xs text-muted-foreground underline transition-opacity hover:opacity-80"
+                      data-testid={`agent-skill-link-${slug}`}
+                    >
+                      Open
+                    </a>
+                    <Switch
+                      id={`agent-skill-${slug}`}
+                      checked={held(slug)}
+                      data-testid={`agent-skill-toggle-${slug}`}
+                      onCheckedChange={(on) => {
+                        setDraft(
+                          toggleSkillInScope(
+                            agent.skills.requested,
+                            available,
+                            slug,
+                            on,
+                            {
+                              slugs: draft,
+                              touched,
+                            },
+                          ),
+                        );
+                        setTouched(true);
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="agent-skills-none-enabled"
+            >
+              The company has no skills enabled, so there is nothing to scope
+              here.
+            </p>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            {SCOPE_ONLY_TAKES_AWAY}
+          </p>
+
+          {touched && draft.length === 0 && (
+            <p
+              className="text-xs text-status-blocked-text"
+              data-testid="agent-skills-empty-warning"
+            >
+              Saving an empty list gives this teammate no skills at all. To put
+              every enabled skill back in front of it, use “Reset to every
+              skill”.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setDraft(agent.skills.requested ?? []);
+                setTouched(false);
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </Button>
+            {!inherits && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving}
+                onClick={() => {
+                  void onSave(null).then(
+                    () => setEditing(false),
+                    () => undefined,
+                  );
+                }}
+                data-testid="agent-skills-reset"
+              >
+                Reset to every skill
+              </Button>
+            )}
+            <Button
+              size="sm"
+              disabled={saving || !touched || unchanged}
+              onClick={() => {
+                // An empty draft is a deliberate no-skills scope, not a reset —
+                // that is the separate button above.
+                void onSave(draft).then(
+                  () => setEditing(false),
+                  () => undefined,
+                );
+              }}
+              data-testid="agent-skills-save"
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* The editor's own rows already say what this teammate reads, in more
+          detail than a chip can. Restating it under the Save button read as a
+          second, shorter answer to the same question. */}
+      {editing ? null : agent.skills.effective.length === 0 ? (
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="agent-skills-empty"
+        >
+          {inherits
+            ? "This teammate reads no skills, because the company has none enabled."
+            : agent.skills.requested?.length === 0
+              ? "This teammate reads no skills: it was given an explicit empty scope."
+              : "This teammate reads no skills: the company has none of the skills it asks for enabled."}
+        </p>
+      ) : (
+        <div
+          className="flex flex-wrap gap-1.5"
+          data-testid="agent-skills-effective"
+        >
+          {agent.skills.effective.map((slug) => (
+            // A link rather than a chip: the skill's own page is where its
+            // document, its provenance and every other teammate reading it
+            // are, and reaching it from here previously meant finding it in a
+            // list under another section of the console.
+            <a
+              key={slug}
+              href={skillHref(slug)}
+              className="rounded border px-1.5 py-0.5 font-mono text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              data-testid={`agent-skill-open-${slug}`}
+            >
+              {slug}
+            </a>
+          ))}
+        </div>
+      )}
+
+      {dropped.length > 0 && (
+        <p
+          className="mt-2 text-xs text-status-blocked-text"
+          data-testid="agent-skills-dropped"
+        >
+          {`The company has not enabled ${dropped.join(", ")}, so it is stored and reads nothing.`}
+        </p>
+      )}
+    </Section>
   );
 }
 
@@ -1612,7 +2049,9 @@ function Tools({
   // `deskAllow`'s emptiness) is the sentinel: a ceiling whose narrowed list is
   // empty still narrows everything away.
   const deskCeilingActive = agent.tools.deskCeilingActive;
-  const willNotApply = draft.filter((glob) => !companyCovers(grantCeiling(agent.tools), glob));
+  const willNotApply = draft.filter(
+    (glob) => !companyCovers(grantCeiling(agent.tools), glob),
+  );
 
   return (
     <Section
@@ -1645,9 +2084,15 @@ function Tools({
               narrows this agent; there is no row for a tool the company
               does not allow, because granting it here would confer nothing. */}
           {ceiling.length > 0 ? (
-            <div className="divide-y rounded-lg border" data-testid="agent-tools-toggles">
+            <div
+              className="divide-y rounded-lg border"
+              data-testid="agent-tools-toggles"
+            >
               {ceiling.map((glob) => (
-                <div key={glob} className="flex items-center justify-between gap-3 px-3 py-2">
+                <div
+                  key={glob}
+                  className="flex items-center justify-between gap-3 px-3 py-2"
+                >
                   <Label
                     htmlFor={`agent-tool-${glob}`}
                     className="min-w-0 truncate font-mono text-xs font-normal"
@@ -1674,7 +2119,10 @@ function Tools({
               ))}
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground" data-testid="agent-tools-no-ceiling">
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="agent-tools-no-ceiling"
+            >
               {deskCeilingActive
                 ? "This agent's desk allows no tools, so there is nothing to grant here."
                 : "The company allows no tools, so there is nothing to grant here."}
@@ -1683,8 +2131,8 @@ function Tools({
 
           <p className="text-xs text-muted-foreground">
             Every grant is narrowed by the company tool list
-            {deskCeilingActive ? " and by this agent's desk ceiling" : ""}, so this
-            can only ever take capability away — never add to it.
+            {deskCeilingActive ? " and by this agent's desk ceiling" : ""}, so
+            this can only ever take capability away — never add to it.
           </p>
 
           {/* The switches cannot spell a wildcard, and a company that grants
@@ -1714,9 +2162,9 @@ function Tools({
                   data-testid="agent-tools-field"
                 />
                 <p className="text-xs text-muted-foreground">
-                  One glob per grant, separated by commas or spaces. A pattern here that
-                  matches none of the rows above still applies — the rows are the literal
-                  grants, not the whole vocabulary.
+                  One glob per grant, separated by commas or spaces. A pattern
+                  here that matches none of the rows above still applies — the
+                  rows are the literal grants, not the whole vocabulary.
                 </p>
               </div>
             )}
@@ -1725,13 +2173,20 @@ function Tools({
             // Since #1804 the inversion runs the other way: an empty list is a
             // deliberate deny-all, NOT the standard grant. An operator who
             // wants the standard grant back must use "Reset to standard" below.
-            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              Saving an empty list is a deny-all — this agent would hold no tools at all. To
-              give it the standard company grant instead, use “Reset to standard grant”.
+            <p
+              className="text-xs text-status-blocked-text"
+              data-testid="agent-tools-empty-warning"
+            >
+              Saving an empty list is a deny-all — this agent would hold no
+              tools at all. To give it the standard company grant instead, use
+              “Reset to standard grant”.
             </p>
           )}
           {willNotApply.length > 0 && (
-            <p className="text-xs text-status-blocked-text" data-testid="agent-tools-uncovered">
+            <p
+              className="text-xs text-status-blocked-text"
+              data-testid="agent-tools-uncovered"
+            >
               {deskCeilingActive
                 ? `The desk and company tool lists do not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`
                 : `The company tool list does not cover ${willNotApply.join(", ")}, so it will be stored and confer nothing.`}
@@ -1789,7 +2244,10 @@ function Tools({
         </div>
       )}
       {summary.effective.length === 0 ? (
-        <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="agent-tools-empty"
+        >
           {/* The ways of holding nothing land here, and they are not the same
               fact. An agent on the standard grant under a company that allows
               nothing has been refused nothing; a deny-all agent asked to hold
@@ -1804,7 +2262,11 @@ function Tools({
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">
           {summary.effective.map((glob) => (
-            <Badge key={glob} variant="secondary" className="gap-1 font-mono text-xs">
+            <Badge
+              key={glob}
+              variant="secondary"
+              className="gap-1 font-mono text-xs"
+            >
               <Wrench className="size-3" /> {glob}
             </Badge>
           ))}
@@ -1813,11 +2275,16 @@ function Tools({
       {summary.dropped.length > 0 && (
         <div className="space-y-1" data-testid="agent-tools-dropped">
           <p className="text-xs text-muted-foreground">
-            Asked for but not granted, because the company tool list does not cover it:
+            Asked for but not granted, because the company tool list does not
+            cover it:
           </p>
           <div className="flex flex-wrap gap-2">
             {summary.dropped.map((glob) => (
-              <Badge key={glob} variant="outline" className="font-mono text-xs line-through">
+              <Badge
+                key={glob}
+                variant="outline"
+                className="font-mono text-xs line-through"
+              >
                 {glob}
               </Badge>
             ))}
@@ -1826,11 +2293,13 @@ function Tools({
       )}
       {!summary.standardGrant && (
         <p className="text-xs text-muted-foreground">
-          Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
+          Company tool list:{" "}
+          {agent.tools.companyAllow.join(", ") || "nothing allowed"}
           {deskCeilingActive && (
             <>
               {" · "}
-              Desk tool list: {agent.tools.deskAllow.join(", ") || "nothing allowed"}
+              Desk tool list:{" "}
+              {agent.tools.deskAllow.join(", ") || "nothing allowed"}
             </>
           )}
         </p>
@@ -1926,7 +2395,9 @@ function HarnessAndModel({
   onSave: () => void;
 }) {
   const editable =
-    agent.editable.includes("harness") || agent.editable.includes("model") || agent.editable.includes("provider");
+    agent.editable.includes("harness") ||
+    agent.editable.includes("model") ||
+    agent.editable.includes("provider");
   const declaredKind = resolvedHarnessKind(harnesses, agent.harness);
   const draftKind = resolvedHarnessKind(
     harnesses,
@@ -1946,12 +2417,14 @@ function HarnessAndModel({
    * spawns nothing after the first look.
    */
   const [models, setModels] = useState<AcpHarnessModel[]>([]);
-  const draftHarnessId = harnessDraft === HARNESS_DEFAULT ? defaultHarness?.id : harnessDraft;
+  const draftHarnessId =
+    harnessDraft === HARNESS_DEFAULT ? defaultHarness?.id : harnessDraft;
   // What the *desktop* calls this harness. A manifest binding and the shell's
   // catalogue key are different things — `id = "laptop", agent = "claude"` is
   // a supported shape — and asking the shell about `laptop` returns no models
   // at all rather than claude's.
-  const draftAgentId = harnesses.find((h) => h.id === draftHarnessId)?.agent ?? draftHarnessId;
+  const draftAgentId =
+    harnesses.find((h) => h.id === draftHarnessId)?.agent ?? draftHarnessId;
 
   useEffect(() => {
     if (!editing || draftKind !== "acp" || !draftAgentId) {
@@ -1975,7 +2448,8 @@ function HarnessAndModel({
    * Probing on page view would start a subprocess per harness every time
    * anyone opened a teammate, for an answer nobody had asked for yet.
    */
-  const { rows, surveying, install, installing, installErrors } = useHarnessRows(harnesses, editing);
+  const { rows, surveying, install, installing, installErrors } =
+    useHarnessRows(harnesses, editing);
   const rowFor = (id: string | undefined) => rows?.find((row) => row.id === id);
   /**
    * Which harness the detail dialog is open on, held as an id rather than as a
@@ -2009,7 +2483,9 @@ function HarnessAndModel({
   };
 
   const unlistedModel =
-    modelDraft && !models.some((m) => m.value === modelDraft) ? modelDraft : undefined;
+    modelDraft && !models.some((m) => m.value === modelDraft)
+      ? modelDraft
+      : undefined;
   /**
    * What the harness would use if this teammate pins nothing — the entry the
    * adapter itself reports as current, not a guess. Absent when the adapter
@@ -2045,7 +2521,12 @@ function HarnessAndModel({
       subtitle="Which coding engine this agent runs on, and which provider and model it uses — its own pair, or the company default."
       action={
         editable && !editing ? (
-          <Button variant="ghost" size="sm" onClick={onEdit} data-testid="agent-harness-edit">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onEdit}
+            data-testid="agent-harness-edit"
+          >
             <Pencil className="size-4" />
           </Button>
         ) : undefined
@@ -2055,13 +2536,24 @@ function HarnessAndModel({
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <div className="min-w-0 flex-1">
-              <Select value={harnessDraft} onValueChange={(value) => onHarnessChange(value ?? HARNESS_DEFAULT)}>
-                <SelectTrigger className="w-full" data-testid="agent-harness-select">
+              <Select
+                value={harnessDraft}
+                onValueChange={(value) =>
+                  onHarnessChange(value ?? HARNESS_DEFAULT)
+                }
+              >
+                <SelectTrigger
+                  className="w-full"
+                  data-testid="agent-harness-select"
+                >
                   <SelectValue>{harnessLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={HARNESS_DEFAULT}>
-                    Company default{defaultHarness ? ` (${harnessOptionLabel(defaultHarness)})` : ""}
+                    Company default
+                    {defaultHarness
+                      ? ` (${harnessOptionLabel(defaultHarness)})`
+                      : ""}
                     <HarnessReadiness row={rowFor(defaultHarness?.id)} />
                   </SelectItem>
                   {harnesses.map((harness) => (
@@ -2099,7 +2591,9 @@ function HarnessAndModel({
               <p
                 className={cn(
                   "text-xs",
-                  installErrors[draftRow.id] ? "text-destructive" : "text-muted-foreground",
+                  installErrors[draftRow.id]
+                    ? "text-destructive"
+                    : "text-muted-foreground",
                 )}
               >
                 {installErrors[draftRow.id] ?? readinessNote(draftRow)}
@@ -2125,10 +2619,15 @@ function HarnessAndModel({
                 <Select
                   value={modelDraft === "" ? MODEL_HARNESS_DEFAULT : modelDraft}
                   onValueChange={(value) =>
-                    onModelChange(!value || value === MODEL_HARNESS_DEFAULT ? "" : value)
+                    onModelChange(
+                      !value || value === MODEL_HARNESS_DEFAULT ? "" : value,
+                    )
                   }
                 >
-                  <SelectTrigger className="w-full" data-testid="agent-model-select">
+                  <SelectTrigger
+                    className="w-full"
+                    data-testid="agent-model-select"
+                  >
                     <SelectValue>{modelLabel}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
@@ -2150,7 +2649,10 @@ function HarnessAndModel({
                       <SelectItem key={model.value} value={model.value}>
                         {model.name ?? model.value}
                         {model.description && (
-                          <span className="text-muted-foreground"> — {model.description}</span>
+                          <span className="text-muted-foreground">
+                            {" "}
+                            — {model.description}
+                          </span>
                         )}
                       </SelectItem>
                     ))}
@@ -2161,14 +2663,17 @@ function HarnessAndModel({
                     {unlistedModel && (
                       <SelectItem value={unlistedModel}>
                         {unlistedModel}
-                        <span className="text-muted-foreground"> — no longer offered</span>
+                        <span className="text-muted-foreground">
+                          {" "}
+                          — no longer offered
+                        </span>
                       </SelectItem>
                     )}
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Read from the harness itself, so these are the models it will actually
-                  accept.
+                  Read from the harness itself, so these are the models it will
+                  actually accept.
                 </p>
               </>
             ) : (
@@ -2198,22 +2703,36 @@ function HarnessAndModel({
               <div className="space-y-1.5">
                 <Label htmlFor="agent-provider-select">Provider</Label>
                 <Select
-                  value={providerDraft === "" ? PROVIDER_COMPANY_DEFAULT : providerDraft}
+                  value={
+                    providerDraft === ""
+                      ? PROVIDER_COMPANY_DEFAULT
+                      : providerDraft
+                  }
                   onValueChange={(value) => {
-                    const next = !value || value === PROVIDER_COMPANY_DEFAULT ? "" : value;
+                    const next =
+                      !value || value === PROVIDER_COMPANY_DEFAULT ? "" : value;
                     onProviderChange(next);
                     // Prefill with that row's own model; the operator may still
                     // pick another one — the same "belongs to the provider it
                     // was chosen from" rule the LLM page's own fields follow.
-                    onModelChange(next ? (providers.find((p) => p.slug === next)?.model ?? "") : "");
+                    onModelChange(
+                      next
+                        ? (providers.find((p) => p.slug === next)?.model ?? "")
+                        : "",
+                    );
                   }}
                 >
-                  <SelectTrigger id="agent-provider-select" className="w-full" data-testid="agent-provider-select">
+                  <SelectTrigger
+                    id="agent-provider-select"
+                    className="w-full"
+                    data-testid="agent-provider-select"
+                  >
                     <SelectValue>
                       {() =>
                         providerDraft === ""
                           ? companyDefaultLabel(defaultChoice, providers)
-                          : (providers.find((p) => p.slug === providerDraft)?.label ?? providerDraft)
+                          : (providers.find((p) => p.slug === providerDraft)
+                              ?.label ?? providerDraft)
                       }
                     </SelectValue>
                   </SelectTrigger>
@@ -2224,7 +2743,12 @@ function HarnessAndModel({
                     {pinnable.map((p) => (
                       <SelectItem key={p.slug} value={p.slug}>
                         {p.label}
-                        {p.model && <span className="text-muted-foreground"> · {p.model}</span>}
+                        {p.model && (
+                          <span className="text-muted-foreground">
+                            {" "}
+                            · {p.model}
+                          </span>
+                        )}
                       </SelectItem>
                     ))}
                     {/* A pair naming a provider that is gone or switched off
@@ -2238,12 +2762,17 @@ function HarnessAndModel({
                         than showing as "not available". Its real label is
                         used when the row still exists — a raw slug is only
                         the truly-gone case. */}
-                    {agent.provider && !pinnable.some((p) => p.slug === agent.provider) && (
-                      <SelectItem value={agent.provider}>
-                        {providers.find((p) => p.slug === agent.provider)?.label ?? agent.provider}
-                        <span className="text-muted-foreground"> — not available</span>
-                      </SelectItem>
-                    )}
+                    {agent.provider &&
+                      !pinnable.some((p) => p.slug === agent.provider) && (
+                        <SelectItem value={agent.provider}>
+                          {providers.find((p) => p.slug === agent.provider)
+                            ?.label ?? agent.provider}
+                          <span className="text-muted-foreground">
+                            {" "}
+                            — not available
+                          </span>
+                        </SelectItem>
+                      )}
                   </SelectContent>
                 </Select>
               </div>
@@ -2259,11 +2788,18 @@ function HarnessAndModel({
                     onChange={onModelChange}
                   />
                   {(() => {
-                    const modelError = modelDraft.trim() ? checkModelId(modelDraft) : "empty";
+                    const modelError = modelDraft.trim()
+                      ? checkModelId(modelDraft)
+                      : "empty";
                     if (!modelError) return null;
                     return (
-                      <p className="text-xs text-status-blocked-text" data-testid="agent-pair-model-required">
-                        {modelError === "empty" ? "Choose a model for this provider." : modelIdErrorCopy(modelError)}
+                      <p
+                        className="text-xs text-status-blocked-text"
+                        data-testid="agent-pair-model-required"
+                      >
+                        {modelError === "empty"
+                          ? "Choose a model for this provider."
+                          : modelIdErrorCopy(modelError)}
                       </p>
                     );
                   })()}
@@ -2291,7 +2827,11 @@ function HarnessAndModel({
             </Button>
             <Button
               onClick={onSave}
-              disabled={saving || (draftKind !== "acp" && pairMissingModel(providerDraft, modelDraft))}
+              disabled={
+                saving ||
+                (draftKind !== "acp" &&
+                  pairMissingModel(providerDraft, modelDraft))
+              }
               data-testid="agent-harness-save"
             >
               Save
@@ -2300,17 +2840,31 @@ function HarnessAndModel({
         </div>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-harness">
+          <Badge
+            variant="secondary"
+            className="gap-1 font-mono text-xs"
+            data-testid="agent-harness"
+          >
             <Server className="size-3" />
-            {agent.harness ?? (defaultHarness ? `${defaultHarness.id} (default)` : "default harness")}
+            {agent.harness ??
+              (defaultHarness
+                ? `${defaultHarness.id} (default)`
+                : "default harness")}
           </Badge>
           {declaredKind === "acp" ? (
             agent.model ? (
-              <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-model">
+              <Badge
+                variant="secondary"
+                className="gap-1 font-mono text-xs"
+                data-testid="agent-model"
+              >
                 <Cpu className="size-3" /> {agent.model}
               </Badge>
             ) : (
-              <span className="text-sm text-muted-foreground" data-testid="agent-model-empty">
+              <span
+                className="text-sm text-muted-foreground"
+                data-testid="agent-model-empty"
+              >
                 No model override set — uses the harness&apos;s own default.
               </span>
             )
@@ -2319,11 +2873,20 @@ function HarnessAndModel({
             // Stays visible even if the provider is now gone or switched off
             // (F6) — the badge names what is pinned, the fact that it will
             // fail is `agentPairBrokenCopy` below, not a silent substitution.
-            <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-pair-badge">
-              <Cpu className="size-3" /> {pairLabel(agent.provider, agent.model, providers)}
+            <Badge
+              variant="secondary"
+              className="gap-1 font-mono text-xs"
+              data-testid="agent-pair-badge"
+            >
+              <Cpu className="size-3" />{" "}
+              {pairLabel(agent.provider, agent.model, providers)}
             </Badge>
           ) : (
-            <PairFallbackLine agent={agent} providers={providers} defaultChoice={defaultChoice} />
+            <PairFallbackLine
+              agent={agent}
+              providers={providers}
+              defaultChoice={defaultChoice}
+            />
           )}
         </div>
       )}
@@ -2362,34 +2925,50 @@ function PairFallbackLine({
   providers: readonly Provider[];
   defaultChoice: DefaultChoice | null | undefined;
 }) {
-  const resolution = resolveAgentDefault(defaultChoice, providers, agentDisplayName(agent));
+  const resolution = resolveAgentDefault(
+    defaultChoice,
+    providers,
+    agentDisplayName(agent),
+  );
   if (resolution.kind === "full") {
     return (
-      <span className="text-sm text-muted-foreground" data-testid="agent-pair-default">
+      <span
+        className="text-sm text-muted-foreground"
+        data-testid="agent-pair-default"
+      >
         {resolution.label}
       </span>
     );
   }
   return (
-    <span className="text-sm text-status-blocked-text" data-testid="agent-pair-default">
+    <span
+      className="text-sm text-status-blocked-text"
+      data-testid="agent-pair-default"
+    >
       {resolution.message}
     </span>
   );
 }
 
 /** X9: a pinned pair naming a provider that is now gone or switched off. */
-function BrokenPairNote({ agent, providers }: { agent: AgentDetailDto; providers: readonly Provider[] }) {
+function BrokenPairNote({
+  agent,
+  providers,
+}: {
+  agent: AgentDetailDto;
+  providers: readonly Provider[];
+}) {
   const broken = agentPairBrokenCopy(agent, providers);
   if (!broken) return null;
   return (
-    <p className="mt-2 text-xs text-status-blocked-text" data-testid="agent-pair-broken">
+    <p
+      className="mt-2 text-xs text-status-blocked-text"
+      data-testid="agent-pair-broken"
+    >
       {broken}
     </p>
   );
 }
-
-
-
 
 /**
  * Pick a teammate's icon.
@@ -2422,8 +3001,8 @@ function AvatarDialog({
         <DialogHeader>
           <DialogTitle>Icon</DialogTitle>
           <DialogDescription>
-            The face {name} wears everywhere in this console — chat, the org chart, every list
-            they appear in.
+            The face {name} wears everywhere in this console — chat, the org
+            chart, every list they appear in.
           </DialogDescription>
         </DialogHeader>
         {agent && (
@@ -2442,7 +3021,6 @@ function AvatarDialog({
     </Dialog>
   );
 }
-
 
 function Section({
   title,
