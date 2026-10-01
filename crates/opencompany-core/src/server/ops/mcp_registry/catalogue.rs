@@ -12,6 +12,9 @@
 //! the rest. That is what keeps an upstream payload change from silently
 //! becoming an OpenCompany API change.
 
+use std::collections::HashSet;
+use std::future::Future;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -213,6 +216,76 @@ fn catalogue_entry(raw: &Value) -> Option<CatalogueEntryDto> {
     })
 }
 
+/// Badges the servers named in `official` by exact qualified name, then orders
+/// official first and most-installed next. Ties keep upstream's order.
+pub(in crate::server::ops) fn rank_catalogue(servers: &mut [CatalogueEntryDto], official: &[&str]) {
+    for server in servers.iter_mut() {
+        server.official = official.contains(&server.qualified_name.as_str());
+    }
+    servers.sort_by(|a, b| {
+        b.official
+            .cmp(&a.official)
+            .then_with(|| b.use_count.cmp(&a.use_count))
+    });
+}
+
+/// A `registry_get` answer as a catalogue row, when it names an endpoint this
+/// host can dial.
+pub(in crate::server::ops) fn featured_entry(raw: &Value) -> Option<CatalogueEntryDto> {
+    let server = raw.get("server")?;
+    http_deployment_url(server)?;
+    catalogue_entry(server)
+}
+
+/// `featured` ahead of `page`, without repeating a row the page also carries.
+pub(in crate::server::ops) fn merge_featured(
+    featured: Vec<CatalogueEntryDto>,
+    page: Vec<CatalogueEntryDto>,
+) -> Vec<CatalogueEntryDto> {
+    let mut seen: HashSet<String> = HashSet::new();
+    featured
+        .into_iter()
+        .chain(page)
+        .filter(|entry| seen.insert(entry.qualified_name.clone()))
+        .collect()
+}
+
+/// An icon as the browser may load it: an inline image kept as is, a remote
+/// address replaced by what `fetch` inlines from it, or nothing.
+pub(in crate::server::ops) async fn inline_icon<F, Fut>(
+    icon: Option<String>,
+    fetch: &F,
+) -> Option<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    match icon {
+        Some(icon) if icon.starts_with("data:image/") => Some(icon),
+        Some(url) if url.starts_with("https://") || url.starts_with("http://") => fetch(url).await,
+        _ => None,
+    }
+}
+
+/// [`inline_icon`] over every row, concurrently.
+pub(in crate::server::ops) async fn inline_icons<F, Fut>(
+    servers: &mut [CatalogueEntryDto],
+    fetch: F,
+) where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let icons = futures::future::join_all(
+        servers
+            .iter()
+            .map(|server| inline_icon(server.icon_url.clone(), &fetch)),
+    )
+    .await;
+    for (server, icon) in servers.iter_mut().zip(icons) {
+        server.icon_url = icon;
+    }
+}
+
 /// Projects `{ server: … }` as upstream's `registry_get` returns it, deciding
 /// installability from the connections it lists.
 pub(in crate::server::ops) fn catalogue_detail(raw: &Value) -> Option<CatalogueDetailDto> {
@@ -252,3 +325,7 @@ fn text(raw: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
+
+#[cfg(test)]
+#[path = "catalogue_tests.rs"]
+mod tests;
