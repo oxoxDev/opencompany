@@ -223,3 +223,17 @@ fn a_search_row_carries_the_brand() {
         Some("https://avatars.githubusercontent.com/u/856813?s=128")
     );
 }
+
+#[test]
+fn a_directory_install_is_named_by_a_slug_of_its_shown_name() {
+    assert_eq!(directory_server_name("Notion").as_deref(), Some("notion"));
+    assert_eq!(
+        directory_server_name("Atlassian Rovo MCP Server").as_deref(),
+        Some("atlassian-rovo-mcp-server")
+    );
+    assert_eq!(
+        directory_server_name("inference.sh").as_deref(),
+        Some("inference-sh")
+    );
+    assert_eq!(directory_server_name("  — ").as_deref(), None);
+}

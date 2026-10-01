@@ -261,6 +261,21 @@ pub(in crate::server::ops) fn brand_logo(qualified_name: &str) -> Option<String>
         .map(|(_, _, account)| format!("https://avatars.githubusercontent.com/u/{account}?s=128"))
 }
 
+/// The name a directory install is saved under: its shown name as a slug, so
+/// the row reads `notion` rather than `com.notion/mcp`.
+pub(in crate::server::ops) fn directory_server_name(display_name: &str) -> Option<String> {
+    let mut slug = String::new();
+    for c in display_name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
 fn is_generic_name(name: &str) -> bool {
     name.split(|c: char| c.is_whitespace() || c == '-' || c == '_')
         .filter(|word| !word.is_empty())

@@ -29,21 +29,23 @@ use oh::mcp::registry::types::{ConnStatus, InstalledServer};
 use openhuman_core as oh;
 use tinymcp::registry::curation::OFFICIAL_SERVERS;
 
+use crate::company::mcp::load_runtime_index;
 use crate::company::mcp::{McpHealth, stdio_install_refusal};
-use crate::company::mcp_server_info::fetch_icon;
+use crate::company::mcp_server_info::{self, fetch_icon};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::server::error::ApiError;
 use crate::server::ops::mcp::{
-    AuthKind, McpServerDto, NEXT_TURN_NOTE, auth_material_from, declare_runtime_server, merged_rows,
+    AuthKind, McpServerDto, NEXT_TURN_NOTE, auth_material_from, declare_runtime_server,
+    manifest_servers, merged_rows,
 };
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
 use super::catalogue::{
-    brand_logo, brand_name, catalogue_detail, catalogue_search, featured_entry, health_from_status,
-    inline_icon, inline_icons, merge_featured, rank_catalogue,
+    brand_logo, brand_name, catalogue_detail, catalogue_search, directory_server_name,
+    featured_entry, health_from_status, inline_icon, inline_icons, merge_featured, rank_catalogue,
 };
 
 // ---------------------------------------------------------------------------
@@ -360,7 +362,11 @@ pub(super) async fn install(
         )))
         .into_response();
     };
-    let server = super::declaration_from_directory(&qualified_name, &endpoint, detail.description);
+    let name = match install_name(runtime, &detail.display_name, &qualified_name).await {
+        Ok(name) => name,
+        Err(error) => return error.into_response(),
+    };
+    let server = super::declaration_from_directory(&name, &endpoint, detail.description);
     let auth = match auth_material_from(
         body.token.as_deref(),
         body.auth_kind,
@@ -370,9 +376,54 @@ pub(super) async fn install(
         Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
-    match declare_runtime_server(runtime, server, auth).await {
-        Ok(response) => response.into_response(),
-        Err(error) => error.into_response(),
+    let declared = match declare_runtime_server(runtime, server, auth).await {
+        Ok(response) => response,
+        Err(error) => return error.into_response(),
+    };
+    let icon = inline_icon(detail.icon_url, &cached_icon).await;
+    remember_directory_identity(runtime, &name, detail.display_name, icon).await;
+    declared.into_response()
+}
+
+/// The readable slug of the entry's name, or its qualified name when this
+/// company already has a server called that.
+async fn install_name(
+    runtime: &CompanyRuntime,
+    display_name: &str,
+    qualified_name: &str,
+) -> Result<String, ApiError> {
+    let Some(slug) = directory_server_name(display_name) else {
+        return Ok(qualified_name.to_string());
+    };
+    let manifest = manifest_servers(runtime).await?;
+    let index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    let taken = manifest
+        .iter()
+        .chain(index.iter())
+        .any(|server| server.name.trim() == slug);
+    Ok(if taken {
+        qualified_name.to_string()
+    } else {
+        slug
+    })
+}
+
+/// Keeps the directory's name and logo on the installed server wherever the
+/// server's own handshake did not supply one.
+async fn remember_directory_identity(
+    runtime: &CompanyRuntime,
+    name: &str,
+    title: String,
+    icon: Option<String>,
+) {
+    let secrets = runtime.secrets();
+    let mut info = mcp_server_info::load(runtime.id(), name, secrets.as_ref()).await;
+    info.title = info.title.or(Some(title));
+    info.icon_data_url = info.icon_data_url.or(icon);
+    if let Err(error) = mcp_server_info::save(runtime.id(), name, &info, secrets.as_ref()).await {
+        tracing::warn!("[mcp-registry] `{name}`: directory name and logo not stored: {error}");
     }
 }
 
