@@ -255,27 +255,54 @@ builds with `mcp` (`TENANT_FEATURES` in `deploy-staging.yml`); the default
 One component reads the server routes —
 [`McpServersSection`](../../frontend/src/views/connections/McpServersSection.tsx),
 over the standalone functions in `frontend/src/api/mcp.ts` (List A) and
-`frontend/src/api/mcp-registry.ts` (the directory) — rendered from two places:
-inline on Connections, and as the **Connections** tab of Settings, MCP Servers.
+`frontend/src/api/mcp-registry.ts` (the directory) — rendered inline on
+Connections and as Settings, MCP Servers
+([`McpServersView`](../../frontend/src/views/McpServersView.tsx)).
 
-That page ([`McpServersView`](../../frontend/src/views/McpServersView.tsx)) has a
-second tab, **mcp.json**
-([`McpJsonEditor`](../../frontend/src/views/mcp/McpJsonEditor.tsx)), over
-`…/mcp/config`. Two tabs rather than two pages because they are not two things:
-both go through the same host into the same store, so an edit in one shows up in
-the other on its next read. A save bumps the key the rows are mounted on, so the
-list re-reads rather than describing the configuration as it was before the file
-was written.
+The page has two modes on one switch
+([`mcp-view-controls.tsx`](../../frontend/src/views/connections/mcp-view-controls.tsx)),
+kept in the hash as `?view=yours|discover`:
 
-A row's controls are icons, each carrying its sentence as a tooltip **and** as
-its accessible name ([`McpIconButton`](../../frontend/src/views/mcp/McpIconButton.tsx)):
-credential (sign in / add a token / set env credentials), connect or disconnect,
-re-check, list tools, enable or disable, remove. At labelled-button width a row
-six controls deep wrapped onto a second line, and the line it pushed off was the
-one carrying the endpoint — the row's own information lost to its chrome. The
-enable control being an icon is why a disabled server also says `disabled` in
-words beside its badges: an icon in an off state reads as "press to turn off" as
-readily as the reverse.
+- **Yours** searches this company's own servers and nothing else; typing never
+  reaches the directory. A term that matches nothing offers to search the
+  directory for it, which carries the term into Discover.
+- **Discover** is the public directory, with its own field. Before anything is
+  typed it shows the top connectors (see
+  [mcp-registry.md](mcp-registry.md#ranking-and-top-connectors)); "Browse the
+  directory" on an empty company opens it, and a company with no servers opens
+  on it.
+
+Each mode has a card / list toggle, remembered per mode in `localStorage`
+(`opencompany.mcp.layout.<mode>`). Yours defaults to a list and Discover to
+cards. The list is one table shape for both: name and icon, source (`md` and
+up), status, reach (`lg` and up), and the actions. The name column takes
+whatever width the others leave and truncates; the page does not scroll
+sideways at phone width.
+
+A row has no expander. Clicking anywhere on it that is not a control opens the
+server's page (`?server=<name>`); the primary action (sign in, add a token,
+connect) and an overflow menu holding enable/disable, re-check, tools,
+permissions and remove are the only controls on it. A double-click or a drag
+opens the page and selects nothing.
+
+**mcp.json** ([`McpJsonEditor`](../../frontend/src/views/mcp/McpJsonEditor.tsx))
+is a button and a pop-up over `…/mcp/config`, opened by `?tab=json` as well, and
+read-only for a member. It is the same store the rows read: a save bumps the key
+the list is mounted on, so the rows re-read rather than describing the
+configuration as it was before the file was written.
+
+**Add custom server**
+([`McpAddServerDialog`](../../frontend/src/views/connections/McpAddServerDialog.tsx))
+asks for a name and an MCP URL only. A server that answers its probe is
+confirmed in place ("Added and connected · N tools"); one that needs a sign-in,
+a token or env credentials continues in the connect dialog.
+
+The **connect dialog**
+([`McpConnectDialog`](../../frontend/src/views/mcp/McpConnectDialog.tsx)) is
+where every connect flow lands — a custom add, a directory install, a connect
+from the overflow, a sign-in. It carries the sign-in in flight, the token and
+env forms, and the tools list, and ends on "Connected · N tools" rather than a
+toast that has gone by the time the operator looks for it.
 
 There is deliberately no MCP method on `OpenCompanyClient`. A second set used to
 sit there, declaring a `{ servers }` wrapper around this table's bare array,
@@ -287,23 +314,23 @@ compiler — only by whoever opens the page.
 ### Browsing the directory
 
 [`McpRegistryBrowser`](../../frontend/src/views/connections/McpRegistryBrowser.tsx)
-sits inside the same card as the add-a-URL form, under the same manage gate
-(issue #403 — an install hands every teammate a new set of tools). What it
-installs lands in the list above it with a `registry` badge; there is no second
-section, for the reason the whole merge exists.
+renders Discover under the same manage gate as adding a server (issue #403 — an
+install hands every teammate a new set of tools). An entry opens a pop-up with
+its endpoint, publisher and verified badge before anything is installed; an
+entry this company already holds says so and offers no install. What it
+installs lands in Yours with a `registry` badge.
 
 An entry's install form is exactly the `requiredEnvKeys` the host derived from
 the connection the install will use, as password fields. Those values are
 write-only in both directions: nothing sends one back, and the merged row
 reports only `authConfigured`.
 
-Its failures are its own. Both upstream directories are network hops and either
-can be down, and on a build without the `mcp` feature every `…/mcp/registry/…`
-route answers `404 not_wired` — so `registryOutage` in
-`frontend/src/lib/mcp-registry.ts` turns *every* rejection into one of two
-notices rendered inside the panel, and never rethrows. A dead directory is an
-empty result with a reason; a missing feature is a sentence about the build. The
-company's installed servers keep rendering through both.
+Its failures are its own. The directory is a network hop and can be down, and on
+a build without the `mcp` feature every `…/mcp/registry/…` route answers
+`404 not_wired` — so `registryOutage` in `frontend/src/lib/mcp-registry.ts`
+turns *every* rejection into one of two notices and never rethrows. A dead
+directory is an empty result with a reason; a missing feature is a sentence
+about the build. The company's installed servers keep rendering through both.
 
 ### Provenance picks the routes, not just the badge
 
@@ -329,19 +356,14 @@ guessing.
 
 ### Opening one server
 
-A row's name opens the server into
-[`ProviderDetail`](../../frontend/src/views/connections/ProviderDetail.tsx) — the
-same panel a Composio provider opens into (issues #404, #821), on a
-`ConnectionSubject` union rather than a second MCP-specific panel. The reason is
-the paragraph above one level up: two surfaces describing the same idea acquire
-two vocabularies and then drift.
-
-The panel is read-only. Enable, `Test`, `Tools` and `Remove` stay on the row;
-what it adds is what the row cannot say. Its provenance and removal prose are
-`mcpProvenanceNote` / `mcpRemovalNote` — one sentence per source, because the
-panel used to read `manifest` against everything-else and told a directory
-install it "was added from the console and lives in this company's runtime
-store", true of neither half of it.
+A server opens into its own page
+([`McpServerPage`](../../frontend/src/views/mcp/McpServerPage.tsx)), laid out
+after a connector page: icon, name, provenance and standing in the header with
+the primary action and disconnect beside them; then its description, tools and
+permissions, the agents that can reach it, and usage. Connection facts sit
+behind a **details** pop-up rather than at the foot of the page. Its provenance
+and removal prose are `mcpProvenanceNote` / `mcpRemovalNote` — one sentence per
+source.
 
 - **Connected, and as what.** MCP has no connection object, so this is assembled
   from two facts a single badge would collapse: `enabled` (whether any agent

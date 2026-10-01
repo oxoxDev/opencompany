@@ -67,6 +67,33 @@ got there before the directory existed at all.
 Upstream still reads a host-process `SMITHERY_API_KEY` if one is set; nothing in
 this deployment writes, reads or reports it.
 
+### Ranking and top connectors
+
+The registry search route
+([`mcp_registry::wired`](../../crates/opencompany-core/src/server/ops/mcp_registry/wired.rs))
+orders what it returns with the pure helpers in
+[`mcp_registry::catalogue`](../../crates/opencompany-core/src/server/ops/mcp_registry/catalogue.rs):
+
+- `rank_catalogue` marks an entry `official` only when its qualified name is in
+  `tinymcp::registry::curation::OFFICIAL_SERVERS`, matched exactly, then sorts
+  official first and by install count after that. Ties keep upstream's order.
+  The upstream registry reports every entry as unofficial, so this list is the
+  only source of the verified badge.
+- An empty query on its first page is **top connectors**: every entry in that
+  list is fetched by name, kept when it names an endpoint this host can dial
+  (`featured_entry`), and put ahead of the page without repeating a row the page
+  also carries (`merge_featured`).
+
+### Icons are inlined host-side
+
+An icon reaches the console only as a `data:image/` URI. Search, detail and the
+install rows pass every icon through `inline_icon`: an inline image is kept, a
+remote `http(s)` address is fetched by the host through the SSRF-guarded
+`fetch_icon` (64 KB cap, 5 s timeout) and inlined, and anything else is dropped.
+Results are cached per URL (512 entries). The console renders nothing that is
+not already inline, so opening Discover makes no request to a publisher's host
+from the operator's browser.
+
 ### Delete dispatches
 
 `DELETE …/mcp/servers/{name}` removes what the row actually has: the
