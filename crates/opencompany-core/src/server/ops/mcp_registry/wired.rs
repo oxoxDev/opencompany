@@ -44,8 +44,9 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, not_wired};
 
 use super::RegistryInstall;
 use super::catalogue::{
-    brand_logo, brand_name, catalogue_detail, catalogue_search, directory_server_name,
-    featured_entry, health_from_status, inline_icon, inline_icons, merge_featured, rank_catalogue,
+    brand_logo, brand_name, browse_upstream_page, catalogue_detail, catalogue_search,
+    directory_server_name, featured_entry, featured_page, health_from_status, inline_icon,
+    inline_icons, rank_catalogue, shift_browse_page,
 };
 
 // ---------------------------------------------------------------------------
@@ -250,14 +251,10 @@ pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQue
     let Some(mcp) = company.runtime.mcp() else {
         return not_wired("mcp registry");
     };
-    let browsing =
-        query.q.as_deref().is_none_or(|q| q.trim().is_empty()) && query.page.unwrap_or(1) <= 1;
-    let mut results = match mcp.search(query.q, query.page, query.page_size).await {
-        Ok(raw) => catalogue_search(&raw),
-        Err(error) => return ApiError(error).into_response(),
-    };
-    if browsing {
-        let featured = futures::future::join_all(
+    let browsing = query.q.as_deref().is_none_or(|q| q.trim().is_empty());
+    let shown_page = query.page.unwrap_or(1).max(1);
+    if browsing && shown_page == 1 {
+        let featured: Vec<_> = futures::future::join_all(
             OFFICIAL_SERVERS
                 .iter()
                 .map(|name| mcp.registry_get((*name).to_string())),
@@ -267,7 +264,27 @@ pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQue
         .filter_map(Result::ok)
         .filter_map(|raw| featured_entry(&raw))
         .collect();
-        results.servers = merge_featured(featured, results.servers);
+        if !featured.is_empty() {
+            let mut page = featured_page(featured);
+            rank_catalogue(&mut page.servers, OFFICIAL_SERVERS);
+            inline_icons(&mut page.servers, cached_icon).await;
+            return Json(page).into_response();
+        }
+    }
+    let upstream_page = if browsing {
+        browse_upstream_page(shown_page)
+    } else {
+        shown_page
+    };
+    let mut results = match mcp
+        .search(query.q, Some(upstream_page), query.page_size)
+        .await
+    {
+        Ok(raw) => catalogue_search(&raw),
+        Err(error) => return ApiError(error).into_response(),
+    };
+    if browsing {
+        shift_browse_page(&mut results, upstream_page, OFFICIAL_SERVERS);
     }
     rank_catalogue(&mut results.servers, OFFICIAL_SERVERS);
     inline_icons(&mut results.servers, cached_icon).await;

@@ -12,7 +12,6 @@
 //! the rest. That is what keeps an upstream payload change from silently
 //! becoming an OpenCompany API change.
 
-use std::collections::HashSet;
 use std::future::Future;
 
 use serde::Serialize;
@@ -326,17 +325,34 @@ pub(in crate::server::ops) fn featured_entry(raw: &Value) -> Option<CatalogueEnt
     catalogue_entry(server)
 }
 
-/// `featured` ahead of `page`, without repeating a row the page also carries.
-pub(in crate::server::ops) fn merge_featured(
-    featured: Vec<CatalogueEntryDto>,
-    page: Vec<CatalogueEntryDto>,
-) -> Vec<CatalogueEntryDto> {
-    let mut seen: HashSet<String> = HashSet::new();
-    featured
-        .into_iter()
-        .chain(page)
-        .filter(|entry| seen.insert(entry.qualified_name.clone()))
-        .collect()
+/// The upstream page a browse — no search term — reads for a shown page. The
+/// first shown page is the official connectors alone, so every later one is
+/// the directory page before it.
+pub(in crate::server::ops) fn browse_upstream_page(shown: u32) -> u32 {
+    shown.saturating_sub(1).max(1)
+}
+
+/// The first browse page: the official connectors, with the directory after.
+pub(in crate::server::ops) fn featured_page(servers: Vec<CatalogueEntryDto>) -> CatalogueSearchDto {
+    CatalogueSearchDto {
+        servers,
+        page: 1,
+        total_pages: 2,
+    }
+}
+
+/// A directory page as a browse shows it: numbered after the featured page,
+/// and without the official connectors that page already listed.
+pub(in crate::server::ops) fn shift_browse_page(
+    results: &mut CatalogueSearchDto,
+    upstream_page: u32,
+    official: &[&str],
+) {
+    results
+        .servers
+        .retain(|server| !official.contains(&server.qualified_name.as_str()));
+    results.page = upstream_page + 1;
+    results.total_pages = results.total_pages.max(upstream_page) + 1;
 }
 
 /// An icon as the browser may load it: an inline image kept as is, a remote

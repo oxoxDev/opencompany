@@ -70,15 +70,25 @@ fn ranking_puts_official_first_then_most_installed_and_keeps_ties_in_order() {
 }
 
 #[test]
-fn featured_rows_lead_and_are_not_repeated_from_the_page() {
-    let merged = merge_featured(
-        vec![entry("com.notion/mcp", 0), entry("app.linear/linear", 0)],
-        vec![entry("io.x/other", 1), entry("com.notion/mcp", 0)],
-    );
-    assert_eq!(
-        names(&merged),
-        ["com.notion/mcp", "app.linear/linear", "io.x/other"]
-    );
+fn a_browse_opens_on_the_official_connectors_alone() {
+    let page = featured_page(vec![entry("com.notion/mcp", 0)]);
+    assert_eq!(names(&page.servers), ["com.notion/mcp"]);
+    assert_eq!((page.page, page.total_pages), (1, 2));
+    assert_eq!(browse_upstream_page(1), 1);
+    assert_eq!(browse_upstream_page(2), 1);
+    assert_eq!(browse_upstream_page(3), 2);
+}
+
+#[test]
+fn a_later_browse_page_follows_the_featured_one_without_repeating_it() {
+    let mut results = CatalogueSearchDto {
+        servers: vec![entry("io.x/other", 0), entry("com.notion/mcp", 0)],
+        page: 1,
+        total_pages: 5,
+    };
+    shift_browse_page(&mut results, 1, OFFICIAL);
+    assert_eq!(names(&results.servers), ["io.x/other"]);
+    assert_eq!((results.page, results.total_pages), (2, 6));
 }
 
 #[test]

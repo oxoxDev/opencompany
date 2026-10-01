@@ -78,11 +78,15 @@ orders what it returns with the pure helpers in
   `tinymcp::registry::curation::OFFICIAL_SERVERS`, matched exactly, then sorts
   official first and by install count after that. Ties keep upstream's order.
   The upstream registry reports every entry as unofficial, so this list is the
-  only source of the verified badge.
-- An empty query on its first page is **top connectors**: every entry in that
-  list is fetched by name, kept when it names an endpoint this host can dial
-  (`featured_entry`), and put ahead of the page without repeating a row the page
-  also carries (`merge_featured`).
+  only source of the verified badge. Install counts come only from Smithery, so
+  on the official registry the second key orders nothing.
+- A browse — no search term — opens on **top connectors**: the official
+  connectors alone, each fetched by name and kept when it names an endpoint this
+  host can dial (`featured_entry`). "Show more" continues into the directory,
+  numbered after that first page (`browse_upstream_page`, `shift_browse_page`)
+  and without repeating an official entry. The official registry records no
+  install or download counts, so its own order — by publisher domain — is not a
+  ranking worth leading with.
 
 ### Icons are inlined host-side
 
