@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { openOutward } from "@/lib/external-links";
 import type { McpBridgeState } from "@/lib/mcp-bridge";
 import {
+  mcpDisplayName,
   REGISTRY_OAUTH_UNSUPPORTED_NOTICE,
   registryOauthUnsupported,
 } from "@/lib/mcp-registry";
@@ -125,11 +126,11 @@ export function McpConnectDialog({
           <div className="flex items-center gap-3">
             <McpServerIcon
               iconUrl={server.iconUrl}
-              name={server.name}
+              name={mcpDisplayName(server)}
               className="size-10"
             />
             <div className="min-w-0">
-              <DialogTitle className="truncate">{server.name}</DialogTitle>
+              <DialogTitle className="truncate">{mcpDisplayName(server)}</DialogTitle>
               <DialogDescription>
                 {connected ? "Connected" : "Not connected yet"}
               </DialogDescription>
@@ -137,7 +138,7 @@ export function McpConnectDialog({
           </div>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           {connected ? (
             <div
               className="flex items-start gap-2 rounded-md border border-status-done-text/30 bg-status-done-text/10 p-3 text-sm"
@@ -158,7 +159,10 @@ export function McpConnectDialog({
             </div>
           ) : (
             complaint && (
-              <p className="text-sm text-muted-foreground" data-testid="mcp-connect-complaint">
+              <p
+                className="text-sm break-words text-muted-foreground"
+                data-testid="mcp-connect-complaint"
+              >
                 {complaint}
               </p>
             )
@@ -373,7 +377,7 @@ function SignInFlightPanel({
   const ago = Math.max(0, Math.round((Date.now() - flight.checkedAtMillis) / 1000));
   return (
     <div
-      className="space-y-2 rounded-md border border-border bg-muted/30 p-3"
+      className="min-w-0 space-y-2 rounded-md border border-border bg-muted/30 p-3"
       data-testid="mcp-signin-flight"
     >
       {flight.timedOut ? (
@@ -394,7 +398,10 @@ function SignInFlightPanel({
           This dialog updates on its own.
         </p>
       )}
-      <code className="block truncate rounded-md border border-border bg-background px-2 py-1 font-mono text-xs select-text">
+      <code
+        className="block max-h-20 overflow-y-auto rounded-md border border-border bg-background px-2 py-1 font-mono text-xs break-all select-text"
+        data-testid="mcp-signin-url"
+      >
         {flight.authorizeUrl}
       </code>
       <div className="flex flex-wrap items-center gap-2">
