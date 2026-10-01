@@ -1,12 +1,26 @@
 import { useState } from "react";
-import { AlertTriangle, ArrowLeft, Unplug } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Info,
+  KeyRound,
+  Loader2,
+  LogIn,
+  Plug,
+  Unplug,
+} from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { updateMcpServer } from "@/api/mcp";
 import { ApiError, type McpHealth, type McpServer, type RosterAgent } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import {
   connectedOn,
@@ -14,21 +28,36 @@ import {
   mcpStanding,
   probedOn,
 } from "@/lib/connection-detail";
-import type { McpBridgeState } from "@/lib/mcp-bridge";
+import { mcpHealthBadge, type McpBridgeState } from "@/lib/mcp-bridge";
 import {
   UsageSection,
   useConnectionUsage,
 } from "@/views/connections/connection-usage";
-import { mcpProvenanceNote, mcpRemovalNote } from "@/lib/mcp-registry";
-import { McpServerIcon } from "@/views/connections/McpServerTable";
+import {
+  mcpProvenanceNote,
+  mcpRemovalNote,
+  REGISTRY_OAUTH_UNSUPPORTED_NOTICE,
+  registryOauthUnsupported,
+} from "@/lib/mcp-registry";
+import {
+  McpServerIcon,
+  type PrimaryAction,
+} from "@/views/connections/McpServerTable";
 import { McpToolPermissions } from "@/views/mcp/McpToolPermissions";
 
 const PROVENANCE_LABELS: Record<string, string> = {
   manifest: "manifest",
   registry: "directory",
-  runtime: "console",
+  runtime: "custom",
   default: "built in",
 };
+
+const PRIMARY = {
+  sign_in: { text: "Sign in", Icon: LogIn },
+  add_token: { text: "Add credential", Icon: KeyRound },
+  rotate_env: { text: "Add credentials", Icon: KeyRound },
+  connect: { text: "Connect", Icon: Plug },
+} as const;
 
 interface Props {
   client: OpenCompanyClient;
@@ -36,12 +65,8 @@ interface Props {
   server: McpServer;
   health: McpHealth | undefined;
   canManage: boolean;
-  /** Whether the agent-side MCP bridge is compiled into this host (issue #567). */
   bridge: McpBridgeState;
-  /**
-   * Whether a `needs_approval` mode parks a call on this host. `undefined` means
-   * no read answered it, and nothing is claimed either way.
-   */
+  /** Whether a `needs_approval` mode parks a call on this host; `undefined` if unknown. */
   approvalsPark?: boolean;
   /** The roster, for the per-teammate lens on this server's tool permissions. */
   agents?: RosterAgent[];
@@ -49,15 +74,16 @@ interface Props {
   reloadKey: number;
   /** Scroll the permissions panel into view once it has something to show. */
   focusPermissions: boolean;
+  /** What this server needs to connect, if anything. */
+  primary: PrimaryAction;
+  busy: string | null;
+  onPrimary: () => void;
   /** Absent when this row cannot be removed from the console. */
   onDisconnect: (() => void) | null;
   onBack: () => void;
 }
 
-/**
- * One MCP server, as a page: what it is, who can reach it, and what each of
- * its tools is allowed to do.
- */
+/** One MCP server: what it is, who can reach it, and what its tools may do. */
 export function McpServerPage({
   client,
   company,
@@ -69,210 +95,243 @@ export function McpServerPage({
   agents = [],
   reloadKey,
   focusPermissions,
+  primary,
+  busy,
+  onPrimary,
   onDisconnect,
   onBack,
 }: Props) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const standing = mcpStanding(server, health);
-  const probedAt = probedOn(health?.checkedAtMillis);
-  const usage = useConnectionUsage(
-    client,
-    company,
-    mcpProviderSlug(server.name),
-  );
+  const badge = mcpHealthBadge(health, server.authConfigured, bridge);
+  const usage = useConnectionUsage(client, company, mcpProviderSlug(server.name));
+  const action = primary && canManage ? PRIMARY[primary.kind] : null;
+  const reach = server.reachableBy;
 
   return (
-    <div className="space-y-4" data-testid="mcp-server-page">
-      <div className="flex flex-wrap items-center gap-3">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onBack}
-          className="-ml-2 gap-1 text-muted-foreground"
-          data-testid="mcp-page-back"
-        >
-          <ArrowLeft className="size-4" />
-          MCP Servers
-        </Button>
-        <McpServerIcon
-          iconUrl={server.iconUrl}
-          name={server.name}
-          className="size-6"
-        />
-        <h2 className="text-base font-semibold">{server.name}</h2>
-        <Badge
-          variant="outline"
-          className="font-normal"
-          data-testid="mcp-page-provenance"
-        >
-          {PROVENANCE_LABELS[server.source] ?? server.source}
-        </Badge>
-        <span
-          className="text-xs text-muted-foreground"
-          data-testid="mcp-page-standing"
-        >
-          {standing.summary}
-        </span>
-        {onDisconnect && canManage && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={onDisconnect}
-            className="ml-auto gap-1"
-            data-testid="mcp-page-disconnect"
-          >
-            <Unplug className="size-3.5" />
-            Disconnect
-          </Button>
-        )}
-      </div>
+    <div className="mx-auto w-full max-w-3xl space-y-6" data-testid="mcp-server-page">
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={onBack}
+        className="-ml-2 gap-1 text-muted-foreground"
+        data-testid="mcp-page-back"
+      >
+        <ArrowLeft className="size-4" />
+        MCP Servers
+      </Button>
 
-      <Separator />
-
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="space-y-1">
-          <p className="font-mono text-xs break-all text-muted-foreground">
-            {server.endpoint}
-          </p>
-          <McpDescription
-            client={client}
-            company={company}
-            server={server}
-            canManage={canManage}
-          />
-          {server.websiteUrl && (
-            <p className="text-xs text-muted-foreground">
-              {/* The address the server reported for itself. A link; nothing
-                  here fetches it. */}
-              <a
-                href={server.websiteUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline"
-                data-testid="mcp-page-website"
-              >
-                {server.websiteUrl}
-              </a>
-            </p>
-          )}
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-page-probe"
-          >
-            {standing.probe}
-            {probedAt !== null && ` · ${probedAt}`}
-          </p>
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="mcp-page-connected-on"
-          >
-            {connectedOn(undefined)} —{" "}
-            {server.source === "registry"
-              ? "this host does connect a directory install, but records no date for it."
-              : "MCP has no connect step to record one."}
-          </p>
-          {health && health.status !== "ok" && health.message && (
-            <p className="text-xs text-muted-foreground">{health.message}</p>
-          )}
-        </div>
-      </div>
-
-      {bridge !== "absent" &&
-        standing.live &&
-        server.reachableBy !== undefined && (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {server.reachableBy.length === 0 ? (
-            <p
-              className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs font-medium text-destructive"
-              data-testid="mcp-page-reachability"
-            >
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                No agent can reach this server — no teammate&apos;s tool grants
-                cover <code className="font-mono">mcp:{server.name}</code>, so
-                every permission below is inert. It answers, and nobody can call
-                it.{" "}
-                {/* No button, because none could work: `mcp` is not in the set
-                    the console may widen, so offering one that 403s would be
-                    worse than naming the dead end. */}
-                <span className="font-normal">
-                  <code className="font-mono">mcp:</code> grants are not in the
-                  set the console may widen, so this one is added in{" "}
-                  <code className="font-mono">company.toml</code> — and on a
-                  hosted tenant that file is a read-only boot snapshot.
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start">
+        <div className="flex min-w-0 flex-1 items-start gap-4">
+          <McpServerIcon iconUrl={server.iconUrl} name={server.name} className="size-14" />
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="truncate text-xl font-semibold">{server.name}</h2>
+              <Badge variant="outline" className="font-normal" data-testid="mcp-page-provenance">
+                {PROVENANCE_LABELS[server.source] ?? server.source}
+              </Badge>
+            </div>
+            <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+              {badge && (
+                <span
+                  className={
+                    badge.tone === "delivering"
+                      ? "font-medium text-status-done-text"
+                      : badge.tone === "configured"
+                        ? "font-medium"
+                        : "font-medium text-status-blocked-text"
+                  }
+                >
+                  {badge.label}
                 </span>
-              </span>
+              )}
+              <span data-testid="mcp-page-standing">{standing.summary}</span>
             </p>
-          ) : (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid="mcp-page-reachability"
-            >
-              Reachable by:{" "}
-              <span className="font-medium text-foreground">
-                {server.reachableBy.map((agent) => agent.name).join(", ")}
-              </span>
-            </p>
-          )}
-          <a
-            href="#/company"
-            className="text-xs font-medium text-muted-foreground underline"
-            data-testid="mcp-page-edit-agents"
-          >
-            Edit agents
-          </a>
+          </div>
         </div>
+        <div className="flex items-center gap-2 sm:shrink-0">
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Connection details"
+            title="Connection details"
+            data-testid="mcp-page-details-open"
+            onClick={() => setDetailsOpen(true)}
+          >
+            <Info className="size-4" />
+          </Button>
+          {onDisconnect && canManage && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onDisconnect}
+              className="flex-1 gap-1 sm:flex-none"
+              data-testid="mcp-page-disconnect"
+            >
+              <Unplug className="size-3.5" />
+              Disconnect
+            </Button>
+          )}
+          {action && (
+            <Button
+              size="sm"
+              className="flex-1 sm:flex-none"
+              disabled={busy !== null}
+              data-testid="mcp-page-primary"
+              onClick={onPrimary}
+            >
+              {busy === server.name ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <action.Icon className="size-3.5" />
+              )}
+              {action.text}
+            </Button>
+          )}
+        </div>
+      </header>
+
+      <McpDescription client={client} company={company} server={server} canManage={canManage} />
+
+      {health && health.status !== "ok" && health.message.trim() && (
+        <p className="flex items-start gap-2 rounded-md border border-status-blocked-text/30 bg-status-blocked-text/10 px-3 py-2 text-xs text-status-blocked-text">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span>{health.message}</span>
+        </p>
+      )}
+
+      {registryOauthUnsupported(server, health) && (
+        <p className="text-xs text-muted-foreground" data-testid="mcp-no-credential-control">
+          {REGISTRY_OAUTH_UNSUPPORTED_NOTICE}
+        </p>
       )}
 
       {!standing.live && (
-        <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-          <AlertTriangle className="mt-px size-3 shrink-0" />
+        <p className="flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
           <span>
-            This server is turned off, so no agent receives its tools whatever
-            their grants say and whatever the endpoint answers. Its
-            configuration and any stored credential survive — turning it back on
-            restores its tools on the next turn.
+            Turned off — no agent receives its tools. Its configuration and any
+            stored credential survive, and turning it back on restores its tools
+            on the next turn.
           </span>
         </p>
       )}
 
-      <Separator />
+      <section className="space-y-3">
+        <h3 className="text-sm font-medium">Tools &amp; permissions</h3>
+        <McpToolPermissions
+          client={client}
+          company={company}
+          server={server}
+          canManage={canManage}
+          agents={agents}
+          approvalsPark={approvalsPark}
+          reloadKey={reloadKey}
+          focus={focusPermissions}
+        />
+      </section>
 
-      <McpToolPermissions
-        client={client}
-        company={company}
-        server={server}
-        canManage={canManage}
-        agents={agents}
-        approvalsPark={approvalsPark}
-        reloadKey={reloadKey}
-        focus={focusPermissions}
-      />
-
-      <Separator />
+      {bridge !== "absent" && standing.live && reach !== undefined && (
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-medium">Agents with access</h3>
+            <a
+              href="#/company"
+              className="text-xs font-medium text-muted-foreground underline"
+              data-testid="mcp-page-edit-agents"
+            >
+              Edit agents
+            </a>
+          </div>
+          {reach.length === 0 ? (
+            <p
+              className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive"
+              data-testid="mcp-page-reachability"
+            >
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                No agent can reach this server — no tool grant covers{" "}
+                <code className="font-mono">mcp:{server.name}</code>, so the
+                permissions above are inert. Add the grant in{" "}
+                <code className="font-mono">company.toml</code>.
+              </span>
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5" data-testid="mcp-page-reachability">
+              {reach.map((agent) => (
+                <Badge key={agent.id} variant="secondary" className="font-normal">
+                  {agent.name}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <UsageSection
         usage={usage}
-        perConnection={`Successful tool calls your agents made through ${server.name}, counted under mcp:${server.name.trim().toLowerCase()} so a Composio provider of the same name cannot be read as this one.`}
+        perConnection={`Successful tool calls your agents made through ${server.name}.`}
       />
 
-      <Separator />
-
-      <section className="space-y-1" aria-label="Removing this server">
-        <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          What a disconnect reaches
-        </h4>
-        <p
-          className="text-xs text-muted-foreground"
-          data-testid="mcp-page-disconnect-scope"
-        >
-          {mcpRemovalNote(server.source)} Nothing is revoked at the
-          server&apos;s own end: no token it issued is invalidated and no
-          session there is closed. Revoke those where they were issued.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {mcpProvenanceNote(server.source)}
-        </p>
-      </section>
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <DialogContent className="sm:max-w-lg" data-testid="mcp-page-details">
+          <DialogHeader>
+            <DialogTitle>Connection details</DialogTitle>
+          </DialogHeader>
+          <dl className="space-y-3 text-xs">
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Endpoint</dt>
+              <dd>
+                <code className="block rounded-md border border-border bg-muted/40 px-2 py-1 font-mono break-all select-text">
+                  {server.endpoint}
+                </code>
+              </dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Last check</dt>
+              <dd data-testid="mcp-page-probe">
+                {standing.probe}
+                {probedOn(health?.checkedAtMillis) !== null &&
+                  ` · ${probedOn(health?.checkedAtMillis)}`}
+              </dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Connected</dt>
+              <dd data-testid="mcp-page-connected-on">
+                {connectedOn(undefined)} —{" "}
+                {server.source === "registry"
+                  ? "this host connects a directory install but records no date for it."
+                  : "MCP has no connect step to record one."}
+              </dd>
+            </div>
+            {server.websiteUrl && (
+              <div className="space-y-1">
+                <dt className="text-muted-foreground">Website</dt>
+                <dd>
+                  <a
+                    href={server.websiteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="break-all underline"
+                    data-testid="mcp-page-website"
+                  >
+                    {server.websiteUrl}
+                  </a>
+                </dd>
+              </div>
+            )}
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Removing it</dt>
+              <dd data-testid="mcp-page-disconnect-scope">
+                {mcpRemovalNote(server.source)} Nothing is revoked at the
+                server&apos;s own end: no token it issued is invalidated and no
+                session there is closed.
+              </dd>
+              <dd className="text-muted-foreground">{mcpProvenanceNote(server.source)}</dd>
+            </div>
+          </dl>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -368,7 +427,7 @@ function McpDescription({
 
   const shown = (saved ?? declared) || probed;
   return (
-    <p className="max-w-prose text-xs text-muted-foreground" data-testid="mcp-page-description">
+    <p className="text-sm text-muted-foreground" data-testid="mcp-page-description">
       {shown || "No description — this server says nothing about itself, and none was declared."}
       {editable && (
         <button

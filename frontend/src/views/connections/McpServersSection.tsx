@@ -2,11 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openOutward } from "@/lib/external-links";
 import {
   AlertTriangle,
+  FileJson,
   Info,
-  Loader2,
   Plus,
   Search,
-  Server,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -34,16 +33,13 @@ import {
   type McpServer,
   type McpSource,
   type McpStatus,
-  type McpToolInfo,
   type RosterAgent,
 } from "@/api/types";
 import { type McpBridgeState, mcpBridgeState } from "@/lib/mcp-bridge";
 import {
   missingEnvKeys,
   mcpRowControls,
-  REGISTRY_OAUTH_UNSUPPORTED_NOTICE,
   REGISTRY_UNWIRED_NOTICE,
-  registryOauthUnsupported,
   registryOutage,
 } from "@/lib/mcp-registry";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -59,20 +55,39 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useHashParam } from "@/hooks/use-hash-param";
-import { useMcpDirectorySearch } from "@/views/connections/McpRegistryBrowser";
+import { McpDiscover } from "@/views/connections/McpRegistryBrowser";
 import { McpAddServerDialog } from "@/views/connections/McpAddServerDialog";
 import {
-  McpDirectoryRow,
-  McpGroupRow,
+  McpServerCard,
+  McpServerGrid,
   McpServerRow,
   McpServerTable,
   type McpRowActions,
   type PrimaryAction,
 } from "@/views/connections/McpServerTable";
+import {
+  McpLayoutSwitch,
+  McpModeSwitch,
+  useMcpLayouts,
+  type McpMode,
+} from "@/views/connections/mcp-view-controls";
+import {
+  McpConnectDialog,
+  type EnvFields,
+  type SignInFlight,
+  type ToolsState,
+} from "@/views/mcp/McpConnectDialog";
+import { McpJsonEditor } from "@/views/mcp/McpJsonEditor";
 import { McpServerPage } from "@/views/mcp/McpServerPage";
 
 /**
@@ -128,37 +143,6 @@ export function credentialAffordance(
 }
 
 type McpLoad = "loading" | "ready" | "unavailable" | "error";
-/**
- * The fields a directory install's credential rotation is asking for.
- *
- * They come from the *directory*, not from the row: `GET …/mcp/servers` reports
- * only whether a credential is stored (`authConfigured`), never which keys hold
- * it, so the names have to be re-read from the catalogue entry the install came
- * from. That is also why this can fail while the rotation route itself is
- * perfectly healthy — a directory outage costs the field names, so the form
- * says so instead of guessing at them.
- */
-type EnvFields =
-  | { kind: "loading" }
-  | { kind: "failed"; message: string }
-  | { kind: "ready"; keys: string[] };
-type ToolsState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "unwired" }
-  | { kind: "error"; message: string }
-  | { kind: "ready"; tools: McpToolInfo[] };
-
-/**
- * One server's sign-in, while the operator is still in the other tab.
- */
-interface SignInFlight {
-  authorizeUrl: string;
-  /** The tab could not be created — a blocked popup, or a desktop webview. */
-  blocked: boolean;
-  checkedAtMillis: number;
-  timedOut: boolean;
-}
 
 /**
  * How the page around this section frames it.
@@ -183,11 +167,8 @@ interface Props {
 }
 
 /**
- * The company's MCP tool servers: one searchable list, and the directory in it.
- *
- * A table: the four things an operator scans for, one labelled action per row
- * and everything else behind an overflow. The one search field covers this
- * company *and* the directory.
+ * The company's MCP tool servers (Yours) and the public directory (Discover),
+ * each searchable on its own and shown as a list or as cards.
  *
  * This is the console's **only** MCP surface, and it has exactly one caller:
  * [`McpServersView`](../McpServersView.tsx), the `#/connections/mcp` page.
@@ -237,11 +218,13 @@ export function McpServersSection({
     setOpenedName(null);
     setPermissionsFor(null);
   };
-  // One field over both halves. The company's own servers are filtered locally,
-  // so searching them costs nothing; the directory is not called until something
-  // is typed.
-  const [query, setQuery] = useState("");
-  const searchBox = useRef<HTMLInputElement | null>(null);
+  const [viewParam, setViewParam] = useHashParam("view");
+  const [tabParam, setTabParam] = useHashParam("tab");
+  const [yoursQuery, setYoursQuery] = useState("");
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const [layouts, chooseLayout] = useMcpLayouts();
+  // The server whose connect dialog is open.
+  const [connectFor, setConnectFor] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
 
@@ -284,8 +267,6 @@ export function McpServersSection({
   // Bumped per server whenever a probe rewrote its stored tool inventory, so an
   // open permissions panel re-reads instead of rendering the pre-probe list.
   const [probedAt, setProbedAt] = useState<Record<string, number>>({});
-
-  const directory = useMcpDirectorySearch(client, company, query);
 
   const refresh = useCallback(async () => {
     const mine = scope.current;
@@ -429,6 +410,7 @@ export function McpServersSection({
     // Guard both the shared `busy` flag and a per-server poll already in flight:
     // the poll outlives `busy`, so without the second check a repeat click would
     // spawn a second overlapping sign-in (duplicate token exchange + toasts).
+    setConnectFor(server.name);
     if (busy || pollTimers.current[server.name] !== undefined) return;
     setBusy(server.name);
     cancelledSignIns.current.delete(server.name);
@@ -481,7 +463,6 @@ export function McpServersSection({
           });
           if (health.status === "ok") {
             cancelSignIn(server.name);
-            toast.success(`Signed in to ${server.name}.`);
             await refresh();
             return;
           }
@@ -590,10 +571,9 @@ export function McpServersSection({
           : await disconnectMcpRegistryServer(client, company, server.serverId);
       const after = res.test;
       if (after) setTested((t) => ({ ...t, [server.name]: after }));
-      // No state came back: drop any stale override so the row falls back to the
-      // health the refresh below is about to bring.
       else setTested(({ [server.name]: _dropped, ...rest }) => rest);
       await refresh();
+      if (direction === "connect") setConnectFor(server.name);
     } catch (err) {
       if (err instanceof ApiError && err.code === "not_wired") {
         toast.message(REGISTRY_UNWIRED_NOTICE);
@@ -623,17 +603,10 @@ export function McpServersSection({
       const res = await installMcpRegistryEntry(client, company, {
         qualifiedName: entry.qualifiedName,
       });
-      // An install that lands "needs a credential" is NOT a rollback — the host
-      // says so explicitly — so it is reported where the operator can act on it
-      // rather than dressed up as a failed install.
-      if (res.test && res.test.status !== "ok") {
-        toast.message(
-          `Installed ${entry.displayName}. ${res.test.message} Add its credential from its row.`,
-        );
-      } else {
-        toast.success(`Installed ${entry.displayName}. ${res.note}`);
-      }
+      const after = res.test;
+      if (after) setTested((t) => ({ ...t, [res.server.name]: after }));
       await refresh();
+      setConnectFor(res.server.name);
     } catch (err) {
       const outage = registryOutage(err);
       toast.error(
@@ -733,11 +706,6 @@ export function McpServersSection({
   }
 
   async function discover(server: McpServer) {
-    // Toggle closed if already shown.
-    if (tools[server.name]?.kind === "ready") {
-      setTools((t) => ({ ...t, [server.name]: { kind: "idle" } }));
-      return;
-    }
     setTools((t) => ({ ...t, [server.name]: { kind: "loading" } }));
     try {
       const list = await discoverMcpTools(client, company, server.name);
@@ -767,11 +735,18 @@ export function McpServersSection({
     onAddToken: (server) => {
       setCredentialDraft("");
       setCredentialFor(server.name);
+      setConnectFor(server.name);
     },
-    onRotateEnv: (server) => void openEnvRotation(server),
+    onRotateEnv: (server) => {
+      setConnectFor(server.name);
+      void openEnvRotation(server);
+    },
     onLifecycle: (server, direction) => void lifecycle(server, direction),
     onTest: (server) => void test(server),
-    onTools: (server) => void discover(server),
+    onTools: (server) => {
+      setConnectFor(server.name);
+      void discover(server);
+    },
     onPermissions: (name) => setPermissionsFor(name),
     onToggle: (server, enabled) => void toggle(server, enabled),
     onRemove: (server) => setPendingRemoval(server),
@@ -819,7 +794,17 @@ export function McpServersSection({
     [servers, opened],
   );
 
-  const term = query.trim().toLowerCase();
+  const mode: McpMode =
+    viewParam === "discover"
+      ? "discover"
+      : viewParam === "yours"
+        ? "yours"
+        : load === "ready" && servers.length === 0
+          ? "discover"
+          : "yours";
+  const layout = layouts[mode];
+
+  const term = yoursQuery.trim().toLowerCase();
   const matches = useMemo(
     () =>
       term === ""
@@ -830,6 +815,105 @@ export function McpServersSection({
             ),
           ),
     [servers, term],
+  );
+
+  function primaryFor(server: McpServer, health: McpHealth | undefined): PrimaryAction {
+    const credential = credentialAffordance(health?.authHint, {
+      source: server.source,
+      status: health?.status,
+    });
+    if (credential === "sign_in") return { kind: "sign_in" };
+    if (credential === "add_token") return { kind: "add_token" };
+    if (credential === "rotate_env") return { kind: "rotate_env" };
+    return mcpRowControls(server, health).lifecycle === "connect"
+      ? { kind: "connect" }
+      : null;
+  }
+
+  function runPrimary(server: McpServer, primary: PrimaryAction) {
+    if (primary === null) return;
+    if (primary.kind === "sign_in") actions.onSignIn(server);
+    else if (primary.kind === "add_token") actions.onAddToken(server);
+    else if (primary.kind === "rotate_env") actions.onRotateEnv(server);
+    else actions.onLifecycle(server, "connect");
+  }
+
+  function closeConnect() {
+    const name = connectFor;
+    setConnectFor(null);
+    if (name === null) return;
+    if (credentialFor === name) setCredentialFor(null);
+    if (envFor === name) setEnvFor(null);
+    setTools(({ [name]: _dropped, ...rest }) => rest);
+  }
+
+  const connecting = useMemo(
+    () => servers.find((s) => s.name === connectFor) ?? null,
+    [servers, connectFor],
+  );
+  const connectingHealth = connecting
+    ? (tested[connecting.name] ?? connecting.health)
+    : undefined;
+
+  const connectDialog = (
+    <McpConnectDialog
+      server={connecting}
+      health={connectingHealth}
+      bridge={bridge}
+      canManage={canManage}
+      busy={busy}
+      primary={connecting ? primaryFor(connecting, connectingHealth) : null}
+      flight={connecting ? signIns[connecting.name] : undefined}
+      token={{
+        open: connecting !== null && credentialFor === connecting.name,
+        draft: credentialDraft,
+        onDraft: setCredentialDraft,
+        onSave: () => connecting && void saveCredential(connecting),
+        onCancel: () => setCredentialFor(null),
+      }}
+      env={{
+        open: connecting !== null && envFor === connecting.name,
+        fields: envFields,
+        draft: envDraft,
+        error: envError,
+        onDraft: setEnvDraft,
+        onSave: (keys) => connecting && void saveEnvRotation(connecting, keys),
+        onCancel: () => setEnvFor(null),
+      }}
+      tools={connecting ? (tools[connecting.name] ?? { kind: "idle" }) : { kind: "idle" }}
+      onPrimary={() =>
+        connecting && runPrimary(connecting, primaryFor(connecting, connectingHealth))
+      }
+      onCancelSignIn={() => connecting && cancelSignIn(connecting.name)}
+      onOpenServer={() => {
+        const name = connectFor;
+        closeConnect();
+        if (name) setOpenedName(name);
+      }}
+      onClose={closeConnect}
+    />
+  );
+
+  const jsonDialog = (
+    <Dialog
+      open={tabParam === "json"}
+      onOpenChange={(open) => !open && setTabParam(null)}
+    >
+      <DialogContent className="sm:max-w-3xl" data-testid="mcp-json-dialog">
+        <DialogHeader>
+          <DialogTitle>mcp.json</DialogTitle>
+          <DialogDescription>
+            Every server this company declares, as one document.
+          </DialogDescription>
+        </DialogHeader>
+        <McpJsonEditor
+          client={client}
+          company={company}
+          canManage={canManage}
+          onSaved={() => void refresh()}
+        />
+      </DialogContent>
+    </Dialog>
   );
 
   if (load === "unavailable") {
@@ -846,495 +930,229 @@ export function McpServersSection({
   }
 
   if (openedServer !== null) {
+    const health = tested[openedServer.name] ?? openedServer.health;
+    const primary = primaryFor(openedServer, health);
     return (
       <>
         <McpServerPage
           client={client}
           company={company}
           server={openedServer}
-          health={tested[openedServer.name] ?? openedServer.health}
+          health={health}
           canManage={canManage}
           bridge={bridge}
           approvalsPark={approvalsPark}
           agents={agents}
           reloadKey={probedAt[openedServer.name] ?? 0}
           focusPermissions={openedName === null && permissionsFor !== null}
+          primary={primary}
+          busy={busy}
+          onPrimary={() => runPrimary(openedServer, primary)}
           onDisconnect={
-            mcpRowControls(
-              openedServer,
-              tested[openedServer.name] ?? openedServer.health,
-            ).removal.kind === "none"
+            mcpRowControls(openedServer, health).removal.kind === "none"
               ? null
               : () => setPendingRemoval(openedServer)
           }
           onBack={closeDetail}
         />
         {removalDialog}
+        {connectDialog}
       </>
     );
   }
 
+  const ready = load === "ready";
+  const query = mode === "yours" ? yoursQuery : discoverQuery;
+  const setQuery = mode === "yours" ? setYoursQuery : setDiscoverQuery;
+
   return (
     <section className="space-y-4">
-      {/* `h2` in both chromes, and it lands one level under the page's `h1`
-          either way. `test/unit/page-section-heading-level.test.ts`
-          pins that pairing: heading at `h3` under that `h1` would read to a
-          screen reader as a subsection of a section that does not exist. */}
+      <h2 className="sr-only">
+        {mode === "yours" ? "Your servers" : "Discover servers"}
+      </h2>
       <div className="flex flex-wrap items-center gap-2">
-        {chrome === "inline" && (
-          <Server className="size-4 text-muted-foreground" />
-        )}
-        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          {chrome === "inline" ? "MCP Servers" : "Your servers"}
-        </h2>
-        <span className="flex-1" />
-        {load === "ready" && (
-          <div className="relative min-w-0 flex-1 sm:max-w-xs">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              ref={searchBox}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search your servers and the directory…"
-              aria-label="Search your servers and the directory"
-              data-testid="mcp-search"
-              className="h-8 pl-8"
-            />
-          </div>
-        )}
-        {canManage && load === "ready" && (
+        <McpModeSwitch mode={mode} onChange={setViewParam} />
+        <div className="relative order-last min-w-0 basis-full sm:order-none sm:basis-auto sm:flex-1">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            key={mode}
+            value={query}
+            disabled={mode === "yours" && !ready}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={
+              mode === "yours" ? "Search your servers" : "Search the directory"
+            }
+            aria-label={
+              mode === "yours" ? "Search your servers" : "Search the directory"
+            }
+            data-testid={mode === "yours" ? "mcp-search" : "mcp-discover-search"}
+            className="h-8 pl-8"
+          />
+        </div>
+        <span className="flex-1 sm:hidden" />
+        <McpLayoutSwitch
+          layout={layout}
+          onChange={(next) => chooseLayout(mode, next)}
+        />
+        {canManage && ready && (
           <Button
             size="sm"
-            data-testid="mcp-add-open"
-            onClick={() => setAdding(true)}
+            variant="outline"
+            data-testid="mcp-json-open"
+            title="Edit mcp.json"
+            onClick={() => setTabParam("json")}
           >
+            <FileJson className="size-4" />
+            <span className="hidden sm:inline">mcp.json</span>
+          </Button>
+        )}
+        {canManage && ready && (
+          <Button size="sm" data-testid="mcp-add-open" onClick={() => setAdding(true)}>
             <Plus className="size-4" />
-            Add server
+            Add custom server
           </Button>
         )}
       </div>
 
-      {/* Issue #567: this screen's routes ship in every build, the agent-side
-          bridge does not. Said before the list rather than per row, because it is
-          a fact about the deployment and not about any one server — and said only
-          on an explicit `false`, never on a host that stayed silent. */}
       {bridge === "absent" && (
         <Alert data-testid="mcp-bridge-absent">
           <AlertTriangle className="size-4" />
-          <AlertTitle>
-            No agent can use tool servers in this deployment
-          </AlertTitle>
+          <AlertTitle>No agent can use tool servers in this deployment</AlertTitle>
           <AlertDescription>
             The MCP bridge isn&apos;t compiled into this build, so servers added
             here are stored and can be probed, but no agent ever receives their
-            tools. The configuration survives — rebuild this deployment with the{" "}
-            <code className="font-mono">mcp</code> feature and the servers below
-            start reaching agents on the next turn.
+            tools. Rebuild with the <code className="font-mono">mcp</code>{" "}
+            feature and they start reaching agents on the next turn.
           </AlertDescription>
         </Alert>
       )}
 
       {load === "error" ? (
-        // Not an empty list: an empty list is a company with no tool servers, and
-        // this host did not tell us that.
-        <>
-          <Alert variant="destructive" data-testid="mcp-load-error">
-            <AlertTriangle className="size-4" />
-            <AlertTitle>
-              Couldn&apos;t load this company&apos;s MCP servers
-            </AlertTitle>
-            <AlertDescription>
-              The host didn&apos;t answer with its server list, so what is
-              installed is unknown. Reload to try again.
-            </AlertDescription>
-          </Alert>
-          <p className="text-xs text-muted-foreground">
-            Search and adding are unavailable until the list can be read.
-          </p>
-        </>
+        <Alert variant="destructive" data-testid="mcp-load-error">
+          <AlertTriangle className="size-4" />
+          <AlertTitle>Couldn&apos;t load this company&apos;s MCP servers</AlertTitle>
+          <AlertDescription>
+            The host didn&apos;t answer with its server list, so what is
+            installed is unknown. Reload to try again.
+          </AlertDescription>
+        </Alert>
       ) : load === "loading" ? (
         <Skeleton className="h-24 rounded-xl" />
-      ) : servers.length === 0 && term === "" ? (
+      ) : mode === "discover" ? (
+        <McpDiscover
+          client={client}
+          company={company}
+          query={discoverQuery}
+          layout={layout}
+          servers={servers}
+          installing={installing}
+          canManage={canManage}
+          onInstall={(entry) => void install(entry)}
+        />
+      ) : servers.length === 0 ? (
         <Card>
           <CardContent className="space-y-2">
             <p className="text-sm font-medium">No tool servers yet</p>
             <p className="text-sm text-muted-foreground">
               An MCP server gives your agents tools they do not have natively — a
-              Notion workspace, a Linear board, an internal database. Add one by
-              URL, or install one from the public directory.
+              Notion workspace, a Linear board, an internal database.
             </p>
             {canManage && (
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                <Button size="sm" onClick={() => setAdding(true)}>
-                  <Plus className="size-4" />
-                  Add by URL
-                </Button>
                 <Button
                   size="sm"
-                  variant="outline"
                   data-testid="mcp-browse-directory"
-                  onClick={() => {
-                    searchBox.current?.focus();
-                  }}
+                  onClick={() => setViewParam("discover")}
                 >
                   <Search className="size-4" />
                   Browse the directory
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
+                  <Plus className="size-4" />
+                  Add custom server
                 </Button>
               </div>
             )}
           </CardContent>
         </Card>
+      ) : matches.length === 0 ? (
+        <Card data-testid="mcp-search-nothing">
+          <CardContent className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              None of your servers match{" "}
+              <strong className="font-medium text-foreground">
+                {yoursQuery.trim()}
+              </strong>
+              .
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="mcp-search-directory"
+              onClick={() => {
+                setDiscoverQuery(yoursQuery);
+                setViewParam("discover");
+              }}
+            >
+              <Search className="size-4" />
+              Search the directory for it
+            </Button>
+          </CardContent>
+        </Card>
       ) : (
         <>
-          <McpServerTable>
-            {term !== "" && (
-              <McpGroupRow
-                label="In this company"
-                count={
-                  matches.length === 1 ? "1 match" : `${matches.length} matches`
-                }
-              />
-            )}
-            {matches.map((server) => {
-              const health = tested[server.name] ?? server.health;
-              const credential = credentialAffordance(health?.authHint, {
-                source: server.source,
-                status: health?.status,
-              });
-              const dial = mcpRowControls(server, health).lifecycle;
-              // At most ONE labelled action per row: the one this server's state
-              // actually calls for.
-              const primary: PrimaryAction =
-                credential === "sign_in"
-                  ? { kind: "sign_in" }
-                  : credential === "add_token"
-                    ? credentialFor === server.name
-                      ? null
-                      : { kind: "add_token" }
-                    : credential === "rotate_env"
-                      ? envFor === server.name
-                        ? null
-                        : { kind: "rotate_env" }
-                      : dial === "connect"
-                        ? { kind: "connect" }
-                        : null;
-              return (
-                <McpServerRow
-                  key={server.name}
-                  server={server}
-                  health={health}
-                  bridge={bridge}
-                  canManage={canManage}
-                  busy={busy}
-                  primary={primary}
-                  signingIn={signIns[server.name] !== undefined}
-                  toolsOpen={tools[server.name]?.kind === "ready"}
-                  actions={actions}
-                />
-              );
-            })}
-            {term !== "" &&
-              directory.kind === "ready" &&
-              directory.entries.length > 0 && (
-                <>
-                  <McpGroupRow
-                    label="Not installed — from the public directory"
-                    count={
-                      directory.totalPages > 1
-                        ? `first ${directory.entries.length} — page 1 of ${directory.totalPages}`
-                        : `${directory.entries.length} matches`
-                    }
+          {layout === "cards" ? (
+            <McpServerGrid>
+              {matches.map((server) => {
+                const health = tested[server.name] ?? server.health;
+                return (
+                  <McpServerCard
+                    key={server.name}
+                    server={server}
+                    health={health}
+                    bridge={bridge}
+                    canManage={canManage}
+                    busy={busy}
+                    primary={primaryFor(server, health)}
+                    signingIn={signIns[server.name] !== undefined}
+                    actions={actions}
                   />
-                  {directory.entries.map((entry) => (
-                    <McpDirectoryRow
-                      key={entry.qualifiedName}
-                      entry={entry}
-                      installedAs={installedAs(servers, entry)}
-                      installing={installing === entry.qualifiedName}
-                      canManage={canManage}
-                      onInstall={(e) => void install(e)}
-                    />
-                  ))}
-                </>
-              )}
-          </McpServerTable>
-
-          {directory.kind === "loading" && (
-            <p className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" /> Searching the public
-              directory…
-            </p>
-          )}
-
-          {/* Half a result beats an empty page: a directory outage degrades the
-              answer instead of taking this company's own servers off screen. */}
-          {directory.kind === "outage" &&
-            (directory.outage.kind === "unwired" ? (
-              <p
-                className="text-xs text-muted-foreground"
-                data-testid="mcp-registry-unwired"
-              >
-                {REGISTRY_UNWIRED_NOTICE}
-              </p>
-            ) : (
-              <p
-                className="text-xs text-status-blocked-text"
-                data-testid="mcp-registry-error"
-              >
-                <strong className="font-medium">
-                  The directory isn&apos;t answering
-                </strong>
-                , so only this company&apos;s own servers were searched.{" "}
-                {directory.outage.message} The directories are federated and
-                either can be down; nothing about your servers changes.
-              </p>
-            ))}
-
-          {term !== "" &&
-            matches.length === 0 &&
-            directory.kind === "ready" &&
-            directory.entries.length === 0 && (
-              <Card data-testid="mcp-search-nothing">
-                <CardContent className="space-y-2">
-                  <p className="text-sm text-muted-foreground">
-                    Nothing in this company matches{" "}
-                    <strong className="font-medium text-foreground">
-                      {query.trim()}
-                    </strong>
-                    , and the directory has no listing for it.
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    A server that is not published in any directory — something
-                    running inside your own network — is connected by pasting its
-                    endpoint.
-                  </p>
-                  {canManage && (
-                    <Button size="sm" onClick={() => setAdding(true)}>
-                      <Plus className="size-4" />
-                      Add by URL
-                    </Button>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-
-          {term === "" && servers.length > 0 && (
-            <p className="text-xs text-muted-foreground" data-testid="mcp-tally">
-              {servers.length} server{servers.length === 1 ? "" : "s"} ·{" "}
-              {servers.filter((s) => s.enabled).length} on ·{" "}
-              {servers.filter((s) => !s.enabled).length} off.{" "}
-              {bridge === "absent"
-                ? "None of them reaches an agent in this build."
-                : "Agents pick up a change on their next turn."}
-            </p>
-          )}
-
-          {/* The rows that need something said about them, said once below the
-              table rather than as a second line inside a cell. */}
-          {matches.map((server) => {
-            const health = tested[server.name] ?? server.health;
-            const flight = signIns[server.name];
-            const toolState = tools[server.name] ?? { kind: "idle" };
-            const credentialOpen = credentialFor === server.name && canManage;
-            const envOpen = envFor === server.name && canManage;
-            // The host's own sentence about why a server is not answering, kept
-            // verbatim.
-            const complaint =
-              health && health.status !== "ok" && health.message.trim()
-                ? health.message
-                : null;
-            if (
-              !flight &&
-              !credentialOpen &&
-              !envOpen &&
-              complaint === null &&
-              toolState.kind === "idle" &&
-              !registryOauthUnsupported(server, health) &&
-              !(bridge !== "absent" && server.enabled && server.reachableBy?.length === 0)
-            ) {
-              return null;
-            }
-            return (
-              <div key={server.name} className="space-y-1.5">
-                <p className="text-xs font-medium">{server.name}</p>
-                {bridge !== "absent" &&
-                  server.enabled &&
-                  server.reachableBy?.length === 0 && (
-                    <p
-                      data-testid="mcp-reachability-none"
-                      className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs font-medium text-destructive"
-                    >
-                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                      <span>
-                        No agent can reach this server — no tool grant covers{" "}
-                        <code className="font-mono">mcp:{server.name}</code>.
-                        Widen a company or per-agent tool grant, or this server
-                        is unused.
-                      </span>
-                    </p>
-                  )}
-                {complaint && (
-                  <p className="text-xs text-muted-foreground">{complaint}</p>
-                )}
-                {registryOauthUnsupported(server, health) && (
-                  <p
-                    className="text-xs text-muted-foreground"
-                    data-testid="mcp-no-credential-control"
-                  >
-                    {REGISTRY_OAUTH_UNSUPPORTED_NOTICE}
-                  </p>
-                )}
-                {flight && (
-                  <SignInFlightPanel
-                    name={server.name}
-                    flight={flight}
-                    onCancel={() => cancelSignIn(server.name)}
+                );
+              })}
+            </McpServerGrid>
+          ) : (
+            <McpServerTable>
+              {matches.map((server) => {
+                const health = tested[server.name] ?? server.health;
+                return (
+                  <McpServerRow
+                    key={server.name}
+                    server={server}
+                    health={health}
+                    bridge={bridge}
+                    canManage={canManage}
+                    busy={busy}
+                    primary={primaryFor(server, health)}
+                    signingIn={signIns[server.name] !== undefined}
+                    actions={actions}
                   />
-                )}
-                {credentialOpen && (
-                  <div
-                    className="flex items-end gap-2"
-                    data-testid="mcp-token-inline"
-                  >
-                    <div className="flex-1 space-y-1">
-                      <Label
-                        htmlFor={`mcp-token-${server.name}`}
-                        className="text-xs"
-                      >
-                        API token for {server.name}
-                        {/* The value is write-only and unrecoverable, so say
-                            when saving it overwrites an existing one. */}
-                        {server.authConfigured
-                          ? " — replaces the stored credential"
-                          : ""}
-                      </Label>
-                      <Input
-                        id={`mcp-token-${server.name}`}
-                        type="password"
-                        autoComplete="new-password"
-                        placeholder="write-only"
-                        value={credentialDraft}
-                        onChange={(e) => setCredentialDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void saveCredential(server);
-                          if (e.key === "Escape") setCredentialFor(null);
-                        }}
-                      />
-                    </div>
-                    <Button
-                      size="sm"
-                      data-testid="mcp-token-save"
-                      disabled={busy !== null || !credentialDraft.trim()}
-                      onClick={() => void saveCredential(server)}
-                    >
-                      {busy === server.name ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        "Save"
-                      )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy !== null}
-                      onClick={() => setCredentialFor(null)}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                )}
-                {envOpen && (
-                  <div
-                    className="space-y-2 rounded-md bg-muted/40 p-2"
-                    data-testid="mcp-env-inline"
-                  >
-                    <p className="text-xs text-muted-foreground">
-                      Saving merges these values with the stored credentials and
-                      reconnects this server.
-                    </p>
-                    {envFields.kind === "loading" ? (
-                      <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                        <Loader2 className="size-3 animate-spin" /> Reading this
-                        server&apos;s credential fields…
-                      </p>
-                    ) : envFields.kind === "failed" ? (
-                      <p
-                        className="text-xs text-destructive"
-                        data-testid="mcp-env-unavailable"
-                      >
-                        {envFields.message}
-                      </p>
-                    ) : envFields.keys.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        This server asks for no credentials.
-                      </p>
-                    ) : (
-                      envFields.keys.map((key) => (
-                        <div key={key} className="space-y-1">
-                          <Label
-                            htmlFor={`mcp-env-${server.name}-${key}`}
-                            className="font-mono text-xs"
-                          >
-                            {key}
-                          </Label>
-                          <Input
-                            id={`mcp-env-${server.name}-${key}`}
-                            type="password"
-                            autoComplete="new-password"
-                            placeholder="write-only"
-                            value={envDraft[key] ?? ""}
-                            onChange={(e) =>
-                              setEnvDraft({
-                                ...envDraft,
-                                [key]: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                      ))
-                    )}
-                    {envError && (
-                      <p className="text-xs text-destructive">{envError}</p>
-                    )}
-                    <div className="flex items-center gap-2">
-                      {envFields.kind === "ready" &&
-                        envFields.keys.length > 0 && (
-                          <Button
-                            size="sm"
-                            data-testid="mcp-env-save"
-                            disabled={busy !== null}
-                            onClick={() =>
-                              void saveEnvRotation(server, envFields.keys)
-                            }
-                          >
-                            {busy === server.name ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              "Save"
-                            )}
-                          </Button>
-                        )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy !== null}
-                        onClick={() => setEnvFor(null)}
-                      >
-                        {envFields.kind === "ready" && envFields.keys.length > 0
-                          ? "Cancel"
-                          : "Close"}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                <McpToolsList state={toolState} />
-              </div>
-            );
-          })}
+                );
+              })}
+            </McpServerTable>
+          )}
+          <p className="text-xs text-muted-foreground" data-testid="mcp-tally">
+            {servers.length} server{servers.length === 1 ? "" : "s"} ·{" "}
+            {servers.filter((s) => s.enabled).length} on.{" "}
+            {bridge === "absent"
+              ? "None of them reaches an agent in this build."
+              : "Agents pick up a change on their next turn."}
+          </p>
         </>
       )}
 
       {removalDialog}
+      {connectDialog}
+      {jsonDialog}
 
       <McpAddServerDialog
         client={client}
@@ -1343,139 +1161,12 @@ export function McpServersSection({
         bridge={bridge}
         onOpenChange={setAdding}
         onAdded={() => void refresh()}
+        onConnect={(name, health) => {
+          if (health) setTested((t) => ({ ...t, [name]: health }));
+          setConnectFor(name);
+        }}
         onOpenServer={(name) => setOpenedName(name)}
       />
-
     </section>
-  );
-}
-
-/** The name this company already holds a directory entry under, if it does. */
-function installedAs(
-  servers: McpServer[],
-  entry: McpCatalogueEntry,
-): string | null {
-  const byQualified = servers.find(
-    (s) => s.qualifiedName === entry.qualifiedName,
-  );
-  if (byQualified) return byQualified.name;
-  const slug = entry.displayName.trim().toLowerCase();
-  const byName = servers.find((s) => s.name.trim().toLowerCase() === slug);
-  return byName?.name ?? null;
-}
-
-/**
- * A sign-in the operator is still finishing somewhere else.
- */
-function SignInFlightPanel({
-  name,
-  flight,
-  onCancel,
-}: {
-  name: string;
-  flight: SignInFlight;
-  onCancel: () => void;
-}) {
-  const ago = Math.max(0, Math.round((Date.now() - flight.checkedAtMillis) / 1000));
-  return (
-    <div
-      className="space-y-2 rounded-md border border-border bg-muted/30 p-2"
-      data-testid="mcp-signin-flight"
-    >
-      {flight.timedOut ? (
-        <p className="text-xs text-status-blocked-text">
-          Sign-in for {name} timed out. Nothing was stored — start it again when
-          you are ready.
-        </p>
-      ) : flight.blocked ? (
-        <p className="text-xs text-status-blocked-text" data-testid="mcp-signin-blocked">
-          <strong className="font-medium">
-            The sign-in tab could not be opened.
-          </strong>{" "}
-          A blocked popup, or a desktop webview that cannot create one. Open this
-          address by hand to finish:
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          <strong className="font-medium text-foreground">
-            Finish in the {name} tab that just opened.
-          </strong>{" "}
-          This page is watching and will update itself — you do not need to come
-          back and press anything.
-        </p>
-      )}
-      <code className="block truncate rounded-md border border-border bg-background px-2 py-1 font-mono text-xs">
-        {flight.authorizeUrl}
-      </code>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          data-testid="mcp-signin-reopen"
-          onClick={() => {
-            if (!openOutward(flight.authorizeUrl)) {
-              window.open(flight.authorizeUrl, "_blank", "noopener,noreferrer");
-            }
-          }}
-        >
-          Reopen the {name} tab
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          data-testid="mcp-signin-cancel"
-          onClick={onCancel}
-        >
-          {flight.timedOut ? "Dismiss" : "Cancel"}
-        </Button>
-        {!flight.timedOut && (
-          <span className="text-3xs text-muted-foreground">
-            checked {ago}s ago
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** Renders the live-discovered tool list for one server. */
-function McpToolsList({ state }: { state: ToolsState }) {
-  if (state.kind === "idle") return null;
-  if (state.kind === "loading") {
-    return (
-      <p className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Loader2 className="size-3 animate-spin" /> Discovering tools…
-      </p>
-    );
-  }
-  if (state.kind === "unwired") {
-    return (
-      <p className="text-xs text-muted-foreground">
-        Live tool discovery isn&apos;t enabled in this build (the agent harness
-        is off).
-      </p>
-    );
-  }
-  if (state.kind === "error") {
-    return <p className="text-xs text-destructive">{state.message}</p>;
-  }
-  if (state.tools.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">
-        This server exposed no tools.
-      </p>
-    );
-  }
-  return (
-    <ul className="space-y-1 rounded-md bg-muted/40 p-2">
-      {state.tools.map((tool) => (
-        <li key={tool.name} className="text-xs">
-          <span className="font-mono font-medium">{tool.name}</span>
-          {tool.description ? (
-            <span className="text-muted-foreground"> — {tool.description}</span>
-          ) : null}
-        </li>
-      ))}
-    </ul>
   );
 }

@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react";
-import { FileJson, Info, Server } from "lucide-react";
+import { Info } from "lucide-react";
 
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import type { RosterAgent } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
-import { useHashTab } from "@/hooks/use-hash-tab";
 import { McpServersSection } from "@/views/connections/McpServersSection";
-import { McpJsonEditor } from "@/views/mcp/McpJsonEditor";
 
 interface Props {
   client: OpenCompanyClient;
@@ -17,41 +14,9 @@ interface Props {
 }
 
 /**
- * Connections, MCP Servers: the company's tool servers, said two ways.
- *
- * **Connections** is the list — a row per server with its status and its
- * controls as icons. **mcp.json** is the same configuration as one document, in
- * the shape an operator already has in a desktop config: paste a block of
- * servers, or read the whole set at once instead of expanding six rows.
- *
- * The two are tabs and not two pages because they are not two things. Both go
- * through the same host routes into the same store — `…/mcp/servers` per row,
- * `…/mcp/config` for the file — so an edit made in one is visible in the other
- * on its next read, and neither is an import format that can drift from "what is
- * actually configured". A second, parallel MCP surface written against an API
- * the host did not serve is what issue #414 was; the rule that came out of it is
- * one source of truth per question, and a tab does not break it.
- *
- * The rows live in [`McpServersSection`](./connections/McpServersSection.tsx),
- * rendered `standalone` because this page is the whole of it. Apps does **not**
- * render it: `ConnectionsSection` sends the bare `#/connections` to `OAuthView`
- * and `#/connections/mcp` here, and `OAuthView` renders no MCP section at all.
- * That is still one surface rather than two — this page is its only caller
- * (issue #414).
+ * Connections, MCP Servers: the company's tool servers and the directory they
+ * come from. `#/connections/mcp?tab=json` opens the mcp.json editor.
  */
-/**
- * The two notations this page reads its configuration in. `id` is what `?tab=`
- * carries, so `#/connections/mcp?tab=json` opens the file directly.
- */
-const MCP_TABS = [
-  // The id stays `connections`: every link already written against this page
-  // carries it.
-  { id: "connections", label: "Your servers", icon: Server },
-  { id: "json", label: "mcp.json", icon: FileJson },
-] as const satisfies readonly PageTab<string>[];
-
-type McpTab = (typeof MCP_TABS)[number]["id"];
-
 export function McpServersView({ client, company }: Props) {
   // Adding or removing a server changes what tools the company's agents can
   // call, so it is an admin's (issue #403). Courtesy only: the host answers 403
@@ -60,15 +25,6 @@ export function McpServersView({ client, company }: Props) {
   // The roster, for the per-teammate lens on a server's tool permissions. A host
   // with no team plane 404s, and the lens then does not render at all.
   const [agents, setAgents] = useState<RosterAgent[]>([]);
-  // Bumped when the document is saved. The rows are keyed on it, so a save that
-  // adds or removes servers re-reads the list instead of leaving the other tab
-  // describing the configuration as it was before the file was written.
-  const [written, setWritten] = useState(0);
-  // In the address, so a link can open the file and Back returns to the rows.
-  const [tab, setTab] = useHashTab<McpTab>(
-    MCP_TABS.map((t) => t.id),
-    "connections",
-  );
 
   useEffect(() => {
     let live = true;
@@ -117,15 +73,6 @@ export function McpServersView({ client, company }: Props) {
             ones you add here.
           </>
         }
-        tabs={
-          <PageTabs
-            tabs={MCP_TABS}
-            value={tab}
-            onChange={setTab}
-            idBase="mcp"
-            aria-label="MCP views"
-          />
-        }
       />
       <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {!canManage && (
@@ -139,24 +86,13 @@ export function McpServersView({ client, company }: Props) {
           </Alert>
         )}
 
-        <PageTabPanel idBase="mcp" id="connections" value={tab}>
-          <McpServersSection
-            key={written}
-            client={client}
-            company={company}
-            canManage={canManage}
-            chrome="standalone"
-            agents={agents}
-          />
-        </PageTabPanel>
-        <PageTabPanel idBase="mcp" id="json" value={tab}>
-          <McpJsonEditor
-            client={client}
-            company={company}
-            canManage={canManage}
-            onSaved={() => setWritten((n) => n + 1)}
-          />
-        </PageTabPanel>
+        <McpServersSection
+          client={client}
+          company={company}
+          canManage={canManage}
+          chrome="standalone"
+          agents={agents}
+        />
       </div>
     </div>
   );

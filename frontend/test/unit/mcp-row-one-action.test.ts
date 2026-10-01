@@ -56,7 +56,14 @@ vi.mock("sonner", () => ({
   }),
 }));
 vi.mock("@/views/connections/McpRegistryBrowser", () => ({
-  useMcpDirectorySearch: () => ({ kind: "idle" }),
+  McpDiscover: () => null,
+}));
+vi.mock("@/views/mcp/McpToolPermissions", () => ({
+  McpToolPermissions: () => null,
+}));
+vi.mock("@/views/connections/connection-usage", () => ({
+  UsageSection: () => null,
+  useConnectionUsage: () => ({ load: "unavailable", calls: null, key: null }),
 }));
 
 const { McpServersSection } = await import(
@@ -119,6 +126,7 @@ async function click(node: Element | null | undefined) {
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
+  window.location.hash = "";
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -185,17 +193,23 @@ describe("the name, and the way into the server", () => {
     ).toHaveLength(0);
   });
 
-  it("opens its detail only from the arrow, never from a hover", async () => {
+  it("opens the server's page from anywhere on the row, with no expander", async () => {
     await mount([{ ...row({ source: "runtime" }), health: OK }]);
 
-    expect(all('[data-testid="mcp-row-detail"]')).toHaveLength(0);
-    const caret = document.body.querySelector('[data-testid="mcp-row-expander"]');
-    expect(caret?.getAttribute("aria-expanded")).toBe("false");
-    await click(caret);
-    expect(all('[data-testid="mcp-row-detail"]')).toHaveLength(1);
-    expect(
-      document.body.querySelector('[data-testid="mcp-row-detail"]')?.textContent,
-    ).toContain("https://mcp.notion.com/mcp");
+    expect(all('[data-testid="mcp-row-expander"]')).toHaveLength(0);
+    await click(document.body.querySelector('[data-testid="mcp-source-badge"]'));
+    expect(all('[data-testid="mcp-server-page"]')).toHaveLength(1);
+    expect(window.location.hash).toContain("server=notion");
+  });
+
+  it("does not open the page from the row's own controls", async () => {
+    await mount([{ ...row({ source: "runtime" }), health: OK }]);
+
+    await click(document.body.querySelector('[data-testid="mcp-row-overflow"]'));
+    expect(all('[data-testid="mcp-server-page"]')).toHaveLength(0);
+    await click(document.body.querySelector('[data-testid="mcp-permissions"]'));
+    expect(window.location.hash).toContain("permissions=notion");
+    expect(window.location.hash).not.toContain("server=");
   });
 });
 
@@ -232,21 +246,26 @@ describe("removing a server", () => {
   });
 });
 
-describe("Browse the directory, from the empty state", () => {
-  it("shows a working search field and focuses it, instead of changing nothing", async () => {
+describe("a company with no servers", () => {
+  const pressed = (id: string) =>
+    document.body.querySelector(`[data-testid="${id}"]`)?.getAttribute("aria-pressed");
+
+  it("opens on Discover", async () => {
     await mount([]);
 
-    const button = document.body.querySelector('[data-testid="mcp-browse-directory"]');
-    expect(button).not.toBeNull();
+    expect(pressed("mcp-mode-discover")).toBe("true");
+    expect(document.body.querySelector('[data-testid="mcp-discover-search"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-testid="mcp-search"]')).toBeNull();
+  });
 
-    await click(button);
+  it("has Browse the directory open Discover, not focus a field", async () => {
+    await mount([]);
+    await click(document.body.querySelector('[data-testid="mcp-mode-yours"]'));
+    expect(pressed("mcp-mode-yours")).toBe("true");
 
-    const input = document.body.querySelector<HTMLInputElement>(
-      '[data-testid="mcp-search"]',
-    );
-    expect(input).not.toBeNull();
-    // Not a stray whitespace query left over from nudging the field open.
-    expect(input?.value).toBe("");
-    expect(document.activeElement).toBe(input);
+    await click(document.body.querySelector('[data-testid="mcp-browse-directory"]'));
+
+    expect(pressed("mcp-mode-discover")).toBe("true");
+    expect(window.location.hash).toContain("view=discover");
   });
 });

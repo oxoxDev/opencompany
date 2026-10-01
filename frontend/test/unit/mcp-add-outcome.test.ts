@@ -10,15 +10,10 @@ import { ApiError, type McpHealth, type McpServer, type McpSource } from "@/api/
 /**
  * What the add dialog says happened.
  *
- * The add path has two outcomes: the host refusing the write, and the host
- * accepting it and then failing to reach the endpoint. Only the first is a
- * failure. The second leaves a server saved, enabled and attached to every
- * agent that reaches it — so titling it "Couldn't add the server" tells the
- * operator the opposite of what happened and invites a second add of a server
- * that is already there.
- *
- * The outcome lands in the dialog, on the server it is about, and offers the
- * next move. The third thing pinned here is the description field.
+ * Three outcomes: the host refusing the write (the only failure), the server
+ * answering (confirmed here as added and connected), and the server saved but
+ * not answering — which is handed to the connect step rather than reported as
+ * a failure to add, so nobody adds it twice.
  */
 
 const api = vi.hoisted(() => ({
@@ -58,6 +53,8 @@ const UNREACHABLE: McpHealth = {
 let container: HTMLDivElement;
 let root: Root;
 const opened: string[] = [];
+const connects: [string, McpHealth | undefined][] = [];
+const closes: boolean[] = [];
 
 /** The dialog renders into a portal, so its DOM is the document's, not ours. */
 function el(testId: string): HTMLElement | null {
@@ -76,8 +73,10 @@ async function mount() {
         company: "acme",
         open: true,
         bridge: "present" as const,
-        onOpenChange: () => {},
+        onOpenChange: (open: boolean) => closes.push(open),
         onAdded: () => {},
+        onConnect: (name: string, health: McpHealth | undefined) =>
+          connects.push([name, health]),
         onOpenServer: (name: string) => opened.push(name),
       }),
     );
@@ -118,6 +117,8 @@ beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
   opened.length = 0;
+  connects.length = 0;
+  closes.length = 0;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -142,35 +143,58 @@ describe("an add the host accepted but could not reach", () => {
     await add();
 
     expect(text()).not.toContain("Couldn't add the server");
-    expect(text()).toContain("Added, but not answering");
+    expect(el("mcp-add-error")).toBeNull();
   });
 
-  it("says where it went, so nobody adds it twice", async () => {
+  it("hands the saved server to the connect step with the probe's own result", async () => {
     await mount();
     await add();
 
-    expect(el("mcp-add-outcome")?.textContent).toContain(
-      "saved and listed with your servers",
-    );
+    expect(connects).toEqual([["deadsrv", UNREACHABLE]]);
+    expect(closes).toEqual([false]);
   });
+});
 
-  it("still surfaces the probe's own words", async () => {
+describe("an add the server answered", () => {
+  it("confirms it was added and connected, and offers the server", async () => {
+    api.addMcpServer.mockResolvedValue({
+      server: server({ source: "runtime" }),
+      note: "Agents pick it up on their next turn.",
+      test: { status: "ok", message: "", toolCount: 16, checkedAtMillis: 2 },
+    });
+
     await mount();
     await add();
 
-    expect(text()).toContain("mcp transport failure");
-  });
-
-  it("offers the next move instead of naming a row to go and find", async () => {
-    await mount();
-    await add();
-
-    const open = el("mcp-add-open-server");
-    expect(open).not.toBeNull();
+    expect(el("mcp-add-outcome")?.textContent).toContain("Added and connected · 16 tools");
+    expect(connects).toEqual([]);
     await act(async () => {
-      open?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      el("mcp-add-open-server")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(opened).toEqual(["deadsrv"]);
+  });
+});
+
+describe("the form", () => {
+  it("asks for a name and a URL, and nothing about auth", async () => {
+    api.addMcpServer.mockResolvedValue({
+      server: server({ source: "runtime" }),
+      note: "",
+      test: UNREACHABLE,
+    });
+
+    await mount();
+
+    expect(el("mcp-add-description")).toBeNull();
+    expect(document.body.querySelector("#mcp-auth-kind")).toBeNull();
+    expect(document.body.querySelector('input[type="password"]')).toBeNull();
+    expect(text()).toContain("Add custom server");
+
+    await add();
+    expect(api.addMcpServer).toHaveBeenCalledWith(client, "acme", {
+      name: "deadsrv",
+      endpoint: "https://mcp.example.com/mcp",
+    });
   });
 });
 
@@ -238,7 +262,7 @@ describe("what a server calls itself", () => {
     });
   });
 
-  it("is not offered over a description the operator wrote", async () => {
+  it("is not offered over a description the server already carries", async () => {
     api.addMcpServer.mockResolvedValue({
       server: server({
         source: "runtime",
@@ -250,15 +274,10 @@ describe("what a server calls itself", () => {
     });
 
     await mount();
-    await type('[data-testid="mcp-add-description"]', "Our own reporting replica.");
     await add();
 
+    expect(el("mcp-add-outcome")).not.toBeNull();
     expect(el("mcp-add-probed-description")).toBeNull();
-    expect(api.addMcpServer).toHaveBeenCalledWith(
-      client,
-      "acme",
-      expect.objectContaining({ description: "Our own reporting replica." }),
-    );
   });
 });
 
@@ -276,7 +295,7 @@ describe("closing the dialog while the add request is in flight", () => {
     const inFlight = deferred<{
       server: ReturnType<typeof server>;
       note: string;
-      test: typeof UNREACHABLE;
+      test: McpHealth;
     }>();
     api.addMcpServer.mockReturnValue(inFlight.promise);
     const onOpenChange = vi.fn();
@@ -290,6 +309,7 @@ describe("closing the dialog while the add request is in flight", () => {
           bridge: "present" as const,
           onOpenChange,
           onAdded: () => {},
+          onConnect: () => {},
           onOpenServer: () => {},
         }),
       );
@@ -320,7 +340,7 @@ describe("closing the dialog while the add request is in flight", () => {
       inFlight.resolve({
         server: server({ source: "runtime" }),
         note: "Agents pick it up on their next turn.",
-        test: UNREACHABLE,
+        test: { status: "ok", message: "", toolCount: 3, checkedAtMillis: 2 },
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -370,6 +390,7 @@ describe("a build with no MCP bridge", () => {
           bridge: "absent" as const,
           onOpenChange: () => {},
           onAdded: () => {},
+          onConnect: () => {},
           onOpenServer: () => {},
         }),
       );

@@ -61,7 +61,14 @@ vi.mock("sonner", () => ({
 // The directory browser runs its own search on mount and owns none of the
 // behaviour under test here.
 vi.mock("@/views/connections/McpRegistryBrowser", () => ({
-  useMcpDirectorySearch: () => ({ kind: "idle" }),
+  McpDiscover: () => null,
+}));
+vi.mock("@/views/mcp/McpToolPermissions", () => ({
+  McpToolPermissions: () => null,
+}));
+vi.mock("@/views/connections/connection-usage", () => ({
+  UsageSection: () => null,
+  useConnectionUsage: () => ({ load: "unavailable", calls: null, key: null }),
 }));
 vi.mock("@/views/connections/ProviderDetail", () => ({
   ProviderDetail: () => null,
@@ -98,8 +105,9 @@ const client = {
 let container: HTMLDivElement;
 let root: Root;
 
+/** Dialogs portal to the body, so controls are looked up page-wide. */
 function control(testId: string): HTMLElement | null {
-  return container.querySelector(`[data-testid="${testId}"]`);
+  return document.body.querySelector(`[data-testid="${testId}"]`);
 }
 
 /** Mount the section over `servers` and let its two mount reads settle. */
@@ -120,6 +128,7 @@ async function mount(servers: McpServer[]) {
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
+  window.location.hash = "";
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -138,7 +147,7 @@ describe("a directory install that wants a browser sign-in", () => {
     "This server needs a browser sign-in — a pasted token will not work.",
   );
 
-  it("renders no credential control, and says why rather than nothing", async () => {
+  it("renders no credential control, and says why on the server's page", async () => {
     await mount([{ ...server, health: refused }]);
 
     // The bug: the row's own message said a token would not work, and the row
@@ -148,11 +157,15 @@ describe("a directory install that wants a browser sign-in", () => {
     expect(control("mcp-sign-in")).toBeNull();
     expect(control("mcp-env-inline")).toBeNull();
 
+    await act(async () => (control("mcp-server-open") as HTMLButtonElement).click());
+
+    expect(control("mcp-server-page")).not.toBeNull();
+    expect(control("mcp-page-primary")).toBeNull();
     const notice = control("mcp-no-credential-control");
     expect(notice).not.toBeNull();
     expect(notice?.textContent).toContain("can't be authorised here");
     // The host's own sentence is kept, not replaced.
-    expect(container.textContent).toContain("a pasted token will not work");
+    expect(document.body.textContent).toContain("a pasted token will not work");
   });
 
   it("withholds Connect, which the host can only refuse again", async () => {
@@ -189,7 +202,9 @@ describe("a List A row whose stored credential was refused", () => {
     expect(button?.getAttribute("aria-label")).toContain("Replace notion's API token");
 
     act(() => (button as HTMLButtonElement).click());
-    expect(control("mcp-token-inline")).not.toBeNull();
+    const dialog = control("mcp-connect-dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.querySelector('[data-testid="mcp-token-inline"]')).not.toBeNull();
   });
 });
 
@@ -213,7 +228,7 @@ describe("saving a directory install's credentials", () => {
 
     await act(async () => (control("mcp-rotate-env") as HTMLButtonElement).click());
 
-    const field = container.querySelector<HTMLInputElement>("#mcp-env-org-git-GIT_TOKEN");
+    const field = document.body.querySelector<HTMLInputElement>("#mcp-env-org-git-GIT_TOKEN");
     expect(field).not.toBeNull();
     const setter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype,
@@ -237,7 +252,7 @@ describe("saving a directory install's credentials", () => {
     // Before this, `res.test` was stored and the form closed regardless — a
     // Save that looked identical whether the credential worked or not.
     expect(control("mcp-env-inline")).not.toBeNull();
-    expect(container.textContent).toContain("That credential was rejected.");
+    expect(document.body.textContent).toContain("That credential was rejected.");
   });
 
   it("reports a refusal the host sent with no sentence of its own", async () => {
@@ -250,18 +265,19 @@ describe("saving a directory install's credentials", () => {
     await act(async () => (control("mcp-env-save") as HTMLButtonElement).click());
 
     expect(control("mcp-env-inline")).not.toBeNull();
-    expect(container.textContent).toContain("still isn't connected");
+    expect(document.body.textContent).toContain("still isn't connected");
   });
 
-  it("closes the form when the credentials connect", async () => {
+  it("closes the form and confirms the connection when the credentials connect", async () => {
     await openForm();
     registryApi.updateMcpRegistryEnv.mockResolvedValue({
       note: "Saved.",
-      test: health("ok"),
+      test: { ...health("ok"), toolCount: 4 },
     });
 
     await act(async () => (control("mcp-env-save") as HTMLButtonElement).click());
 
     expect(control("mcp-env-inline")).toBeNull();
+    expect(control("mcp-connect-done")?.textContent).toContain("Connected · 4 tools");
   });
 });
