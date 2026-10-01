@@ -123,14 +123,14 @@ async function settle() {
   });
 }
 
-async function mount(servers: McpServer[]) {
+async function mount(servers: McpServer[], canManage = true) {
   api.listMcpServers.mockResolvedValue(servers);
   await act(async () => {
     root.render(
       createElement(McpServersSection, {
         client,
         company: "acme",
-        canManage: true,
+        canManage,
         chrome: "standalone" as const,
       }),
     );
@@ -207,6 +207,15 @@ describe("Yours", () => {
       page: 1,
       pageSize: 20,
     });
+  });
+});
+
+describe("a member", () => {
+  it("can still read mcp.json but is offered no way to add a server", async () => {
+    await mount([{ ...row({ source: "runtime", name: "linear" }), health: OK }], false);
+
+    expect(testId("mcp-json-open")?.getAttribute("title")).toBe("View mcp.json");
+    expect(testId("mcp-add-open")).toBeNull();
   });
 });
 

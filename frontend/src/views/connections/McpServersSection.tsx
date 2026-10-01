@@ -994,12 +994,12 @@ export function McpServersSection({
           layout={layout}
           onChange={(next) => chooseLayout(mode, next)}
         />
-        {canManage && ready && (
+        {ready && (
           <Button
             size="sm"
             variant="outline"
             data-testid="mcp-json-open"
-            title="Edit mcp.json"
+            title={canManage ? "Edit mcp.json" : "View mcp.json"}
             onClick={() => setTabParam("json")}
           >
             <FileJson className="size-4" />
