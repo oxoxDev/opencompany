@@ -18,6 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import {
   catalogPublisher,
   REGISTRY_UNWIRED_NOTICE,
@@ -369,7 +370,7 @@ export function McpDiscover({
   canManage: boolean;
   onInstall: (entry: McpCatalogueEntry) => Promise<boolean> | void;
 }) {
-  const { state, loadMore, retry } = useMcpDirectory(client, company, query);
+  const { state, matches, loadMore, retry } = useMcpDirectory(client, company, query);
   const [previewing, setPreviewing] = useState<McpCatalogueEntry | null>(null);
   const term = query.trim();
   const searching = term !== "";
@@ -399,9 +400,14 @@ export function McpDiscover({
     );
   }
 
+  const instant = state.kind === "loading" && searching && matches.length > 0;
   const shown =
-    state.kind === "ready" ? state.entries : state.previous;
-  const stale = state.kind === "loading" && shown.length > 0;
+    state.kind === "loading"
+      ? instant
+        ? matches
+        : state.previous
+      : state.entries;
+  const stale = state.kind === "loading" && !instant && shown.length > 0;
 
   const itemProps = (entry: McpCatalogueEntry): EntryProps => ({
     entry,
@@ -430,7 +436,23 @@ export function McpDiscover({
         )}
       </div>
 
-      {state.kind === "loading" && !stale ? (
+      {state.kind === "fallback" && (
+        <div className="flex flex-wrap items-center gap-2" data-testid="mcp-discover-fallback">
+          <p className="text-xs text-muted-foreground">
+            Showing popular matches — the MCP directory is slow right now.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            data-testid="mcp-discover-fallback-retry"
+            onClick={retry}
+          >
+            <RotateCw className="size-4" /> Retry
+          </Button>
+        </div>
+      )}
+
+      {state.kind === "loading" && shown.length === 0 ? (
         layout === "cards" ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {Array.from({ length: 4 }, (_, i) => (
@@ -452,7 +474,7 @@ export function McpDiscover({
         </p>
       ) : (
         <div
-          className={stale ? "opacity-60 transition-opacity" : undefined}
+          className={cn("transition-opacity", stale && "opacity-50")}
           aria-busy={stale || undefined}
           data-testid="mcp-discover-results"
         >
