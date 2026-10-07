@@ -228,6 +228,13 @@ and a failed icon address is left alone for 10 minutes.
 
 In the console, a new search term aborts the request it replaces, keeps the
 previous rows on screen (dimmed) under "Searching for …", and a failed search or
-a failed **Show more** says so in place with a **Retry**. The entry pop-up will
+a failed **Show more** says so in place with a **Retry**. A search first answers
+from the featured rows already loaded: every word of the query is matched,
+case-insensitively, against the display name, qualified name and description,
+and name matches come first. Those rows show at once while the live search runs,
+lead the merged list when it lands (deduped by qualified name), and stay on
+screen with "Showing popular matches — the MCP directory is slow right now." and
+a **Retry** when the search answers `registry_timeout` or `registry_unavailable`.
+Only a search with no featured match shows the error state. The entry pop-up will
 not install while its directory lookup has failed, and closes once an install
 succeeds.
