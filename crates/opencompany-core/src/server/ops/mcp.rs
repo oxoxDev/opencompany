@@ -30,7 +30,6 @@ use crate::company::mcp::{
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::mcp::decl::server_info::{self as mcp_server_info, McpServerInfo};
-use crate::ports::types::CompanyRecord;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, mcp_registry, scoped};
 
@@ -367,29 +366,12 @@ fn dto_from_decl(
     }
 }
 
-/// Every roster agent's *effective* tool grants (issue #568), as
-/// `(agent, grants)`.
-///
-/// `pub(super)` since issue #245: the repositories surface answers the same
-/// question about a different namespace ("who can read this?"), and a second
-/// roster walk beside this one is exactly how the two consoles would come to
-/// disagree with each other and with the harness. The roster is exactly what the harness builds in
-/// `build_roster` — the **effective** roster, not the blueprint's: the manifest
-/// agents with every operator edit applied (each with its own `tools` narrowed
-/// by the company `allow` **and** by the desks it sits on — issue #1674), plus
-/// the promoted overlay teammates — each narrowed by
-/// **its own** `tools` line the same way (issue #661), which for the common
-/// empty line is still the full company `allow`, the standard grant
-/// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
-/// manifest agent is skipped, both mirroring the harness so console
-/// reachability equals what an agent is actually granted.
-///
-/// Each agent carries its display label alongside its id (issue #931), resolved
-/// through [`roster_display_names`] — the same map the Team page and the usage
-/// buckets read, so one teammate is named identically everywhere in the console.
-/// An id absent from that map (it cannot be, over this roster) falls back to the
-/// id, matching `bucket_usage`.
-pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
+/// Every roster agent's effective tool grants, as `(agent, grants)` — the
+/// projection the reach tests assert against.
+#[cfg(test)]
+pub(super) fn roster_grants(
+    record: &crate::ports::types::CompanyRecord,
+) -> Vec<(RosterAgentDto, Vec<String>)> {
     access::roster_access(record)
         .into_iter()
         .map(|entry| (entry.agent, entry.effective))

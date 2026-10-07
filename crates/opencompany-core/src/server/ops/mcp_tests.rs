@@ -1,6 +1,6 @@
 use super::*;
 use crate::company::CompanyManifest;
-use crate::ports::types::{CompanyId, OverlayAgent, OverlayDesk};
+use crate::ports::types::{CompanyId, CompanyRecord, OverlayAgent, OverlayDesk};
 
 /// A company allowing two MCP families, with one manifest agent that lists
 /// none (so it inherits both).
