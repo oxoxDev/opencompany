@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { searchMcpRegistry, type McpCatalogueEntry } from "@/api/mcp-registry";
+import { ApiError } from "@/api/types";
 import { registryOutage, type McpRegistryOutage } from "@/lib/mcp-registry";
 
 /** How many directory rows one page asks for. */
@@ -18,6 +19,11 @@ export type DirectoryState =
     }
   | { kind: "outage"; outage: McpRegistryOutage }
   | {
+      kind: "fallback";
+      /** Popular rows matching the query, shown because the live search failed. */
+      entries: McpCatalogueEntry[];
+    }
+  | {
       kind: "ready";
       entries: McpCatalogueEntry[];
       page: number;
@@ -29,6 +35,8 @@ export type DirectoryState =
 
 export interface McpDirectory {
   state: DirectoryState;
+  /** Popular rows already loaded that match the query, ranked name matches first. */
+  matches: McpCatalogueEntry[];
   loadMore: () => void;
   retry: () => void;
 }
@@ -55,12 +63,50 @@ export function appendPage(
 }
 
 /**
+ * Popular rows matching every word of `query`, case-insensitively, against the
+ * display name, qualified name and description. Rows matching on name alone
+ * come first; the browse order holds within each group.
+ */
+export function matchFeatured(
+  featured: McpCatalogueEntry[],
+  query: string,
+): McpCatalogueEntry[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const byName: McpCatalogueEntry[] = [];
+  const byText: McpCatalogueEntry[] = [];
+  for (const entry of featured) {
+    const name = `${entry.displayName} ${entry.qualifiedName}`.toLowerCase();
+    const text = `${name} ${entry.description ?? ""}`.toLowerCase();
+    if (!words.every((w) => text.includes(w))) continue;
+    (words.every((w) => name.includes(w)) ? byName : byText).push(entry);
+  }
+  return [...byName, ...byText];
+}
+
+/** The popular matches first, then the live rows, without duplicates. */
+export function mergeFeatured(
+  matches: McpCatalogueEntry[],
+  live: McpCatalogueEntry[],
+): McpCatalogueEntry[] {
+  return appendPage(appendPage([], matches), live);
+}
+
+const SLOW_CODES = new Set(["registry_timeout", "registry_unavailable", "timeout"]);
+
+/** Whether a failed search means the directory is slow or down, not that the query is wrong. */
+export function directorySlow(err: unknown): boolean {
+  return err instanceof ApiError && SLOW_CODES.has(err.code);
+}
+
+/**
  * The directory, browsed with no query and searched with one.
  *
  * A new term aborts the request it supersedes, so a slow earlier answer can
  * never land over a newer one, and the rows already on screen stay there until
  * the new answer replaces them. A failure is an outage with a reason, never an
- * exception.
+ * exception. A search answers at once from the popular rows already loaded, and
+ * keeps those on screen when the directory is too slow to answer it.
  */
 export function useMcpDirectory(
   client: OpenCompanyClient,
@@ -72,10 +118,18 @@ export function useMcpDirectory(
     previous: [],
   });
   const [attempt, setAttempt] = useState(0);
+  const [featured, setFeatured] = useState<McpCatalogueEntry[]>([]);
   const current = useRef<AbortController | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const featuredRef = useRef(featured);
+  featuredRef.current = featured;
   const term = query.trim();
+  const matches = useMemo(() => matchFeatured(featured, term), [featured, term]);
+
+  useEffect(() => {
+    setFeatured([]);
+  }, [client, company]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -84,7 +138,7 @@ export function useMcpDirectory(
     setState((prev) => ({
       kind: "loading",
       previous:
-        prev.kind === "ready"
+        prev.kind === "ready" || prev.kind === "fallback"
           ? prev.entries
           : prev.kind === "loading"
             ? prev.previous
@@ -101,9 +155,13 @@ export function useMcpDirectory(
               { signal: controller.signal },
             );
             if (controller.signal.aborted) return;
+            const entries = term
+              ? mergeFeatured(matchFeatured(featuredRef.current, term), found.servers)
+              : appendPage([], found.servers);
+            if (!term) setFeatured(entries);
             setState({
               kind: "ready",
-              entries: appendPage([], found.servers),
+              entries,
               page: found.page,
               totalPages: found.totalPages,
               loadingMore: false,
@@ -111,7 +169,12 @@ export function useMcpDirectory(
             });
           } catch (err) {
             if (controller.signal.aborted || isAbort(err)) return;
-            setState({ kind: "outage", outage: registryOutage(err) });
+            const popular = matchFeatured(featuredRef.current, term);
+            setState(
+              popular.length > 0 && directorySlow(err)
+                ? { kind: "fallback", entries: popular }
+                : { kind: "outage", outage: registryOutage(err) },
+            );
           }
         })();
       },
@@ -140,6 +203,7 @@ export function useMcpDirectory(
           { signal: controller.signal },
         );
         if (controller.signal.aborted) return;
+        if (!term) setFeatured((prev) => appendPage(prev, found.servers));
         setState((prev) =>
           prev.kind === "ready"
             ? {
@@ -173,5 +237,5 @@ export function useMcpDirectory(
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
-  return { state, loadMore, retry };
+  return { state, matches, loadMore, retry };
 }
