@@ -16,7 +16,7 @@ const registryApi = vi.hoisted(() => ({
 vi.mock("@/api/mcp-registry", () => registryApi);
 
 const { McpDiscover } = await import("@/views/connections/McpRegistryBrowser");
-const { appendPage } = await import("@/hooks/use-mcp-directory");
+const { appendPage, matchFeatured, mergeFeatured } = await import("@/hooks/use-mcp-directory");
 
 function entry(name: string): McpCatalogueEntry {
   return {
@@ -108,6 +108,32 @@ describe("appendPage", () => {
   it("drops rows already listed and duplicates inside the new page", () => {
     const merged = appendPage([entry("a"), entry("b")], [entry("b"), entry("c"), entry("c")]);
     expect(merged.map((e) => e.displayName)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("matchFeatured", () => {
+  const rows = [
+    { ...entry("Linear"), description: "Sync Notion pages into issues" },
+    { ...entry("Notion"), qualifiedName: "com.notion/mcp", description: "Pages and databases" },
+    entry("GitHub"),
+  ];
+
+  it("matches every word case-insensitively and ranks name matches first", () => {
+    expect(matchFeatured(rows, "NOTION").map((e) => e.displayName)).toEqual(["Notion", "Linear"]);
+    expect(matchFeatured(rows, "notion pages").map((e) => e.displayName)).toEqual(["Linear", "Notion"]);
+    expect(matchFeatured(rows, "notion github")).toEqual([]);
+  });
+
+  it("matches the qualified name and returns nothing for a blank query", () => {
+    expect(matchFeatured(rows, "com.notion").map((e) => e.displayName)).toEqual(["Notion"]);
+    expect(matchFeatured(rows, "   ")).toEqual([]);
+  });
+});
+
+describe("mergeFeatured", () => {
+  it("puts popular matches first and drops live duplicates by qualified name", () => {
+    const merged = mergeFeatured([entry("notion")], [entry("other"), entry("notion"), entry("other")]);
+    expect(merged.map((e) => e.displayName)).toEqual(["notion", "other"]);
   });
 });
 
@@ -214,6 +240,74 @@ describe("search", () => {
     await click("mcp-registry-retry");
     await settle();
     expect(names()).toEqual(["notion"]);
+  });
+});
+
+describe("popular matches", () => {
+  const timeout = () =>
+    new ApiError(504, "registry_timeout", "The MCP directory is taking too long to search right now.");
+
+  async function browse() {
+    registryApi.searchMcpRegistry.mockResolvedValueOnce(page(1, 1, ["notion", "github"]));
+    await render("");
+    await settle();
+  }
+
+  it("shows matching popular rows at once while the live search runs, then merges", async () => {
+    await browse();
+    const slow = deferred<McpCatalogueSearch>();
+    registryApi.searchMcpRegistry.mockReturnValueOnce(slow.promise);
+    await render("Notion");
+    await settle(0);
+
+    expect(testId("mcp-discover-searching")?.textContent).toContain("Searching for “Notion”");
+    expect(names()).toEqual(["notion"]);
+    expect(testId("mcp-discover-results")?.getAttribute("aria-busy")).toBeNull();
+
+    await settle();
+    await act(async () => {
+      slow.resolve(page(1, 1, ["notion-tools", "notion"]));
+    });
+    expect(names()).toEqual(["notion", "notion-tools"]);
+  });
+
+  it("keeps popular matches with a note and Retry when the search times out", async () => {
+    await browse();
+    registryApi.searchMcpRegistry
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce(page(1, 1, ["notion", "notion-tools"]));
+    await render("notion");
+    await settle();
+
+    expect(names()).toEqual(["notion"]);
+    expect(testId("mcp-discover-fallback")?.textContent).toContain("Showing popular matches");
+    expect(testId("mcp-registry-error")).toBeNull();
+
+    await click("mcp-discover-fallback-retry");
+    expect(names()).toEqual(["notion"]);
+    await settle();
+    expect(names()).toEqual(["notion", "notion-tools"]);
+    expect(testId("mcp-discover-fallback")).toBeNull();
+  });
+
+  it("shows the error state when no popular row matches", async () => {
+    await browse();
+    registryApi.searchMcpRegistry.mockRejectedValueOnce(timeout());
+    await render("zomato");
+    await settle();
+
+    expect(testId("mcp-discover-fallback")).toBeNull();
+    expect(testId("mcp-registry-error")?.textContent).toContain("Couldn't search for “zomato”");
+  });
+
+  it("shows the error state for a failure that is not the directory being slow", async () => {
+    await browse();
+    registryApi.searchMcpRegistry.mockRejectedValueOnce(new ApiError(400, "bad_request", "That query is not valid."));
+    await render("notion");
+    await settle();
+
+    expect(testId("mcp-discover-fallback")).toBeNull();
+    expect(testId("mcp-registry-error")?.textContent).toContain("That query is not valid.");
   });
 });
 
