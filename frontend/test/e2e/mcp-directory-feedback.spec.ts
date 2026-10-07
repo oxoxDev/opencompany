@@ -112,6 +112,7 @@ test("a search keeps earlier results on screen and says what it is searching for
   await expect(page.getByTestId("mcp-discover-searching")).toContainText("Searching for “notion”");
   await expect(cardNames(page)).toHaveText(["alpha", "beta"]);
   await expect(page.getByTestId("mcp-discover-results")).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByTestId("mcp-discover-results")).toHaveCSS("opacity", "0.5");
 
   await expect(cardNames(page)).toHaveText(["notion"], { timeout: 10_000 });
   await expect(page.getByTestId("mcp-discover-searching")).toHaveCount(0);
@@ -158,6 +159,43 @@ test("a timed-out search shows the typed copy and Retry searches again", async (
 
   await page.getByTestId("mcp-registry-retry").click();
   await expect(cardNames(page)).toHaveText(["notion"]);
+});
+
+test("a search shows popular matches at once and keeps them when the directory times out", async ({
+  page,
+}) => {
+  await mockRegistry(page, (q) => {
+    if (q === "") return { body: results(1, 1, ["Notion", "GitHub"]) };
+    if (q === "notion")
+      return [
+        { status: 504, body: TIMEOUT, delayMs: 2_500 },
+        { body: results(1, 1, ["Notion", "Notion Calendar"]) },
+      ];
+    return { status: 504, body: TIMEOUT };
+  });
+  await openDiscover(page);
+  await expect(cardNames(page)).toHaveText(["Notion", "GitHub"]);
+
+  await page.getByTestId("mcp-discover-search").fill("notion");
+  await expect(page.getByTestId("mcp-discover-searching")).toContainText("Searching for “notion”");
+  await expect(cardNames(page)).toHaveText(["Notion"]);
+  await expect(page.getByTestId("mcp-discover-results")).toHaveCSS("opacity", "1");
+
+  const note = page.getByTestId("mcp-discover-fallback");
+  await expect(note).toContainText("Showing popular matches — the MCP directory is slow right now.", {
+    timeout: 10_000,
+  });
+  await expect(cardNames(page)).toHaveText(["Notion"]);
+  await expect(page.getByTestId("mcp-registry-error")).toHaveCount(0);
+
+  await page.getByTestId("mcp-discover-fallback-retry").click();
+  await expect(cardNames(page)).toHaveText(["Notion", "Notion Calendar"]);
+  await expect(note).toHaveCount(0);
+
+  await page.getByTestId("mcp-discover-search").fill("zomato");
+  await expect(page.getByTestId("mcp-registry-error")).toContainText("Couldn't search for “zomato”");
+  await expect(page.getByTestId("mcp-registry-retry")).toBeVisible();
+  await expect(page.getByTestId("mcp-discover-fallback")).toHaveCount(0);
 });
 
 test("the entry pop-up will not install while its lookup has failed", async ({ page }) => {
