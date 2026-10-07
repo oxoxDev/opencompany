@@ -579,8 +579,8 @@ export function McpServersSection({
    * entry needs is collected on the row the install lands as — which is the one
    * control that writes to the store that install is actually dialled from.
    */
-  async function install(entry: McpCatalogueEntry) {
-    if (installing) return;
+  async function install(entry: McpCatalogueEntry): Promise<boolean> {
+    if (installing) return false;
     setInstalling(entry.qualifiedName);
     try {
       const res = await installMcpRegistryEntry(client, company, {
@@ -590,11 +590,13 @@ export function McpServersSection({
       if (after) setTested((t) => ({ ...t, [res.server.name]: after }));
       await refresh();
       setConnectFor(res.server.name);
+      return true;
     } catch (err) {
       const outage = registryOutage(err);
       toast.error(
         outage.kind === "unwired" ? REGISTRY_UNWIRED_NOTICE : outage.message,
       );
+      return false;
     } finally {
       setInstalling(null);
     }
@@ -1032,7 +1034,7 @@ export function McpServersSection({
           servers={servers}
           installing={installing}
           canManage={canManage}
-          onInstall={(entry) => void install(entry)}
+          onInstall={install}
         />
       ) : servers.length === 0 ? (
         <Card>
