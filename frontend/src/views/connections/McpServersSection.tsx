@@ -941,6 +941,7 @@ export function McpServersSection({
               : () => setPendingRemoval(openedServer)
           }
           onBack={closeDetail}
+          onAccessSaved={() => void refresh()}
         />
         {removalDialog}
         {connectDialog}
