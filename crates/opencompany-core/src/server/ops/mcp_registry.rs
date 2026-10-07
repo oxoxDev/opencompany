@@ -382,6 +382,12 @@ pub(super) fn removal_for(had_index_entry: bool, backed_by_install: bool) -> Rem
 #[cfg(any(feature = "mcp", test))]
 pub(in crate::server::ops) mod catalogue;
 
+#[cfg(any(feature = "mcp", test))]
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+mod failure;
+#[cfg(any(feature = "mcp", test))]
+#[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+mod icon_cache;
 #[cfg(feature = "mcp")]
 mod wired;
 #[cfg(feature = "mcp")]
