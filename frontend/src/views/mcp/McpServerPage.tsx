@@ -262,7 +262,7 @@ export function McpServerPage({
         </p>
       )}
 
-      {bridge !== "absent" && server.enabled && server.agentAccess !== undefined ? (
+      {bridge !== "absent" && server.agentAccess !== undefined ? (
         <McpAgentAccess
           client={client}
           company={company}
