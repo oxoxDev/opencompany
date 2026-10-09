@@ -31,7 +31,8 @@ pub(in crate::server::ops) struct RosterAccess {
 /// effective manifest agents, then overlay teammates whose id no manifest agent
 /// claims.
 pub(in crate::server::ops) fn roster_access(record: &CompanyRecord) -> Vec<RosterAccess> {
-    let allow = &record.manifest.tools.allow;
+    let allow = record.effective_tool_allow();
+    let allow = &allow;
     let effective_agents = record.effective_agents();
     let names = roster_display_names(&effective_agents, &record.overlay_agents);
     let entry = |id: &str, tools: Option<&[String]>| {
