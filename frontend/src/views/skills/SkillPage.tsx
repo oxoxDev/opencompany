@@ -195,7 +195,7 @@ export function SkillPage({
     );
     setSaving(false);
     onSaved();
-    const message = partialSaveMessage(outcome, (id) => id, "Scoped");
+    const message = partialSaveMessage(outcome, (id) => teammateName(id, team), "Scoped");
     if (message === null) {
       onClose();
       return;
